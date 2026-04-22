@@ -1,0 +1,62 @@
+version: 2
+
+project_name: esops
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: esops
+    main: ./cmd/esops
+    binary: esops
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/dj-wasabi/esops-go/internal/version.Version={{.Version}}
+      - -X github.com/dj-wasabi/esops-go/internal/version.Commit={{.Commit}}
+      - -X github.com/dj-wasabi/esops-go/internal/version.Date={{.Date}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: esops
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - id: esops
+    package_name: esops
+    vendor: esops
+    maintainer: esops contributors
+    description: Operations CLI for self-managed Elasticsearch and OpenSearch clusters
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'

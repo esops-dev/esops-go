@@ -1,0 +1,54 @@
+BINARY  := esops
+PKG     := github.com/dj-wasabi/esops-go
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+LDFLAGS := -s -w \
+  -X $(PKG)/internal/version.Version=$(VERSION) \
+  -X $(PKG)/internal/version.Commit=$(COMMIT) \
+  -X $(PKG)/internal/version.Date=$(DATE)
+
+GO      ?= go
+BIN_DIR := bin
+GOBIN   := $(shell $(GO) env GOPATH)/bin
+
+.DEFAULT_GOAL := help
+
+.PHONY: help build test test-integration lint security update tidy clean release-snapshot
+
+help: ## Show available targets
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+build: ## Build the esops binary into ./bin
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) ./cmd/esops
+
+test: ## Run unit tests with the race detector
+	$(GO) test -race -count=1 ./...
+
+test-integration: ## Run integration tests (build tag: integration)
+	$(GO) test -race -count=1 -tags=integration ./...
+
+lint: ## Run golangci-lint
+	@command -v golangci-lint >/dev/null || { echo "install: https://golangci-lint.run/welcome/install/"; exit 1; }
+	golangci-lint run
+
+security: ## Run gosec and govulncheck
+	@command -v gosec >/dev/null || $(GO) install github.com/securego/gosec/v2/cmd/gosec@latest
+	@command -v govulncheck >/dev/null || $(GO) install golang.org/x/vuln/cmd/govulncheck@latest
+	PATH="$(GOBIN):$$PATH" gosec ./...
+	PATH="$(GOBIN):$$PATH" govulncheck ./...
+
+update: ## Update module dependencies and tidy
+	$(GO) get -u ./...
+	$(GO) mod tidy
+
+tidy: ## go mod tidy
+	$(GO) mod tidy
+
+clean: ## Remove build artifacts
+	rm -rf $(BIN_DIR) dist
+
+release-snapshot: ## Build a local goreleaser snapshot
+	@command -v goreleaser >/dev/null || { echo "install: https://goreleaser.com/install/"; exit 1; }
+	goreleaser release --snapshot --clean

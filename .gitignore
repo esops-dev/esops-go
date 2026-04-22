@@ -3,3 +3,5 @@
 .env.*
 .envrc.local
 *.log
+/dist/
+/bin/
