@@ -115,7 +115,7 @@ func Resolve(explicit string) (string, error) {
 		return explicit, nil
 	}
 	if env := os.Getenv("ESOPS_CONFIG"); env != "" {
-		if _, err := os.Stat(env); err != nil {
+		if _, err := os.Stat(env); err != nil { // #nosec G304,G703 -- ESOPS_CONFIG points at the user's chosen config file
 			return "", fmt.Errorf("ESOPS_CONFIG=%q: %w", env, err)
 		}
 		return env, nil
