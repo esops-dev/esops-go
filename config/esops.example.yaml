@@ -1,1 +1,100 @@
-greeting: hello world
+# esops — example configuration.
+#
+# Default lookup paths (first match wins):
+#   $ESOPS_CONFIG                   (explicit override)
+#   ./esops.yaml                    (per-repo)
+#   $XDG_CONFIG_HOME/esops/config.yaml
+#   ~/.config/esops/config.yaml
+# Or pass explicitly:  esops --config /path/to/esops.yaml <cmd>
+#
+# Select a context per invocation:  esops --context local-os ops health
+# Or persist a default:             esops config use-context local-es
+#
+# Secret indirection — prefer these over inline plaintext:
+#   ${env:VAR_NAME}               read from environment
+#   ${file:/path/to/secret}       read from a file (trailing newline stripped)
+#   ${keyring:service/account}    read from OS keyring
+#                                 (macOS Keychain / libsecret / Windows Credential Manager)
+#
+# Inline plaintext passwords work but emit a load-time warning unless
+# ESOPS_ALLOW_PLAINTEXT_SECRETS=1 is set. World-readable config files
+# containing inline secrets are refused unless ESOPS_ALLOW_INSECURE_CONFIG=1.
+
+current-context: local-es
+
+# Global defaults. Each is overridable per-context and by CLI flags.
+defaults:
+  output: table                   # table | json | ndjson | yaml | wide
+  log_level: info                 # debug | info | warn | error
+  log_format: text                # text | json  (auto-switches to json under CI=true)
+  timeout: 30s
+  max_retries: 3
+  compress: false                 # gzip request/response bodies
+
+contexts:
+
+  # ── Local dev: Elasticsearch 2-node cluster, security disabled ──────────
+  local-es:
+    url: http://localhost:9200
+    # Both nodes are reachable; the upstream client discovers es02 from es01.
+    # List explicitly if you want to pin both (e.g. to bypass sniffing):
+    # urls:
+    #   - http://localhost:9200
+    #   - http://localhost:9201
+    protection: none
+    max_in_flight: 4              # client-side concurrency cap for this context
+
+  # ── Local dev: OpenSearch single-node, security plugin enabled ──────────
+  local-os:
+    url: http://localhost:9202
+    auth:
+      type: basic
+      username: admin
+      # Export first:  export ESOPS_LOCAL_OS_PASSWORD='EsopsDev123!'
+      password: ${env:ESOPS_LOCAL_OS_PASSWORD}
+      # Or inline for dev (needs ESOPS_ALLOW_PLAINTEXT_SECRETS=1):
+      # password: EsopsDev123!
+    protection: none
+
+  # ── Staging: API key in OS keyring; warns on destructive ops ────────────
+  # staging-eu:
+  #   url: https://es-staging-eu.example.com:9200
+  #   auth:
+  #     type: api_key
+  #     api_key: ${keyring:esops/staging-eu}
+  #   tls:
+  #     cacert: /etc/ssl/certs/company-ca.pem
+  #   protection: staging
+  #   max_in_flight: 2
+
+  # ── Production: mTLS client cert; requires --i-know-this-is-prod ────────
+  # prod-eu:
+  #   url: https://es-prod-eu.example.com:9200
+  #   auth:
+  #     type: mtls
+  #     client_cert: /etc/esops/prod-eu.crt
+  #     client_key:  /etc/esops/prod-eu.key
+  #   tls:
+  #     cacert: /etc/ssl/certs/company-ca.pem
+  #   protection: prod
+  #   max_in_flight: 1
+  #   timeout: 60s
+
+  # ── OpenSearch behind AWS IAM (self-managed on EC2/EKS, IRSA, etc.) ─────
+  # prod-aws-os:
+  #   url: https://vpc-os-prod.eu-west-1.es.amazonaws.com
+  #   auth:
+  #     type: sigv4
+  #     region: eu-west-1
+  #     service: es
+  #     # Credentials sourced from the standard AWS chain
+  #     # (env, shared config, IRSA, IMDS).
+  #   protection: prod
+
+  # ── Bearer token from a Kubernetes/Docker secret mount ──────────────────
+  # infra-scratch:
+  #   url: https://scratch.example.com:9200
+  #   auth:
+  #     type: bearer
+  #     token: ${file:/run/secrets/esops_scratch_token}
+  #   protection: none
