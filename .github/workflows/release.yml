@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v3
 
       - uses: anchore/sbom-action/download-syft@v0
 
