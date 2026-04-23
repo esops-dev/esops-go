@@ -1,0 +1,87 @@
+# Local development clusters for esops.
+#
+# - `es01` + `es02`: 2-node Elasticsearch 9.x cluster, no auth (security disabled).
+#   Exposed on http://localhost:9200 (es01) and http://localhost:9201 (es02).
+# - `os01`: single-node OpenSearch 3.x with the security plugin enabled.
+#   Exposed on http://localhost:9202, basic auth admin:EsopsDev123!
+#
+# Data is intentionally ephemeral (no volumes). `docker compose down` wipes state.
+# Bring up with: `make dev-up` (or `docker compose up -d --wait`).
+
+services:
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.3.3
+    container_name: esops-es01
+    environment:
+      - node.name=es01
+      - cluster.name=esops-dev-es
+      - discovery.seed_hosts=es02
+      - cluster.initial_master_nodes=es01,es02
+      - bootstrap.memory_lock=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.license.self_generated.type=basic
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health | grep -Eq '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  es02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.3.3
+    container_name: esops-es02
+    environment:
+      - node.name=es02
+      - cluster.name=esops-dev-es
+      - discovery.seed_hosts=es01
+      - cluster.initial_master_nodes=es01,es02
+      - bootstrap.memory_lock=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.license.self_generated.type=basic
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "9201:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health | grep -Eq '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  os01:
+    image: opensearchproject/opensearch:3.6.0
+    container_name: esops-os01
+    environment:
+      - cluster.name=esops-dev-os
+      - node.name=os01
+      - discovery.type=single-node
+      - bootstrap.memory_lock=false
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=EsopsDev123!
+      # Keep the security plugin (auth) but drop TLS on the HTTP layer so esops
+      # can hit it with plain basic-auth during local dev. Transport TLS stays on.
+      - plugins.security.ssl.http.enabled=false
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "9202:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u admin:EsopsDev123! http://localhost:9200/_cluster/health | grep -Eq '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+networks:
+  default:
+    name: esops-dev
