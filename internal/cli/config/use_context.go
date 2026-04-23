@@ -14,10 +14,28 @@ import (
 
 func useContextCommand() *cli.Command {
 	return &cli.Command{
-		Name:      "use-context",
-		Usage:     "Set the default context (writes to the config file)",
-		ArgsUsage: "NAME",
-		Action:    runUseContext,
+		Name:          "use-context",
+		Usage:         "Set the default context (writes to the config file)",
+		ArgsUsage:     "NAME",
+		Action:        runUseContext,
+		ShellComplete: completeContextNames,
+	}
+}
+
+// completeContextNames prints known contexts from the loaded config,
+// one per line, for shell tab-completion. Errors are swallowed — a
+// failed lookup during completion should silently offer nothing rather
+// than spew diagnostics into the user's shell.
+func completeContextNames(_ context.Context, cmd *cli.Command) {
+	if cmd.NArg() > 0 {
+		return
+	}
+	cfg, _, err := esopsconfig.LoadDefault(cmd.String("config"))
+	if err != nil {
+		return
+	}
+	for _, name := range sortedNames(cfg.Contexts) {
+		_, _ = fmt.Fprintln(cmd.Writer, name)
 	}
 }
 
