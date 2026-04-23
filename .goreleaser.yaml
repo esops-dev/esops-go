@@ -50,6 +50,41 @@ nfpms:
 checksum:
   name_template: 'checksums.txt'
 
+signs:
+  - id: cosign
+    cmd: cosign
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-certificate=${certificate}'
+      - '--output-signature=${signature}'
+      - '${artifact}'
+      - '--yes'
+    artifacts: checksum
+    output: true
+
+sboms:
+  - id: spdx
+    artifacts: archive
+    cmd: syft
+    args:
+      - scan
+      - '$artifact'
+      - '--output'
+      - 'spdx-json=$document'
+    documents:
+      - '${artifact}.spdx.sbom.json'
+  - id: cyclonedx
+    artifacts: archive
+    cmd: syft
+    args:
+      - scan
+      - '$artifact'
+      - '--output'
+      - 'cyclonedx-json=$document'
+    documents:
+      - '${artifact}.cdx.sbom.json'
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
