@@ -9,6 +9,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/dj-wasabi/esops-go/internal/cli/completion"
 	configcmd "github.com/dj-wasabi/esops-go/internal/cli/config"
 	"github.com/dj-wasabi/esops-go/internal/cli/ops"
 	"github.com/dj-wasabi/esops-go/internal/version"
@@ -18,10 +19,12 @@ import (
 // which maps them to stable exit codes.
 func Run(ctx context.Context, args []string) error {
 	app := &cli.Command{
-		Name:    "esops",
-		Usage:   "Operations CLI for self-managed Elasticsearch and OpenSearch clusters",
-		Version: version.Version,
-		Flags:   globalFlags(),
+		Name:                            "esops",
+		Usage:                           "Operations CLI for self-managed Elasticsearch and OpenSearch clusters",
+		Version:                         version.Version,
+		Flags:                           globalFlags(),
+		EnableShellCompletion:           true,
+		ConfigureShellCompletionCommand: completion.Configure,
 		Commands: []*cli.Command{
 			ops.Command(),
 			configcmd.Command(),
