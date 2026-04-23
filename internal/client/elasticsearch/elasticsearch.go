@@ -43,7 +43,7 @@ func (c *Client) Health(ctx context.Context) (types.ClusterHealth, error) {
 	if err != nil {
 		return types.ClusterHealth{}, fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return types.ClusterHealth{}, esopsclient.ErrAuth

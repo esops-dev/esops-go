@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -40,7 +41,7 @@ func getContextsCommand() *cli.Command {
 }
 
 func runGetContexts(_ context.Context, cmd *cli.Command) error {
-	cfg, err := esopsconfig.Load(cmd.String("config"))
+	cfg, _, err := esopsconfig.LoadDefault(cmd.String("config"))
 	if err != nil {
 		return err
 	}
@@ -50,6 +51,12 @@ func runGetContexts(_ context.Context, cmd *cli.Command) error {
 		return err
 	}
 
+	return renderContexts(os.Stdout, buildEntries(cfg), format)
+}
+
+// buildEntries projects a Config into the sorted, render-friendly slice
+// consumed by every output format.
+func buildEntries(cfg esopsconfig.Config) []contextEntry {
 	names := make([]string, 0, len(cfg.Contexts))
 	for n := range cfg.Contexts {
 		names = append(names, n)
@@ -71,32 +78,39 @@ func runGetContexts(_ context.Context, cmd *cli.Command) error {
 			CACert:      c.TLS.CACert,
 		})
 	}
+	return entries
+}
 
+// renderContexts dispatches to the per-format renderer. Taking an
+// io.Writer (rather than wiring os.Stdout in each branch) keeps the
+// action a one-liner and lets tests assert shape without subprocess
+// juggling.
+func renderContexts(w io.Writer, entries []contextEntry, format output.Format) error {
 	switch format {
 	case output.FormatJSON:
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(entries)
 	case output.FormatYAML:
-		enc := yaml.NewEncoder(os.Stdout)
+		enc := yaml.NewEncoder(w)
 		enc.SetIndent(2)
-		defer enc.Close()
+		defer func() { _ = enc.Close() }()
 		return enc.Encode(entries)
 	case output.FormatWide:
-		return renderTable(os.Stdout, entries, true)
+		return renderTable(w, entries, true)
 	case output.FormatTable, "":
-		return renderTable(os.Stdout, entries, false)
+		return renderTable(w, entries, false)
 	default:
 		return fmt.Errorf("unsupported output format %q", format)
 	}
 }
 
-func renderTable(w *os.File, entries []contextEntry, wide bool) error {
+func renderTable(w io.Writer, entries []contextEntry, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if wide {
-		fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tAUTH\tPROTECTION\tMAX_IN_FLIGHT\tTLS_INSECURE\tCACERT")
+		_, _ = fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tAUTH\tPROTECTION\tMAX_IN_FLIGHT\tTLS_INSECURE\tCACERT")
 	} else {
-		fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tAUTH\tPROTECTION")
+		_, _ = fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tAUTH\tPROTECTION")
 	}
 	for _, e := range entries {
 		marker := ""
@@ -123,10 +137,10 @@ func renderTable(w *os.File, entries []contextEntry, wide bool) error {
 			if cacert == "" {
 				cacert = "-"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%t\t%s\n",
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%t\t%s\n",
 				marker, e.Name, url, authType, prot, e.MaxInFlight, e.TLSInsecure, cacert)
 		} else {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", marker, e.Name, url, authType, prot)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", marker, e.Name, url, authType, prot)
 		}
 	}
 	return tw.Flush()

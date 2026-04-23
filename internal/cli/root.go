@@ -35,9 +35,7 @@ func globalFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:    "config",
 			Aliases: []string{"c"},
-			Usage:   "Path to YAML config file",
-			Sources: cli.EnvVars("ESOPS_CONFIG"),
-			Value:   "config/esops.example.yaml",
+			Usage:   "Path to YAML config file (overrides ESOPS_CONFIG and the XDG search)",
 		},
 		&cli.StringFlag{
 			Name:    "context",

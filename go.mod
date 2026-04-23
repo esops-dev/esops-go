@@ -1,6 +1,6 @@
 module github.com/dj-wasabi/esops-go
 
-go 1.25.0
+go 1.26.2
 
 require (
 	github.com/elastic/go-elasticsearch/v9 v9.3.2

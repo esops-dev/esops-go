@@ -7,10 +7,6 @@ import (
 )
 
 // HealthInspector exposes read-only cluster-health operations.
-//
-// Future commands (shards, allocation-explain, hot-threads) will add more
-// small capability interfaces alongside this one. Keep each interface
-// narrow — one god Client interface is explicitly disallowed by CLAUDE.md.
 type HealthInspector interface {
 	Health(ctx context.Context) (types.ClusterHealth, error)
 }

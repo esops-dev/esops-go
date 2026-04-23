@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -80,6 +82,67 @@ func (c Context) Addresses() []string {
 		return []string{c.URL}
 	}
 	return nil
+}
+
+// LoadDefault resolves the effective config path (honouring `explicit`
+// if non-empty, otherwise searching the standard lookup order from
+// Resolve) and loads it. Returns the resolved path alongside the
+// parsed Config so callers can reference it in messages or write-back.
+func LoadDefault(explicit string) (Config, string, error) {
+	path, err := Resolve(explicit)
+	if err != nil {
+		return Config{}, "", err
+	}
+	cfg, err := Load(path)
+	return cfg, path, err
+}
+
+// Resolve returns the effective config path. If `explicit` is
+// non-empty, it is returned unchanged — the caller asked for this
+// specific file. Otherwise the standard lookup order is searched and
+// the first existing path wins:
+//
+//  1. $ESOPS_CONFIG                               (env)
+//  2. ./esops.yaml                                (per-repo)
+//  3. $XDG_CONFIG_HOME/esops/config.yaml          (XDG)
+//  4. ~/.config/esops/config.yaml                 (XDG fallback)
+//
+// If none of those exist, an error listing the searched paths is
+// returned. $ESOPS_CONFIG must point at an existing file; a missing
+// env-specified file is an error rather than a silent fallthrough.
+func Resolve(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if env := os.Getenv("ESOPS_CONFIG"); env != "" {
+		if _, err := os.Stat(env); err != nil {
+			return "", fmt.Errorf("ESOPS_CONFIG=%q: %w", env, err)
+		}
+		return env, nil
+	}
+	candidates := searchPaths()
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("no esops config found; searched:\n  %s\npass --config PATH, set ESOPS_CONFIG, or create ~/.config/esops/config.yaml",
+		strings.Join(candidates, "\n  "))
+}
+
+// searchPaths returns the lookup candidates in resolution order,
+// excluding the $ESOPS_CONFIG env var (handled separately because a
+// set-but-missing env path is a hard error, not a fallthrough).
+func searchPaths() []string {
+	var paths []string
+	paths = append(paths, "esops.yaml")
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		paths = append(paths, filepath.Join(x, "esops", "config.yaml"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".config", "esops", "config.yaml"))
+	}
+	return paths
 }
 
 // Load reads and parses a config file and resolves secret indirections.

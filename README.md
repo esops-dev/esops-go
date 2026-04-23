@@ -13,7 +13,7 @@ both; the implementation branches where the products actually differ
 ## Install
 
 ```sh
-# Build from source (requires Go 1.23+)
+# Build from source (requires Go 1.26.2+)
 make build
 ./bin/esops --help
 ```

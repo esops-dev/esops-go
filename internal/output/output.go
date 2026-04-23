@@ -55,7 +55,7 @@ func Health(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, f Format
 	case FormatYAML:
 		enc := yaml.NewEncoder(w)
 		enc.SetIndent(2)
-		defer enc.Close()
+		defer func() { _ = enc.Close() }()
 		return enc.Encode(h)
 	case FormatWide:
 		return healthTable(w, h, info, true)
@@ -69,8 +69,8 @@ func Health(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, f Format
 func healthTable(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if wide {
-		fmt.Fprintln(tw, "NAME\tSTATUS\tDIALECT\tVERSION\tNODES\tDATA_NODES\tSHARDS\tPRIMARIES\tRELOC\tINIT\tUNASSIGNED\tPENDING\tACTIVE%")
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\n",
+		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tDIALECT\tVERSION\tNODES\tDATA_NODES\tSHARDS\tPRIMARIES\tRELOC\tINIT\tUNASSIGNED\tPENDING\tACTIVE%")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\n",
 			h.ClusterName, h.Status, info.Dialect, info.Version,
 			h.NumberOfNodes, h.NumberOfDataNodes,
 			h.ActiveShards, h.ActivePrimaryShards,
@@ -78,8 +78,8 @@ func healthTable(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, wid
 			h.NumberOfPendingTasks, h.ActiveShardsPercentAsNumber,
 		)
 	} else {
-		fmt.Fprintln(tw, "NAME\tSTATUS\tNODES\tDATA_NODES\tSHARDS\tUNASSIGNED\tPENDING")
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
+		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tNODES\tDATA_NODES\tSHARDS\tUNASSIGNED\tPENDING")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
 			h.ClusterName, h.Status,
 			h.NumberOfNodes, h.NumberOfDataNodes,
 			h.ActiveShards, h.UnassignedShards, h.NumberOfPendingTasks,

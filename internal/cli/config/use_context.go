@@ -27,9 +27,8 @@ func runUseContext(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("expected 1 argument (context name), got %d", args.Len())
 	}
 	name := args.First()
-	path := cmd.String("config")
 
-	cfg, err := esopsconfig.Load(path)
+	cfg, path, err := esopsconfig.LoadDefault(cmd.String("config"))
 	if err != nil {
 		return err
 	}
@@ -38,13 +37,13 @@ func runUseContext(_ context.Context, cmd *cli.Command) error {
 			name, path, strings.Join(sortedNames(cfg.Contexts), ", "))
 	}
 	if name == cfg.CurrentContext {
-		fmt.Fprintf(os.Stdout, "Already on context %q.\n", name)
+		_, _ = fmt.Fprintf(os.Stdout, "Already on context %q.\n", name)
 		return nil
 	}
 	if err := esopsconfig.SetCurrentContext(path, name); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "Switched to context %q.\n", name)
+	_, _ = fmt.Fprintf(os.Stdout, "Switched to context %q.\n", name)
 	return nil
 }
 

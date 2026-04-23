@@ -22,7 +22,7 @@ func healthCommand() *cli.Command {
 }
 
 func runHealth(ctx context.Context, cmd *cli.Command) error {
-	cfg, err := config.Load(cmd.String("config"))
+	cfg, _, err := config.LoadDefault(cmd.String("config"))
 	if err != nil {
 		return err
 	}

@@ -1,12 +1,4 @@
 // Package cluster wires a config.Context to a connected esops client.
-//
-// Placement note: CLAUDE.md sketches a single internal/client/ directory
-// holding factory.go, capabilities.go, and the per-product adapters.
-// That arrangement creates an import cycle because the adapters need to
-// reference sentinel errors defined in internal/client. We keep the
-// errors + capability interfaces in internal/client (the leaf) and put
-// the probe + factory here so they can import both the adapter
-// subpackages without cycling.
 package cluster
 
 import (

@@ -16,7 +16,8 @@ var currentContextLine = regexp.MustCompile(`(?m)^current-context:[^\n]*$`)
 // a new line is inserted at the top of the file. File permissions are
 // preserved by os.WriteFile.
 func SetCurrentContext(path, name string) error {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- path is the user-selected config file
+
 	if err != nil {
 		return fmt.Errorf("reading config %q: %w", path, err)
 	}
@@ -25,11 +26,11 @@ func SetCurrentContext(path, name string) error {
 	if currentContextLine.Match(raw) {
 		out = currentContextLine.ReplaceAll(raw, []byte(newLine))
 	} else {
-		prefix := []byte(newLine + "\n")
+		out = []byte(newLine + "\n")
 		if len(raw) > 0 && raw[0] != '\n' {
-			prefix = append(prefix, '\n')
+			out = append(out, '\n')
 		}
-		out = append(prefix, raw...)
+		out = append(out, raw...)
 	}
 	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return fmt.Errorf("writing config %q: %w", path, err)

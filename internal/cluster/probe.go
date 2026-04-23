@@ -47,7 +47,7 @@ func Probe(ctx context.Context, cc config.Context) (types.ClusterInfo, error) {
 	if err != nil {
 		return types.ClusterInfo{}, fmt.Errorf("%w: %v", client.ErrUnreachable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:

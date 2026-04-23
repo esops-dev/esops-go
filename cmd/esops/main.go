@@ -19,8 +19,6 @@ func main() {
 	os.Exit(exitCode(err))
 }
 
-// exitCode maps known sentinels to the stable codes documented in
-// CLAUDE.md §6. Unknown errors collapse to 1.
 func exitCode(err error) int {
 	switch {
 	case errors.Is(err, client.ErrUnreachable):
