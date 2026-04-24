@@ -35,6 +35,19 @@ type AllocationExplainer interface {
 	AllocationExplain(ctx context.Context, req types.AllocationExplainRequest) (types.AllocationExplanation, error)
 }
 
+// SecurityAuditor exposes the user/role surface of the cluster's
+// security model. The implementation is dialect-aware: ES reads the
+// native-realm endpoints under /_security/*; OS reads the security
+// plugin's admin API under /_plugins/_security/api/*. When the cluster
+// has no security in play at all (ES with xpack.security.enabled=false,
+// OS without the plugin), implementations return Status.Enabled=false
+// with an empty Users/Roles slice rather than an error — "no security"
+// is a valid audit outcome that operators want surfaced, not hidden
+// behind a failed command.
+type SecurityAuditor interface {
+	Audit(ctx context.Context) (types.SecurityReport, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -46,4 +59,5 @@ type Client struct {
 	Shards            ShardInspector
 	Indices           IndexInspector
 	AllocationExplain AllocationExplainer
+	Security          SecurityAuditor
 }

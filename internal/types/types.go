@@ -220,3 +220,90 @@ type AllocationDecider struct {
 	Decision    string `json:"decision"              yaml:"decision"`
 	Explanation string `json:"explanation,omitempty" yaml:"explanation,omitempty"`
 }
+
+// SecurityReport is what the cluster tells us about its identity model
+// — users and roles — plus a per-cluster status block. This is the
+// adapter's half of an `ops audit`; the TLS posture is added by the
+// business layer because it comes from the config.Context, not from
+// the cluster.
+//
+// When Status.Enabled is false (security disabled on ES, or plugin
+// absent on OS), Users and Roles are empty: the cluster has nothing
+// to report, not "we didn't look".
+type SecurityReport struct {
+	Status SecurityStatus `json:"status" yaml:"status"`
+	Users  []SecurityUser `json:"users,omitempty" yaml:"users,omitempty"`
+	Roles  []SecurityRole `json:"roles,omitempty" yaml:"roles,omitempty"`
+}
+
+// SecurityStatus captures whether the cluster exposes a security model
+// at all. Dialect is always set; Enabled is best-effort based on probing
+// the dialect-specific endpoint. Note carries a short explanation when
+// Enabled is false (e.g. "security disabled on this cluster") — surfaced
+// in the table so operators aren't left wondering.
+type SecurityStatus struct {
+	Dialect string `json:"dialect"         yaml:"dialect"`
+	Enabled bool   `json:"enabled"         yaml:"enabled"`
+	Note    string `json:"note,omitempty"  yaml:"note,omitempty"`
+}
+
+// SecurityUser is the normalised view of a user from the native realm
+// (Elasticsearch) or the internal-users database (OpenSearch).
+//
+// Roles are the product-native role names granted directly to the user.
+// On OpenSearch, users also carry BackendRoles — external identities
+// (LDAP groups, OIDC claims) that role mappings expand into product
+// roles. ES reports only Roles; the OS-only fields stay empty.
+//
+// Reserved flags a built-in entity — an operator auditing for "who did
+// somebody create here?" uses this column to scan past the defaults
+// quickly.
+type SecurityUser struct {
+	Username     string   `json:"username"                 yaml:"username"`
+	Enabled      bool     `json:"enabled"                  yaml:"enabled"`
+	Reserved     bool     `json:"reserved"                 yaml:"reserved"`
+	Roles        []string `json:"roles,omitempty"          yaml:"roles,omitempty"`
+	BackendRoles []string `json:"backend_roles,omitempty"  yaml:"backend_roles,omitempty"`
+	FullName     string   `json:"full_name,omitempty"      yaml:"full_name,omitempty"`
+	Email        string   `json:"email,omitempty"          yaml:"email,omitempty"`
+}
+
+// SecurityRole is the normalised view of a role definition. We surface
+// the cluster-level privilege list and the union of index patterns the
+// role grants any access to — enough to scan for "does anything have
+// `all` on `*`?" without drowning in per-action detail. The JSON/YAML
+// output keeps the fields stable; deeper introspection (per-action
+// permissions, field-level security, document-level security) is
+// deliberately left for a future `--deep` flag.
+type SecurityRole struct {
+	Name              string   `json:"name"                              yaml:"name"`
+	Reserved          bool     `json:"reserved"                          yaml:"reserved"`
+	ClusterPrivileges []string `json:"cluster_privileges,omitempty"      yaml:"cluster_privileges,omitempty"`
+	IndexPatterns     []string `json:"index_patterns,omitempty"          yaml:"index_patterns,omitempty"`
+	Description       string   `json:"description,omitempty"             yaml:"description,omitempty"`
+}
+
+// SecurityAudit is the full `ops audit` output: the cluster-side report
+// plus the TLS posture we can report from the context config without
+// asking the cluster anything. Keeping these together lets scripts read
+// one JSON blob rather than stitching two calls.
+type SecurityAudit struct {
+	TLS      TLSPosture     `json:"tls"      yaml:"tls"`
+	Status   SecurityStatus `json:"status"   yaml:"status"`
+	Users    []SecurityUser `json:"users,omitempty" yaml:"users,omitempty"`
+	Roles    []SecurityRole `json:"roles,omitempty" yaml:"roles,omitempty"`
+}
+
+// TLSPosture is what the context's connection looks like from the
+// client's side. Not from the cluster — the cluster can't tell us
+// whether we set `insecure: true` locally. Scheme is derived from the
+// first configured URL; InsecureSkipVerify and CACertSet surface the
+// two config knobs that weaken or strengthen trust; AuthType and
+// ClientCertSet surface which credential the tool is presenting.
+type TLSPosture struct {
+	Scheme             string `json:"scheme"                       yaml:"scheme"`
+	InsecureSkipVerify bool   `json:"insecure_skip_verify"         yaml:"insecure_skip_verify"`
+	CACertSet          bool   `json:"cacert_set"                   yaml:"cacert_set"`
+	AuthType           string `json:"auth_type"                    yaml:"auth_type"`
+	ClientCertSet      bool   `json:"client_cert_set"              yaml:"client_cert_set"`
+}

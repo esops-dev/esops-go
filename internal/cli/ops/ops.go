@@ -16,6 +16,7 @@ func Command() *cli.Command {
 			healthCommand(),
 			shardsCommand(),
 			allocationExplainCommand(),
+			auditCommand(),
 		},
 	}
 }

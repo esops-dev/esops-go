@@ -623,3 +623,119 @@ func TestAllocationExplain_rejectsNDJSON(t *testing.T) {
 		t.Fatal("AllocationExplain(ndjson) should return 'not supported'")
 	}
 }
+
+func sampleAudit() types.SecurityAudit {
+	return types.SecurityAudit{
+		TLS: types.TLSPosture{
+			Scheme:   "https",
+			AuthType: "basic",
+		},
+		Status: types.SecurityStatus{
+			Dialect: "elasticsearch",
+			Enabled: true,
+		},
+		Users: []types.SecurityUser{
+			{Username: "app-writer", Enabled: true, Reserved: false, Roles: []string{"writer"}},
+			{Username: "elastic", Enabled: true, Reserved: true, Roles: []string{"superuser"}, FullName: "built-in"},
+		},
+		Roles: []types.SecurityRole{
+			{Name: "writer", Reserved: false, ClusterPrivileges: []string{"monitor"}, IndexPatterns: []string{"logs-*"}},
+			{Name: "superuser", Reserved: true, ClusterPrivileges: []string{"all"}, IndexPatterns: []string{"*"}, Description: "god mode"},
+		},
+	}
+}
+
+func TestAudit_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, sampleAudit(), output.FormatJSON); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	for _, field := range []string{"tls", "status", "users", "roles"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in JSON output:\n%s", field, buf.String())
+		}
+	}
+}
+
+func TestAudit_yamlIsValid(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, sampleAudit(), output.FormatYAML); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid YAML: %v\noutput: %s", err, buf.String())
+	}
+	if _, ok := m["tls"]; !ok {
+		t.Errorf("yaml missing tls:\n%s", buf.String())
+	}
+}
+
+func TestAudit_tableHasAllSections(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, sampleAudit(), output.FormatTable); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"TLS", "SECURITY", "USERS", "ROLES", "elastic", "superuser", "app-writer"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAudit_tableSuppressesUsersAndRolesWhenDisabled(t *testing.T) {
+	a := sampleAudit()
+	a.Status.Enabled = false
+	a.Status.Note = "security is disabled on this cluster"
+	a.Users = nil
+	a.Roles = nil
+
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, a, output.FormatTable); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "security is disabled") {
+		t.Errorf("table missing disabled note:\n%s", out)
+	}
+	if strings.Contains(out, "USERS") || strings.Contains(out, "ROLES") {
+		t.Errorf("disabled-security table must not emit USERS/ROLES sections:\n%s", out)
+	}
+}
+
+func TestAudit_wideShowsBackendRolesAndDescription(t *testing.T) {
+	a := sampleAudit()
+	a.Users[0].BackendRoles = []string{"ldap-writers"}
+
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, a, output.FormatWide); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"BACKEND_ROLES", "ldap-writers", "DESCRIPTION", "god mode"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAudit_rejectsUnknownFormat(t *testing.T) {
+	err := output.Audit(&bytes.Buffer{}, sampleAudit(), output.Format("bogus"))
+	if err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestAudit_rejectsNDJSON(t *testing.T) {
+	// Single-report command (one object, not a stream): renderer refuses
+	// ndjson so the cmdsetup allowlist has a backstop.
+	err := output.Audit(&bytes.Buffer{}, sampleAudit(), output.FormatNDJSON)
+	if err == nil {
+		t.Fatal("Audit(ndjson) should return 'not supported'")
+	}
+}

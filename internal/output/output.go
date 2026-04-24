@@ -131,6 +131,137 @@ func Indices(w io.Writer, indices []types.Index, f Format) error {
 	}
 }
 
+// Audit renders a SecurityAudit — the full `ops audit` view. JSON/YAML
+// emit the whole struct as one object so scripts can read TLS, status,
+// users, and roles in a single parse. The table format is a four-section
+// layout (TLS, status, users, roles) read top-to-bottom; wide adds
+// backend-role / email / description columns that are too wide for the
+// default view.
+//
+// When the cluster reports security as disabled, the users and roles
+// sections are suppressed — the status line carries the explanation.
+func Audit(w io.Writer, a types.SecurityAudit, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(a)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(a)
+	case FormatWide:
+		return auditTable(w, a, true)
+	case FormatTable, "":
+		return auditTable(w, a, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func auditTable(w io.Writer, a types.SecurityAudit, wide bool) error {
+	// Section 1: TLS posture. Four compact key/value lines; no tabwriter
+	// needed — the short keys keep alignment without it.
+	_, _ = fmt.Fprintln(w, "TLS")
+	_, _ = fmt.Fprintf(w, "  scheme:     %s\n", a.TLS.Scheme)
+	_, _ = fmt.Fprintf(w, "  insecure:   %t\n", a.TLS.InsecureSkipVerify)
+	_, _ = fmt.Fprintf(w, "  cacert_set: %t\n", a.TLS.CACertSet)
+	_, _ = fmt.Fprintf(w, "  auth:       %s\n", a.TLS.AuthType)
+	if a.TLS.ClientCertSet {
+		_, _ = fmt.Fprintln(w, "  client_cert: true")
+	}
+
+	// Section 2: cluster-side status. When security is disabled the note
+	// is the load-bearing piece; elevate it so the operator can't miss it.
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "SECURITY")
+	_, _ = fmt.Fprintf(w, "  dialect:  %s\n", a.Status.Dialect)
+	_, _ = fmt.Fprintf(w, "  enabled:  %t\n", a.Status.Enabled)
+	if a.Status.Note != "" {
+		_, _ = fmt.Fprintf(w, "  note:     %s\n", a.Status.Note)
+	}
+
+	if !a.Status.Enabled {
+		return nil
+	}
+
+	// Section 3: users table. Reserved flag rendered as "res" — short
+	// enough to keep the table narrow, obvious in meaning from context.
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "USERS")
+	uw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(uw, "USERNAME\tENABLED\tRESERVED\tROLES\tBACKEND_ROLES\tFULL_NAME\tEMAIL")
+	} else {
+		_, _ = fmt.Fprintln(uw, "USERNAME\tENABLED\tRESERVED\tROLES")
+	}
+	for _, u := range a.Users {
+		if wide {
+			_, _ = fmt.Fprintf(uw, "%s\t%t\t%t\t%s\t%s\t%s\t%s\n",
+				u.Username, u.Enabled, u.Reserved,
+				joinOrDash(u.Roles), joinOrDash(u.BackendRoles),
+				dashIfEmpty(u.FullName), dashIfEmpty(u.Email))
+		} else {
+			_, _ = fmt.Fprintf(uw, "%s\t%t\t%t\t%s\n",
+				u.Username, u.Enabled, u.Reserved, joinOrDash(u.Roles))
+		}
+	}
+	if err := uw.Flush(); err != nil {
+		return err
+	}
+
+	// Section 4: roles table. The cluster privileges column is truncated
+	// in the default view since "all" is often short but cluster lists
+	// can be long; wide mode shows the full list.
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "ROLES")
+	rw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(rw, "NAME\tRESERVED\tCLUSTER\tINDEX_PATTERNS\tDESCRIPTION")
+	} else {
+		_, _ = fmt.Fprintln(rw, "NAME\tRESERVED\tCLUSTER\tINDEX_PATTERNS")
+	}
+	for _, r := range a.Roles {
+		if wide {
+			_, _ = fmt.Fprintf(rw, "%s\t%t\t%s\t%s\t%s\n",
+				r.Name, r.Reserved,
+				joinOrDash(r.ClusterPrivileges), joinOrDash(r.IndexPatterns),
+				dashIfEmpty(r.Description))
+		} else {
+			_, _ = fmt.Fprintf(rw, "%s\t%t\t%s\t%s\n",
+				r.Name, r.Reserved,
+				truncate(joinOrDash(r.ClusterPrivileges), 40),
+				truncate(joinOrDash(r.IndexPatterns), 40))
+		}
+	}
+	return rw.Flush()
+}
+
+func joinOrDash(s []string) string {
+	if len(s) == 0 {
+		return "-"
+	}
+	return strings.Join(s, ",")
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// truncate clips a cell's content to n runes, appending an ellipsis when
+// it had to cut — so the default table stays one row per entity but the
+// operator still sees that there's more behind `-o wide`.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
+}
+
 // AllocationExplain renders a single allocation-explain record. JSON/YAML
 // emit the neutral AllocationExplanation shape directly; the table format
 // is a two-section layout operators read top-to-bottom: a header block

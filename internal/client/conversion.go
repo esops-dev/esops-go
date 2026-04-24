@@ -73,3 +73,29 @@ func Int64PtrOrZero(p *int) int64 {
 	}
 	return int64(*p)
 }
+
+// UniqueStrings returns the input in its original order with duplicates
+// removed. Empty entries are dropped. Returns nil (not []string{}) for
+// nil or all-empty input so callers that serialise with omitempty stay
+// tidy.
+func UniqueStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
