@@ -14,19 +14,23 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+
+	"github.com/dj-wasabi/esops-go/internal/logging"
 )
 
 // Config is the parsed esops configuration file.
 type Config struct {
-	CurrentContext string              `koanf:"current-context"`
-	Defaults       Defaults            `koanf:"defaults"`
-	Contexts       map[string]Context  `koanf:"contexts"`
+	CurrentContext string             `koanf:"current-context"`
+	Defaults       Defaults           `koanf:"defaults"`
+	Contexts       map[string]Context `koanf:"contexts"`
 }
 
 // Defaults apply to every context unless overridden.
@@ -145,8 +149,12 @@ func searchPaths() []string {
 	return paths
 }
 
-// Load reads and parses a config file and resolves secret indirections.
-func Load(path string) (Config, error) {
+// Parse reads and unmarshals a config file without running the safety
+// checks performed by Load. Intended for early-stage callers (the CLI
+// Before hook reading Defaults for logger init) where warnings can't
+// yet reach an initialised logger — Load will re-check and surface them
+// when the command action runs.
+func Parse(path string) (Config, error) {
 	k := koanf.New(".")
 	if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
 		return Config{}, fmt.Errorf("loading config %q: %w", path, err)
@@ -156,6 +164,103 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parsing config: %w", err)
 	}
 	return cfg, nil
+}
+
+// Load reads and parses a config file and runs safety checks:
+// world-readable files with inline plaintext secrets are refused unless
+// ESOPS_ALLOW_INSECURE_CONFIG=1; plaintext secrets in any mode produce a
+// warning unless ESOPS_ALLOW_PLAINTEXT_SECRETS=1.
+func Load(path string) (Config, error) {
+	cfg, err := Parse(path)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := checkSafety(path, cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// checkSafety enforces the two CLAUDE.md §8 rules:
+//   - world-readable file + inline plaintext secret = refuse (unless
+//     ESOPS_ALLOW_INSECURE_CONFIG=1)
+//   - inline plaintext secret in any mode = warn (unless
+//     ESOPS_ALLOW_PLAINTEXT_SECRETS=1)
+//
+// It inspects the *parsed* (pre-resolution) config so ${env:...} etc.
+// are recognised as indirection and not flagged as plaintext.
+func checkSafety(path string, cfg Config) error {
+	plaintextCtxs := contextsWithPlaintextSecret(cfg)
+	worldReadable, err := isWorldReadable(path)
+	if err != nil {
+		return fmt.Errorf("checking config permissions: %w", err)
+	}
+
+	if worldReadable && len(plaintextCtxs) > 0 {
+		if os.Getenv("ESOPS_ALLOW_INSECURE_CONFIG") != "1" {
+			return fmt.Errorf(
+				"config %q is world-readable and contains inline plaintext secrets for context(s) [%s]; "+
+					"tighten permissions (chmod 600 %s) or set ESOPS_ALLOW_INSECURE_CONFIG=1 to override",
+				path, strings.Join(plaintextCtxs, ", "), path)
+		}
+		logging.Logger().Warn("config.insecure",
+			"path", path,
+			"contexts", plaintextCtxs,
+			"hint", "world-readable with plaintext secrets; override via ESOPS_ALLOW_INSECURE_CONFIG=1",
+		)
+		return nil
+	}
+
+	if len(plaintextCtxs) > 0 && os.Getenv("ESOPS_ALLOW_PLAINTEXT_SECRETS") != "1" {
+		logging.Logger().Warn("config.plaintext_secrets",
+			"path", path,
+			"contexts", plaintextCtxs,
+			"hint", "use ${env:VAR} indirection, or set ESOPS_ALLOW_PLAINTEXT_SECRETS=1 to silence",
+		)
+	}
+	return nil
+}
+
+// isWorldReadable reports whether the file at path is readable by
+// others (the low `r` bit of the mode). On Windows, where os.Stat's
+// mode does not reflect real ACLs, always returns false — the check
+// would be misleading.
+func isWorldReadable(path string) (bool, error) {
+	if runtime.GOOS == "windows" {
+		return false, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().Perm()&0o004 != 0, nil
+}
+
+// contextsWithPlaintextSecret returns the names of contexts whose auth
+// block contains at least one non-empty secret field that isn't an
+// indirection reference. Sorted for stable warnings.
+func contextsWithPlaintextSecret(cfg Config) []string {
+	var names []string
+	for name, c := range cfg.Contexts {
+		if hasPlaintextSecret(c.Auth) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func hasPlaintextSecret(a Auth) bool {
+	for _, v := range []string{a.Password, a.APIKey, a.Token, a.ClientKey} {
+		if v == "" {
+			continue
+		}
+		if secretRef.MatchString(v) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // ResolveContext returns the effective Context for `name`, or for

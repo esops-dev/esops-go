@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
-	"strings"
 
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
@@ -44,19 +42,12 @@ func New(addrs []string, username, password string, httpTransport http.RoundTrip
 func (c *Client) Health(ctx context.Context) (types.ClusterHealth, error) {
 	resp, err := c.api.Cluster.Health(c.api.Cluster.Health.WithContext(ctx))
 	if err != nil {
-		return types.ClusterHealth{}, fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
+		return types.ClusterHealth{}, esopsclient.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return types.ClusterHealth{}, esopsclient.ErrAuth
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return types.ClusterHealth{}, esopsclient.ErrForbidden
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return types.ClusterHealth{}, fmt.Errorf("cluster health returned HTTP %d: %s", resp.StatusCode, string(body))
+	if err := classifyResponse("cluster health", resp.StatusCode, resp.Body); err != nil {
+		return types.ClusterHealth{}, err
 	}
 
 	var h types.ClusterHealth
@@ -106,24 +97,17 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 		cs.WithH(shardsColumns...),
 	}
 	if filter.Index != "" {
-		opts = append(opts, cs.WithIndex(splitCSV(filter.Index)...))
+		opts = append(opts, cs.WithIndex(esopsclient.SplitCSV(filter.Index)...))
 	}
 
 	resp, err := c.api.Cat.Shards(opts...)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
+		return nil, esopsclient.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, esopsclient.ErrAuth
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return nil, esopsclient.ErrForbidden
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("cat shards returned HTTP %d: %s", resp.StatusCode, string(body))
+	if err := classifyResponse("cat shards", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
 	}
 
 	var rows []catShardsRow
@@ -135,17 +119,17 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 	for _, r := range rows {
 		out = append(out, types.Shard{
 			Index:             r.Index,
-			Shard:             atoiOrZero(r.Shard),
+			Shard:             esopsclient.AtoiOrZero(r.Shard),
 			Primary:           r.Prirep == "p",
 			State:             r.State,
-			Docs:              atoi64Ptr(r.Docs),
-			StoreBytes:        atoi64Ptr(r.Store),
-			Node:              derefString(r.Node),
-			IP:                derefString(r.IP),
-			UnassignedReason:  derefString(r.UnassignedReason),
-			UnassignedAt:      derefString(r.UnassignedAt),
-			UnassignedFor:     derefString(r.UnassignedFor),
-			UnassignedDetails: derefString(r.UnassignedDetails),
+			Docs:              esopsclient.Atoi64Ptr(r.Docs),
+			StoreBytes:        esopsclient.Atoi64Ptr(r.Store),
+			Node:              esopsclient.DerefString(r.Node),
+			IP:                esopsclient.DerefString(r.IP),
+			UnassignedReason:  esopsclient.DerefString(r.UnassignedReason),
+			UnassignedAt:      esopsclient.DerefString(r.UnassignedAt),
+			UnassignedFor:     esopsclient.DerefString(r.UnassignedFor),
+			UnassignedDetails: esopsclient.DerefString(r.UnassignedDetails),
 		})
 	}
 	return out, nil
@@ -156,17 +140,17 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 // closed or freshly-created indices. Fields not present in the `h=`
 // selector are simply absent from the JSON payload.
 type catIndicesRow struct {
-	Health             string  `json:"health"`
-	Status             string  `json:"status"`
-	Index              string  `json:"index"`
-	UUID               string  `json:"uuid"`
-	Pri                *string `json:"pri"`
-	Rep                *string `json:"rep"`
-	DocsCount          *string `json:"docs.count"`
-	DocsDeleted        *string `json:"docs.deleted"`
-	StoreSize          *string `json:"store.size"`
-	PriStoreSize       *string `json:"pri.store.size"`
-	CreationDate       *string `json:"creation.date"`
+	Health       string  `json:"health"`
+	Status       string  `json:"status"`
+	Index        string  `json:"index"`
+	UUID         string  `json:"uuid"`
+	Pri          *string `json:"pri"`
+	Rep          *string `json:"rep"`
+	DocsCount    *string `json:"docs.count"`
+	DocsDeleted  *string `json:"docs.deleted"`
+	StoreSize    *string `json:"store.size"`
+	PriStoreSize *string `json:"pri.store.size"`
+	CreationDate *string `json:"creation.date"`
 }
 
 // indicesColumns is the explicit h= selector for /_cat/indices. _cat
@@ -196,24 +180,17 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 		ci.WithExpandWildcards("open,closed,hidden"),
 	}
 	if filter.Index != "" {
-		opts = append(opts, ci.WithIndex(splitCSV(filter.Index)...))
+		opts = append(opts, ci.WithIndex(esopsclient.SplitCSV(filter.Index)...))
 	}
 
 	resp, err := c.api.Cat.Indices(opts...)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
+		return nil, esopsclient.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, esopsclient.ErrAuth
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return nil, esopsclient.ErrForbidden
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("cat indices returned HTTP %d: %s", resp.StatusCode, string(body))
+	if err := classifyResponse("cat indices", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
 	}
 
 	var rows []catIndicesRow
@@ -228,45 +205,29 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 			UUID:               r.UUID,
 			Health:             r.Health,
 			Status:             r.Status,
-			Primaries:          atoiOrZero(derefString(r.Pri)),
-			Replicas:           atoiOrZero(derefString(r.Rep)),
-			DocsCount:          atoi64Ptr(r.DocsCount),
-			DocsDeleted:        atoi64Ptr(r.DocsDeleted),
-			StoreBytes:         atoi64Ptr(r.StoreSize),
-			PrimaryStoreBytes:  atoi64Ptr(r.PriStoreSize),
-			CreationDateMillis: atoi64Ptr(r.CreationDate),
+			Primaries:          esopsclient.AtoiOrZero(esopsclient.DerefString(r.Pri)),
+			Replicas:           esopsclient.AtoiOrZero(esopsclient.DerefString(r.Rep)),
+			DocsCount:          esopsclient.Atoi64Ptr(r.DocsCount),
+			DocsDeleted:        esopsclient.Atoi64Ptr(r.DocsDeleted),
+			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PriStoreSize),
+			CreationDateMillis: esopsclient.Atoi64Ptr(r.CreationDate),
 		})
 	}
 	return out, nil
 }
 
-func splitCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
+// classifyResponse reads a drained response body only on error so the
+// happy path keeps streaming straight into json.Decoder. Returns nil
+// for 2xx/3xx; ErrAuth/ErrForbidden for 401/403; a wrapped error for
+// other 4xx/5xx with the body in the message.
+func classifyResponse(op string, status int, body io.Reader) error {
+	if status < 400 {
+		return nil
 	}
-	return out
-}
-
-func atoiOrZero(s string) int {
-	n, _ := strconv.Atoi(s)
-	return n
-}
-
-func atoi64Ptr(p *string) int64 {
-	if p == nil {
-		return 0
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return esopsclient.ClassifyStatus(op, status, nil)
 	}
-	n, _ := strconv.ParseInt(*p, 10, 64)
-	return n
-}
-
-func derefString(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
+	raw, _ := io.ReadAll(body)
+	return esopsclient.ClassifyStatus(op, status, raw)
 }
