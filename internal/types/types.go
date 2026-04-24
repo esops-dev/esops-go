@@ -3,6 +3,8 @@
 // types are the boundary that keeps the rest of the codebase dialect-agnostic.
 package types
 
+import "time"
+
 // Dialect identifies which product answered a cluster probe.
 type Dialect string
 
@@ -306,4 +308,91 @@ type TLSPosture struct {
 	CACertSet          bool   `json:"cacert_set"                   yaml:"cacert_set"`
 	AuthType           string `json:"auth_type"                    yaml:"auth_type"`
 	ClientCertSet      bool   `json:"client_cert_set"              yaml:"client_cert_set"`
+}
+
+// HotThreadsRequest narrows a HotThreadsInspector.HotThreads call. A
+// zero value is "all nodes, cluster defaults" — matching how the raw
+// endpoint behaves with no query params. Pointer-typed knobs are nil
+// when unset so the adapter can tell "user didn't pass --threads" apart
+// from "user passed --threads 0".
+//
+// Type is the sampling dimension ("cpu", "wait", "block", "mem"). ES
+// supports all four; OpenSearch's typed client only wires CPU. When the
+// user requests a non-cpu Type on OS the adapter returns ErrUnsupported
+// so the limitation surfaces loudly instead of silently falling back to
+// CPU sampling.
+type HotThreadsRequest struct {
+	Nodes             []string
+	Threads           *int
+	Interval          time.Duration
+	Snapshots         *int
+	Type              string
+	IgnoreIdleThreads *bool
+}
+
+// HotThreads is the sampled-thread view from /_nodes/hot_threads. The
+// response is a free-form text blob — boundaries between nodes are
+// marked by "::: {node_name}..." headers that ship with the cluster, not
+// a stable schema. Keeping Text opaque avoids baking version-specific
+// parsing into esops.
+type HotThreads struct {
+	Text string `json:"text" yaml:"text"`
+}
+
+// DiagRequest carries the knobs `ops diag` exposes: the opt-in
+// collectors that make bundles noticeably bigger (mappings), produce
+// noise by default (idle threads), or are policy-sensitive (slow-log
+// settings). Future knobs (redact extra fields, output path, parallelism)
+// go here.
+type DiagRequest struct {
+	IncludeSlowlog     bool
+	IncludeMappings    bool
+	IncludeIdleThreads bool
+}
+
+// DiagArtifact is one file in the bundle: a single cluster endpoint's
+// response, captured verbatim from the cluster. Bundles are human-shared
+// at support-ticket time — keeping the cluster's raw bytes rather than
+// esops's normalised view means Elastic/OpenSearch support can parse
+// them with their own tools without second-guessing what we reshaped.
+//
+// Status carries the HTTP status code the cluster returned. A 404 on a
+// dialect-specific endpoint (ILM on OS, ISM on ES) is expected data, not
+// an error — the manifest records the status so a reviewer knows the
+// probe happened and came back empty. Error is populated only when the
+// collector never reached the cluster (transport error before we had a
+// response); in that case Body is empty.
+type DiagArtifact struct {
+	Name   string `json:"name"              yaml:"name"`
+	Path   string `json:"path"              yaml:"path"`
+	File   string `json:"file"              yaml:"file"`
+	Status int    `json:"status"            yaml:"status"`
+	Bytes  int    `json:"bytes"             yaml:"bytes"`
+	Error  string `json:"error,omitempty"   yaml:"error,omitempty"`
+	Body   []byte `json:"-"                 yaml:"-"`
+}
+
+// DiagManifest is the top-level index written to manifest.json in every
+// bundle. It summarises what was collected, against which cluster, and
+// by which tool version — everything a reviewer needs to orient inside
+// the tarball without having to guess at filenames.
+//
+// Deliberately excluded: the cluster URL, credentials, auth config. The
+// manifest is the single place in the bundle where those fields could
+// leak; "don't write them" is the one-line redaction rule.
+type DiagManifest struct {
+	Tool      string             `json:"tool"        yaml:"tool"`
+	Version   string             `json:"version"     yaml:"version"`
+	Commit    string             `json:"commit,omitempty" yaml:"commit,omitempty"`
+	CreatedAt string             `json:"created_at"  yaml:"created_at"`
+	Cluster   DiagClusterSummary `json:"cluster"     yaml:"cluster"`
+	Artifacts []DiagArtifact     `json:"artifacts"   yaml:"artifacts"`
+}
+
+// DiagClusterSummary is the cluster-side identity captured in the manifest:
+// the product dialect, its reported cluster name, and the version. No URL.
+type DiagClusterSummary struct {
+	Name    string `json:"name,omitempty"  yaml:"name,omitempty"`
+	Dialect string `json:"dialect"         yaml:"dialect"`
+	Version string `json:"version"         yaml:"version"`
 }

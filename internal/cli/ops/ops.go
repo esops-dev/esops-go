@@ -17,6 +17,8 @@ func Command() *cli.Command {
 			shardsCommand(),
 			allocationExplainCommand(),
 			auditCommand(),
+			diagCommand(),
+			hotThreadsCommand(),
 		},
 	}
 }

@@ -372,6 +372,87 @@ func toAllocationExplanation(w allocationExplainWire) types.AllocationExplanatio
 	return out
 }
 
+// HotThreads implements client.HotThreadsInspector against the typed
+// Nodes.HotThreads endpoint. The response is text, not JSON — we read it
+// verbatim into types.HotThreads.Text so the caller sees exactly what
+// the cluster produced. All four sampling types (cpu/wait/block/mem)
+// pass through.
+func (c *Client) HotThreads(ctx context.Context, req types.HotThreadsRequest) (types.HotThreads, error) {
+	ht := c.api.Nodes.HotThreads
+	opts := []func(*esapi.NodesHotThreadsRequest){
+		ht.WithContext(ctx),
+	}
+	if len(req.Nodes) > 0 {
+		opts = append(opts, ht.WithNodeID(req.Nodes...))
+	}
+	if req.Threads != nil {
+		opts = append(opts, ht.WithThreads(*req.Threads))
+	}
+	if req.Interval > 0 {
+		opts = append(opts, ht.WithInterval(req.Interval))
+	}
+	if req.Snapshots != nil {
+		opts = append(opts, ht.WithSnapshots(*req.Snapshots))
+	}
+	if req.Type != "" {
+		opts = append(opts, ht.WithDocumentType(req.Type))
+	}
+	if req.IgnoreIdleThreads != nil {
+		opts = append(opts, ht.WithIgnoreIdleThreads(*req.IgnoreIdleThreads))
+	}
+
+	resp, err := c.api.Nodes.HotThreads(opts...)
+	if err != nil {
+		return types.HotThreads{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("nodes hot_threads", resp.StatusCode, resp.Body); err != nil {
+		return types.HotThreads{}, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return types.HotThreads{}, errors.Join(errors.New("reading hot_threads response"), err)
+	}
+	return types.HotThreads{Text: string(body)}, nil
+}
+
+// DoGET implements client.ClusterDiagnoser by delegating to the ES
+// client's BaseClient.Perform — the same path every typed API method
+// uses, so auth/transport/retries match the rest of the adapter. The
+// product-check header is already satisfied by the first typed call in
+// the process, so raw calls layered on after a successful probe don't
+// re-trigger it.
+//
+// 401/403 are translated to the sentinel errors. Transport failures are
+// wrapped with ErrUnreachable. Other non-2xx responses return the body
+// and status so the diag collector can record them verbatim — a 404 on
+// /_plugins/_ism/... is expected data on ES, not a bundle failure.
+func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.api.Perform(req)
+	if err != nil {
+		return nil, 0, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return body, resp.StatusCode, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return body, resp.StatusCode, esopsclient.ErrForbidden
+	}
+	return body, resp.StatusCode, nil
+}
+
 // classifyResponse reads a drained response body only on error so the
 // happy path keeps streaming straight into json.Decoder. Returns nil
 // for 2xx/3xx; ErrAuth/ErrForbidden for 401/403; a wrapped error for

@@ -48,6 +48,32 @@ type SecurityAuditor interface {
 	Audit(ctx context.Context) (types.SecurityReport, error)
 }
 
+// HotThreadsInspector wraps /_nodes/hot_threads — the JVM introspection
+// endpoint both dialects expose in the same text format. Response bodies
+// are not JSON and the schema is an implementation detail of the
+// cluster's code; the capability keeps it as an opaque Text blob so the
+// upstream format can change without touching esops.
+type HotThreadsInspector interface {
+	HotThreads(ctx context.Context, req types.HotThreadsRequest) (types.HotThreads, error)
+}
+
+// ClusterDiagnoser performs raw HTTP GETs against cluster endpoints for
+// the `ops diag` bundle. Purposely minimal — a generic raw-HTTP escape
+// hatch is a power tool we only want the diag collector using, so the
+// rest of the codebase keeps talking through dialect-aware capabilities.
+//
+// Errors:
+//   - transport failures (DNS, TCP, TLS): wrapped ErrUnreachable
+//   - HTTP 401: ErrAuth
+//   - HTTP 403: ErrForbidden
+//   - any other non-2xx: returned as (body, status, nil) so the caller
+//     can record the body in the bundle. A missing-endpoint 404 on a
+//     dialect-specific path (ILM on OS, ISM on ES) is expected data,
+//     not a bundle-breaking error.
+type ClusterDiagnoser interface {
+	DoGET(ctx context.Context, path string) (body []byte, status int, err error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -60,4 +86,6 @@ type Client struct {
 	Indices           IndexInspector
 	AllocationExplain AllocationExplainer
 	Security          SecurityAuditor
+	Diag              ClusterDiagnoser
+	HotThreads        HotThreadsInspector
 }

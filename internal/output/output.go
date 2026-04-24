@@ -131,6 +131,43 @@ func Indices(w io.Writer, indices []types.Index, f Format) error {
 	}
 }
 
+// HotThreads renders a /_nodes/hot_threads response. The cluster returns
+// a free-form text block (per-node "::: {node}..." headers followed by
+// stack samples) that is the canonical diagnostic format — operators
+// read it by eye and paste it into tickets. We preserve it verbatim for
+// table/wide; JSON/YAML wrap it in {"text": "..."} so the scripted
+// contract ("JSON output is a single object") holds without pretending
+// to parse a schema that is really an implementation detail of the
+// cluster's own hot-threads printer.
+func HotThreads(w io.Writer, h types.HotThreads, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(h)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(h)
+	case FormatTable, FormatWide, "":
+		_, err := io.WriteString(w, h.Text)
+		if err != nil {
+			return err
+		}
+		// Guarantee the output ends on a newline so shell prompts don't
+		// land in the middle of the last stack frame. The cluster already
+		// usually adds one, but some older ES versions skip the trailing
+		// newline on empty responses.
+		if !strings.HasSuffix(h.Text, "\n") {
+			_, err = io.WriteString(w, "\n")
+		}
+		return err
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
 // Audit renders a SecurityAudit — the full `ops audit` view. JSON/YAML
 // emit the whole struct as one object so scripts can read TLS, status,
 // users, and roles in a single parse. The table format is a four-section
