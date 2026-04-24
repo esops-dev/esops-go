@@ -83,3 +83,54 @@ type ShardFilter struct {
 	Node  string    // exact node name; "" = any
 	Role  ShardRole // primary/replica filter
 }
+
+// Index is a neutral view of a single index, normalised from /_cat/indices
+// on both ES and OS. Health/Status come straight from the cluster:
+// Health is "green"/"yellow"/"red" and Status is "open"/"close".
+// StoreBytes and PrimaryStoreBytes are bytes (we ask for bytes=b);
+// PrimaryStoreBytes is the primary-only subset of StoreBytes.
+//
+// Counts and sizes can be zero for just-created indices or closed indices
+// where the cluster has not reported them yet — the cluster is the source
+// of truth. CreationDateMillis is the unix-ms timestamp of the cluster's
+// index metadata, 0 when unavailable (e.g. closed indices on older
+// dialects).
+type Index struct {
+	Name               string `json:"name"                            yaml:"name"`
+	UUID               string `json:"uuid,omitempty"                  yaml:"uuid,omitempty"`
+	Health             string `json:"health"                          yaml:"health"`
+	Status             string `json:"status"                          yaml:"status"`
+	Primaries          int    `json:"primaries"                       yaml:"primaries"`
+	Replicas           int    `json:"replicas"                        yaml:"replicas"`
+	DocsCount          int64  `json:"docs_count"                      yaml:"docs_count"`
+	DocsDeleted        int64  `json:"docs_deleted"                    yaml:"docs_deleted"`
+	StoreBytes         int64  `json:"store_bytes"                     yaml:"store_bytes"`
+	PrimaryStoreBytes  int64  `json:"primary_store_bytes"             yaml:"primary_store_bytes"`
+	CreationDateMillis int64  `json:"creation_date_millis,omitempty"  yaml:"creation_date_millis,omitempty"`
+}
+
+// IndexSort is the sort key applied to IndexFilter results. The cluster
+// response is unordered, so sort is applied business-side regardless of
+// dialect.
+type IndexSort int
+
+const (
+	IndexSortName IndexSort = iota // alphabetical by index name (default)
+	IndexSortSize                  // StoreBytes descending (largest first)
+	IndexSortDocs                  // DocsCount descending (most docs first)
+)
+
+// IndexFilter narrows an IndexInspector.Indices call. Zero value = "all
+// non-hidden indices, sorted by name ascending".
+//
+// Index patterns are forwarded to the cluster as path parameters.
+// Health/Status/Hidden are enforced client-side so behaviour is identical
+// across dialects — the OS and ES cat APIs treat hidden indices slightly
+// differently and we want one story at the CLI surface.
+type IndexFilter struct {
+	Index  string    // comma-separated index patterns; "" = "*"
+	Health string    // "green"|"yellow"|"red"; "" = any; case-insensitive
+	Status string    // "open"|"close"; "" = any; case-insensitive
+	Hidden bool      // include hidden (dot-prefixed / system) indices
+	Sort   IndexSort // ordering applied after filtering
+}

@@ -36,13 +36,14 @@ func sampleInfo() types.ClusterInfo {
 
 func TestParse_knownFormats(t *testing.T) {
 	cases := map[string]output.Format{
-		"":      output.FormatTable,
-		"table": output.FormatTable,
-		"TABLE": output.FormatTable,
-		"json":  output.FormatJSON,
-		"yaml":  output.FormatYAML,
-		"yml":   output.FormatYAML,
-		"wide":  output.FormatWide,
+		"":       output.FormatTable,
+		"table":  output.FormatTable,
+		"TABLE":  output.FormatTable,
+		"json":   output.FormatJSON,
+		"yaml":   output.FormatYAML,
+		"yml":    output.FormatYAML,
+		"wide":   output.FormatWide,
+		"ndjson": output.FormatNDJSON,
 	}
 	for in, want := range cases {
 		got, err := output.Parse(in)
@@ -63,10 +64,14 @@ func TestParse_rejectsUnknown(t *testing.T) {
 	}
 }
 
-func TestParse_ndjsonNotImplemented(t *testing.T) {
-	_, err := output.Parse("ndjson")
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("err = %v, want 'not implemented'", err)
+func TestParse_ndjsonAccepted(t *testing.T) {
+	// Parsing now accepts ndjson; per-command renderers decide whether
+	// they support it. `Health` does not, and must return an error.
+	if got, err := output.Parse("ndjson"); err != nil || got != output.FormatNDJSON {
+		t.Errorf("Parse(ndjson) = %v, %v; want FormatNDJSON, nil", got, err)
+	}
+	if err := output.Health(&bytes.Buffer{}, sampleHealth(), sampleInfo(), output.FormatNDJSON); err == nil {
+		t.Error("Health(ndjson) should return 'not supported'")
 	}
 }
 
@@ -291,6 +296,140 @@ func TestShards_emptyTableStillPrintsHeader(t *testing.T) {
 		t.Fatalf("Shards: %v", err)
 	}
 	if !strings.Contains(buf.String(), "INDEX") {
+		t.Errorf("empty result should still render header:\n%s", buf.String())
+	}
+}
+
+func sampleIndexRows() []types.Index {
+	return []types.Index{
+		{
+			Name: "logs", UUID: "abc123", Health: "yellow", Status: "open",
+			Primaries: 3, Replicas: 1, DocsCount: 5000, DocsDeleted: 12,
+			StoreBytes: 10 * 1024 * 1024, PrimaryStoreBytes: 5 * 1024 * 1024,
+			CreationDateMillis: 1714003200000, // 2024-04-25T04:00:00Z
+		},
+		{
+			Name: "users", Health: "green", Status: "open",
+			Primaries: 1, Replicas: 1, DocsCount: 42, StoreBytes: 4096,
+			PrimaryStoreBytes: 2048,
+		},
+	}
+}
+
+func TestIndices_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Indices(&buf, sampleIndexRows(), output.FormatJSON); err != nil {
+		t.Fatalf("Indices: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for _, field := range []string{"name", "health", "status", "primaries", "replicas", "docs_count", "store_bytes", "primary_store_bytes"} {
+		if _, ok := rows[0][field]; !ok {
+			t.Errorf("missing field %q in JSON row: %+v", field, rows[0])
+		}
+	}
+	// omitempty on uuid: users row has no UUID, so the key must be absent.
+	if _, ok := rows[1]["uuid"]; ok {
+		t.Errorf("users row should not have uuid: %+v", rows[1])
+	}
+	// omitempty on creation_date_millis: users row has no creation date.
+	if _, ok := rows[1]["creation_date_millis"]; ok {
+		t.Errorf("users row should not have creation_date_millis: %+v", rows[1])
+	}
+}
+
+func TestIndices_yamlIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Indices(&buf, sampleIndexRows(), output.FormatYAML); err != nil {
+		t.Fatalf("Indices: %v", err)
+	}
+	var rows []map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid YAML: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+}
+
+func TestIndices_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Indices(&buf, sampleIndexRows(), output.FormatNDJSON); err != nil {
+		t.Fatalf("Indices: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), buf.String())
+	}
+	for i, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Errorf("line %d is not valid JSON: %v\n%s", i, err, line)
+		}
+	}
+}
+
+func TestIndices_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Indices(&buf, sampleIndexRows(), output.FormatTable); err != nil {
+		t.Fatalf("Indices: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "HEALTH", "STATUS", "PRI", "REP", "DOCS", "STORE", "logs", "users", "yellow", "green"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndices_wideIncludesDeletedUUIDAndCreated(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Indices(&buf, sampleIndexRows(), output.FormatWide); err != nil {
+		t.Fatalf("Indices: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"DELETED", "UUID", "CREATED", "PRI_STORE", "abc123", "2024-04-25"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide output missing %q:\n%s", want, out)
+		}
+	}
+	// Rows without UUID/creation render "-" so the table stays rectangular.
+	// tabwriter expands tabs to spaces, so the `users` row should end
+	// with a dash (CREATED column) and contain a dash for the UUID column.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	var usersLine string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "users") {
+			usersLine = line
+			break
+		}
+	}
+	if usersLine == "" {
+		t.Fatalf("no users row in wide output:\n%s", out)
+	}
+	if !strings.HasSuffix(usersLine, "-") {
+		t.Errorf("users row must end with '-' for empty CREATED column:\n%s", usersLine)
+	}
+}
+
+func TestIndices_rejectsUnknownFormat(t *testing.T) {
+	err := output.Indices(&bytes.Buffer{}, sampleIndexRows(), output.Format("bogus"))
+	if err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestIndices_emptyTableStillPrintsHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Indices(&buf, nil, output.FormatTable); err != nil {
+		t.Fatalf("Indices: %v", err)
+	}
+	if !strings.Contains(buf.String(), "NAME") {
 		t.Errorf("empty result should still render header:\n%s", buf.String())
 	}
 }

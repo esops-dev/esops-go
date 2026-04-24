@@ -48,8 +48,9 @@ esops --url http://localhost:9200 ops health # bypass the config (v0.1.0: still 
 | `-o json`        | Scripts. Stable field names, matches the `/_cluster/health` shape. |
 | `-o yaml`        | Same shape as JSON, for config-style consumers.    |
 
-NDJSON is not yet implemented and will come with the first streaming
-command (`index list`).
+NDJSON is implemented for commands that emit lots of rows; see
+[`index list`](./index.md). `ops health` is a single-record command, so
+it does not offer `-o ndjson`.
 
 ### Exit codes
 

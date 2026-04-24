@@ -108,6 +108,69 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 	return out, nil
 }
 
+// Indices implements client.IndexInspector. The OS v4 client returns a
+// fully-typed CatIndexResp — we pick just the fields esops surfaces and
+// drop the long tail of per-operation counters upstream exposes. bytes=b
+// forces raw-bytes store sizes regardless of OS version.
+func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error) {
+	req := &osapi.CatIndicesReq{
+		Params: osapi.CatIndicesParams{
+			Bytes: "b",
+			// OS expand_wildcards accepts a comma-separated list via a single
+			// string; we pass "open,closed,hidden" to mirror the ES adapter
+			// so hidden/closed filtering stays a business-layer concern.
+			ExpandWildcards: "open,closed,hidden",
+			H: []string{
+				"health", "status", "index", "uuid",
+				"pri", "rep",
+				"docs.count", "docs.deleted",
+				"store.size", "pri.store.size",
+				"creation.date",
+			},
+		},
+	}
+	if filter.Index != "" {
+		req.Indices = splitCSV(filter.Index)
+	}
+
+	resp, err := c.api.Cat.Indices(ctx, req)
+	if err != nil {
+		return nil, classifyIndicesError(err, resp)
+	}
+
+	out := make([]types.Index, 0, len(resp.Indices))
+	for _, r := range resp.Indices {
+		out = append(out, types.Index{
+			Name:               r.Index,
+			UUID:               r.UUID,
+			Health:             r.Health,
+			Status:             r.Status,
+			Primaries:          intPtrOrZero(r.Primary),
+			Replicas:           intPtrOrZero(r.Replica),
+			DocsCount:          int64PtrOrZero(r.DocsCount),
+			DocsDeleted:        int64PtrOrZero(r.DocDeleted),
+			StoreBytes:         atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  atoi64Ptr(r.PrimaryStoreSize),
+			CreationDateMillis: int64(r.CreationDate),
+		})
+	}
+	return out, nil
+}
+
+func intPtrOrZero(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func int64PtrOrZero(p *int) int64 {
+	if p == nil {
+		return 0
+	}
+	return int64(*p)
+}
+
 func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := parts[:0]
@@ -135,6 +198,21 @@ func derefString(p *string) string {
 }
 
 func classifyShardsError(err error, resp *osapi.CatShardsResp) error {
+	if resp != nil {
+		r := resp.Inspect().Response
+		if r != nil {
+			switch r.StatusCode {
+			case http.StatusUnauthorized:
+				return esopsclient.ErrAuth
+			case http.StatusForbidden:
+				return esopsclient.ErrForbidden
+			}
+		}
+	}
+	return fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
+}
+
+func classifyIndicesError(err error, resp *osapi.CatIndicesResp) error {
 	if resp != nil {
 		r := resp.Inspect().Response
 		if r != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/completion"
 	configcmd "github.com/dj-wasabi/esops-go/internal/cli/config"
+	indexcmd "github.com/dj-wasabi/esops-go/internal/cli/index"
 	"github.com/dj-wasabi/esops-go/internal/cli/ops"
 	"github.com/dj-wasabi/esops-go/internal/version"
 )
@@ -27,6 +28,7 @@ func Run(ctx context.Context, args []string) error {
 		ConfigureShellCompletionCommand: completion.Configure,
 		Commands: []*cli.Command{
 			ops.Command(),
+			indexcmd.Command(),
 			configcmd.Command(),
 		},
 	}
@@ -65,7 +67,7 @@ func globalFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:    "output",
 			Aliases: []string{"o"},
-			Usage:   "Output format: table | json | yaml | wide",
+			Usage:   "Output format: table | json | ndjson | yaml | wide",
 			Value:   "table",
 		},
 		&cli.StringFlag{
