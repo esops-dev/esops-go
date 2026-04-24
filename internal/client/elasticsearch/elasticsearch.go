@@ -4,6 +4,7 @@
 package elasticsearch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -215,6 +216,159 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 		})
 	}
 	return out, nil
+}
+
+// allocationExplainWire mirrors the /_cluster/allocation/explain payload.
+// ES 9's typedapi exposes a fully-typed Response, but its types.Duration
+// values are custom and awkward to consume outside the package; decoding
+// into a local shape keeps the adapter boundary clean (no upstream types
+// leaking out) and makes the OS/ES contract trivially identical.
+type allocationExplainWire struct {
+	Index                  string                          `json:"index"`
+	Shard                  int                             `json:"shard"`
+	Primary                bool                            `json:"primary"`
+	CurrentState           string                          `json:"current_state"`
+	CurrentNode            *allocationNodeWire             `json:"current_node,omitempty"`
+	UnassignedInfo         *allocationUnassignedWire       `json:"unassigned_info,omitempty"`
+	CanAllocate            string                          `json:"can_allocate,omitempty"`
+	AllocateExplanation    string                          `json:"allocate_explanation,omitempty"`
+	CanRemainOnCurrentNode string                          `json:"can_remain_on_current_node,omitempty"`
+	CanRebalanceCluster    string                          `json:"can_rebalance_cluster,omitempty"`
+	MoveExplanation        string                          `json:"move_explanation,omitempty"`
+	RebalanceExplanation   string                          `json:"rebalance_explanation,omitempty"`
+	Note                   string                          `json:"note,omitempty"`
+	NodeAllocationDecisions []allocationNodeDecisionWire   `json:"node_allocation_decisions,omitempty"`
+}
+
+type allocationNodeWire struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	TransportAddress string `json:"transport_address,omitempty"`
+	WeightRanking    int    `json:"weight_ranking,omitempty"`
+}
+
+type allocationUnassignedWire struct {
+	Reason               string `json:"reason"`
+	At                   string `json:"at,omitempty"`
+	Details              string `json:"details,omitempty"`
+	LastAllocationStatus string `json:"last_allocation_status,omitempty"`
+}
+
+type allocationNodeDecisionWire struct {
+	NodeID           string                  `json:"node_id"`
+	NodeName         string                  `json:"node_name"`
+	TransportAddress string                  `json:"transport_address,omitempty"`
+	NodeDecision     string                  `json:"node_decision"`
+	WeightRanking    int                     `json:"weight_ranking,omitempty"`
+	Deciders         []allocationDeciderWire `json:"deciders,omitempty"`
+}
+
+type allocationDeciderWire struct {
+	Decider     string `json:"decider"`
+	Decision    string `json:"decision"`
+	Explanation string `json:"explanation,omitempty"`
+}
+
+// AllocationExplain implements client.AllocationExplainer.
+//
+// Shape: when req.Index is empty we send no body — the cluster picks any
+// unassigned shard it finds, matching the raw endpoint's default. When
+// set, we pass {index, shard, primary} as the body; include_disk_info /
+// include_yes_decisions go on as query params.
+func (c *Client) AllocationExplain(ctx context.Context, req types.AllocationExplainRequest) (types.AllocationExplanation, error) {
+	ae := c.api.Cluster.AllocationExplain
+	opts := []func(*esapi.ClusterAllocationExplainRequest){
+		ae.WithContext(ctx),
+	}
+	if req.IncludeDiskInfo {
+		opts = append(opts, ae.WithIncludeDiskInfo(true))
+	}
+	if req.IncludeYesDecisions {
+		opts = append(opts, ae.WithIncludeYesDecisions(true))
+	}
+	if req.Index != "" {
+		body, err := json.Marshal(map[string]any{
+			"index":   req.Index,
+			"shard":   req.Shard,
+			"primary": req.Primary,
+		})
+		if err != nil {
+			return types.AllocationExplanation{}, fmt.Errorf("encoding allocation explain request: %w", err)
+		}
+		opts = append(opts, ae.WithBody(bytes.NewReader(body)))
+	}
+
+	resp, err := c.api.Cluster.AllocationExplain(opts...)
+	if err != nil {
+		return types.AllocationExplanation{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("allocation explain", resp.StatusCode, resp.Body); err != nil {
+		return types.AllocationExplanation{}, err
+	}
+
+	var wire allocationExplainWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.AllocationExplanation{}, errors.Join(errors.New("decoding allocation explain response"), err)
+	}
+	return toAllocationExplanation(wire), nil
+}
+
+func toAllocationExplanation(w allocationExplainWire) types.AllocationExplanation {
+	out := types.AllocationExplanation{
+		Index:                  w.Index,
+		Shard:                  w.Shard,
+		Primary:                w.Primary,
+		CurrentState:           w.CurrentState,
+		CanAllocate:            w.CanAllocate,
+		AllocateExplanation:    w.AllocateExplanation,
+		CanRemainOnCurrentNode: w.CanRemainOnCurrentNode,
+		CanRebalanceCluster:    w.CanRebalanceCluster,
+		MoveExplanation:        w.MoveExplanation,
+		RebalanceExplanation:   w.RebalanceExplanation,
+		Note:                   w.Note,
+	}
+	if w.CurrentNode != nil {
+		out.CurrentNode = &types.AllocationNode{
+			ID:               w.CurrentNode.ID,
+			Name:             w.CurrentNode.Name,
+			TransportAddress: w.CurrentNode.TransportAddress,
+			WeightRanking:    w.CurrentNode.WeightRanking,
+		}
+	}
+	if w.UnassignedInfo != nil {
+		out.UnassignedInfo = &types.AllocationUnassigned{
+			Reason:               w.UnassignedInfo.Reason,
+			At:                   w.UnassignedInfo.At,
+			Details:              w.UnassignedInfo.Details,
+			LastAllocationStatus: w.UnassignedInfo.LastAllocationStatus,
+		}
+	}
+	if len(w.NodeAllocationDecisions) > 0 {
+		out.NodeDecisions = make([]types.AllocationNodeDecision, 0, len(w.NodeAllocationDecisions))
+		for _, d := range w.NodeAllocationDecisions {
+			nd := types.AllocationNodeDecision{
+				NodeID:           d.NodeID,
+				NodeName:         d.NodeName,
+				TransportAddress: d.TransportAddress,
+				NodeDecision:     d.NodeDecision,
+				WeightRanking:    d.WeightRanking,
+			}
+			if len(d.Deciders) > 0 {
+				nd.Deciders = make([]types.AllocationDecider, 0, len(d.Deciders))
+				for _, dd := range d.Deciders {
+					nd.Deciders = append(nd.Deciders, types.AllocationDecider{
+						Decider:     dd.Decider,
+						Decision:    dd.Decision,
+						Explanation: dd.Explanation,
+					})
+				}
+			}
+			out.NodeDecisions = append(out.NodeDecisions, nd)
+		}
+	}
+	return out
 }
 
 // classifyResponse reads a drained response body only on error so the

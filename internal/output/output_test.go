@@ -433,3 +433,193 @@ func TestIndices_emptyTableStillPrintsHeader(t *testing.T) {
 		t.Errorf("empty result should still render header:\n%s", buf.String())
 	}
 }
+
+func sampleAssignedExplanation() types.AllocationExplanation {
+	return types.AllocationExplanation{
+		Index:        "esops-users",
+		Shard:        0,
+		Primary:      true,
+		CurrentState: "started",
+		CurrentNode: &types.AllocationNode{
+			ID: "node-a", Name: "es01", TransportAddress: "10.0.0.1:9300", WeightRanking: 1,
+		},
+		CanRemainOnCurrentNode: "yes",
+		CanRebalanceCluster:    "yes",
+		RebalanceExplanation:   "shard is in a well-balanced location",
+		NodeDecisions: []types.AllocationNodeDecision{
+			{
+				NodeID: "node-b", NodeName: "es02", NodeDecision: "worse_balance", WeightRanking: 1,
+				Deciders: []types.AllocationDecider{
+					{Decider: "same_shard", Decision: "YES", Explanation: "no copy here"},
+					{Decider: "disk_threshold", Decision: "YES", Explanation: "plenty of disk"},
+				},
+			},
+		},
+	}
+}
+
+func sampleUnassignedExplanation() types.AllocationExplanation {
+	return types.AllocationExplanation{
+		Index:        "test-unassigned",
+		Shard:        0,
+		Primary:      false,
+		CurrentState: "unassigned",
+		UnassignedInfo: &types.AllocationUnassigned{
+			Reason:               "INDEX_CREATED",
+			At:                   "2026-04-24T10:00:00.000Z",
+			LastAllocationStatus: "no_attempt",
+		},
+		CanAllocate:         "no",
+		AllocateExplanation: "cannot allocate because all nodes already hold a copy",
+		NodeDecisions: []types.AllocationNodeDecision{
+			{
+				NodeID: "node-a", NodeName: "es01", NodeDecision: "no",
+				Deciders: []types.AllocationDecider{
+					{Decider: "same_shard", Decision: "NO", Explanation: "copy already here"},
+				},
+			},
+			{
+				NodeID: "node-b", NodeName: "es02", NodeDecision: "no",
+				Deciders: []types.AllocationDecider{
+					{Decider: "same_shard", Decision: "NO", Explanation: "copy already here"},
+				},
+			},
+		},
+	}
+}
+
+func TestAllocationExplain_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleAssignedExplanation(), output.FormatJSON); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, field := range []string{"index", "shard", "primary", "current_state", "current_node", "node_decisions"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in JSON: %+v", field, m)
+		}
+	}
+	// omitempty on unassigned_info for assigned shards.
+	if _, ok := m["unassigned_info"]; ok {
+		t.Errorf("assigned shard must omit unassigned_info: %+v", m)
+	}
+}
+
+func TestAllocationExplain_jsonUnassignedCarriesReason(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleUnassignedExplanation(), output.FormatJSON); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	// omitempty on current_node for unassigned shards.
+	if _, ok := m["current_node"]; ok {
+		t.Errorf("unassigned shard must omit current_node: %+v", m)
+	}
+	unassigned, ok := m["unassigned_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("unassigned_info missing or wrong type: %+v", m["unassigned_info"])
+	}
+	if unassigned["reason"] != "INDEX_CREATED" {
+		t.Errorf("reason = %v, want INDEX_CREATED", unassigned["reason"])
+	}
+	if m["can_allocate"] != "no" {
+		t.Errorf("can_allocate = %v, want no", m["can_allocate"])
+	}
+}
+
+func TestAllocationExplain_yamlIsValid(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleAssignedExplanation(), output.FormatYAML); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid YAML: %v\n%s", err, buf.String())
+	}
+	if m["index"] != "esops-users" {
+		t.Errorf("index = %v, want esops-users", m["index"])
+	}
+}
+
+func TestAllocationExplain_tableAssignedShardShowsCurrentNode(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleAssignedExplanation(), output.FormatTable); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"INDEX", "SHARD", "ROLE", "STATE", "NODE", "es01", "started", "REBALANCE:", "es02", "worse_balance"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAllocationExplain_tableOmitsYesDecidersInDefault(t *testing.T) {
+	// The default node-decision row summarises only NO/THROTTLE rulings —
+	// the assigned-shard fixture has two YES deciders, so the summary
+	// cell must render "-", not the decider names.
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleAssignedExplanation(), output.FormatTable); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "same_shard=yes") || strings.Contains(out, "disk_threshold=yes") {
+		t.Errorf("default table must compress YES deciders:\n%s", out)
+	}
+}
+
+func TestAllocationExplain_tableUnassignedShowsReasonAndExplanation(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleUnassignedExplanation(), output.FormatTable); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"unassigned",
+		"UNASSIGNED_REASON: INDEX_CREATED",
+		"LAST_STATUS:       no_attempt",
+		"EXPLANATION: cannot allocate",
+		// NO-ruling deciders are surfaced in the default summary.
+		"same_shard=no",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unassigned table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAllocationExplain_wideExpandsDeciders(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.AllocationExplain(&buf, sampleAssignedExplanation(), output.FormatWide); err != nil {
+		t.Fatalf("AllocationExplain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"DECIDER", "RULING", "EXPLANATION", "same_shard", "disk_threshold", "YES", "no copy here", "plenty of disk"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAllocationExplain_rejectsUnknownFormat(t *testing.T) {
+	err := output.AllocationExplain(&bytes.Buffer{}, sampleAssignedExplanation(), output.Format("bogus"))
+	if err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestAllocationExplain_rejectsNDJSON(t *testing.T) {
+	// Single-record command, same precedent as Health: the renderer
+	// refuses ndjson so the --output allowlist in cmdsetup has something
+	// to bounce against even if future config plumbing slips.
+	err := output.AllocationExplain(&bytes.Buffer{}, sampleAssignedExplanation(), output.FormatNDJSON)
+	if err == nil {
+		t.Fatal("AllocationExplain(ndjson) should return 'not supported'")
+	}
+}

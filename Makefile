@@ -15,7 +15,7 @@ GOBIN   := $(shell $(GO) env GOPATH)/bin
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-integration lint security update tidy clean release-snapshot dev-up dev-down dev-logs dev-seed
+.PHONY: help build test test-integration lint security update tidy clean release-snapshot dev-up dev-down dev-logs dev-seed dev-seed-unassigned
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -65,3 +65,7 @@ dev-logs: ## Tail logs from local dev clusters
 dev-seed: ## Seed sample data into both local dev clusters
 	./scripts/seed-dev.sh --url http://localhost:9200
 	./scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!'
+
+dev-seed-unassigned: ## Same as dev-seed, plus an over-replicated index so allocation-explain has something to chew on
+	./scripts/seed-dev.sh --url http://localhost:9200 --with-unassigned
+	./scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!' --with-unassigned

@@ -134,3 +134,89 @@ type IndexFilter struct {
 	Hidden bool      // include hidden (dot-prefixed / system) indices
 	Sort   IndexSort // ordering applied after filtering
 }
+
+// AllocationExplainRequest narrows an AllocationExplainer.Explain call.
+// Zero value (Index == "") asks the cluster to pick any unassigned shard
+// it finds — this mirrors how operators usually invoke the endpoint when
+// hunting the first yellow/red index.
+//
+// When Index is set, Shard and Primary fully identify the shard to
+// explain (including shard 0 of a replica, which is the common case).
+// IncludeDiskInfo surfaces the cluster-level disk watermarks and
+// per-node free space in the response; IncludeYesDecisions makes the
+// cluster return every decider it considered — useful when debugging
+// "why did it pick node X over Y" for an assigned shard, but noisy
+// otherwise.
+type AllocationExplainRequest struct {
+	Index               string
+	Shard               int
+	Primary             bool
+	IncludeDiskInfo     bool
+	IncludeYesDecisions bool
+}
+
+// AllocationExplanation is the normalised view of
+// /_cluster/allocation/explain on both dialects. The endpoint returns a
+// single record (the cluster explains one shard per call); this type is
+// therefore a struct, not a slice.
+//
+// Empty/absent fields are omitted (omitempty) so the JSON/YAML output
+// stays compact for the common case — an assigned shard carries no
+// UnassignedInfo; an unassigned shard carries no CurrentNode. The
+// cluster is the source of truth: when it doesn't report a field, we
+// emit nothing rather than a synthetic default.
+type AllocationExplanation struct {
+	Index                  string                   `json:"index"                               yaml:"index"`
+	Shard                  int                      `json:"shard"                               yaml:"shard"`
+	Primary                bool                     `json:"primary"                             yaml:"primary"`
+	CurrentState           string                   `json:"current_state"                       yaml:"current_state"`
+	CurrentNode            *AllocationNode          `json:"current_node,omitempty"              yaml:"current_node,omitempty"`
+	UnassignedInfo         *AllocationUnassigned    `json:"unassigned_info,omitempty"           yaml:"unassigned_info,omitempty"`
+	CanAllocate            string                   `json:"can_allocate,omitempty"              yaml:"can_allocate,omitempty"`
+	AllocateExplanation    string                   `json:"allocate_explanation,omitempty"      yaml:"allocate_explanation,omitempty"`
+	CanRemainOnCurrentNode string                   `json:"can_remain_on_current_node,omitempty" yaml:"can_remain_on_current_node,omitempty"`
+	CanRebalanceCluster    string                   `json:"can_rebalance_cluster,omitempty"     yaml:"can_rebalance_cluster,omitempty"`
+	MoveExplanation        string                   `json:"move_explanation,omitempty"          yaml:"move_explanation,omitempty"`
+	RebalanceExplanation   string                   `json:"rebalance_explanation,omitempty"     yaml:"rebalance_explanation,omitempty"`
+	Note                   string                   `json:"note,omitempty"                      yaml:"note,omitempty"`
+	NodeDecisions          []AllocationNodeDecision `json:"node_decisions,omitempty"            yaml:"node_decisions,omitempty"`
+}
+
+// AllocationNode is the current-node record embedded in an explanation
+// for assigned shards.
+type AllocationNode struct {
+	ID               string `json:"id"                         yaml:"id"`
+	Name             string `json:"name"                       yaml:"name"`
+	TransportAddress string `json:"transport_address,omitempty" yaml:"transport_address,omitempty"`
+	WeightRanking    int    `json:"weight_ranking,omitempty"   yaml:"weight_ranking,omitempty"`
+}
+
+// AllocationUnassigned mirrors the cluster's unassigned_info block. ES
+// populates Details; OS only reports LastAllocationStatus. Both dialects
+// always set Reason when the shard is unassigned.
+type AllocationUnassigned struct {
+	Reason               string `json:"reason"                           yaml:"reason"`
+	At                   string `json:"at,omitempty"                     yaml:"at,omitempty"`
+	Details              string `json:"details,omitempty"                yaml:"details,omitempty"`
+	LastAllocationStatus string `json:"last_allocation_status,omitempty" yaml:"last_allocation_status,omitempty"`
+}
+
+// AllocationNodeDecision is one node's decision in node_allocation_decisions.
+// The deciders list is the per-rule breakdown the cluster evaluated for
+// this shard on this node ("same_shard", "disk_threshold", ...).
+type AllocationNodeDecision struct {
+	NodeID           string              `json:"node_id"                    yaml:"node_id"`
+	NodeName         string              `json:"node_name"                  yaml:"node_name"`
+	TransportAddress string              `json:"transport_address,omitempty" yaml:"transport_address,omitempty"`
+	NodeDecision     string              `json:"node_decision"              yaml:"node_decision"`
+	WeightRanking    int                 `json:"weight_ranking,omitempty"   yaml:"weight_ranking,omitempty"`
+	Deciders         []AllocationDecider `json:"deciders,omitempty"         yaml:"deciders,omitempty"`
+}
+
+// AllocationDecider is one rule evaluation in a node decision's
+// deciders list. Explanation is free-form prose from the cluster.
+type AllocationDecider struct {
+	Decider     string `json:"decider"               yaml:"decider"`
+	Decision    string `json:"decision"              yaml:"decision"`
+	Explanation string `json:"explanation,omitempty" yaml:"explanation,omitempty"`
+}

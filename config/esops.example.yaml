@@ -27,6 +27,7 @@ defaults:
   output: table                   # table | json | ndjson | yaml | wide
   log_level: info                 # debug | info | warn | error
   log_format: text                # text | json  (auto-switches to json under CI=true)
+  log_file: ./esops.log           # append logs here instead of stderr (mode 0600)
   timeout: 30s
   max_retries: 3
   compress: false                 # gzip request/response bodies
