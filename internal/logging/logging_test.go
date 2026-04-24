@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -89,14 +91,81 @@ func TestRedact_withAttrsIsApplied(t *testing.T) {
 }
 
 func TestInit_rejectsUnknownLevel(t *testing.T) {
-	if err := Init("chatty", "text"); err == nil {
+	if err := Init("chatty", "text", ""); err == nil {
 		t.Error("expected error for unknown level")
 	}
 }
 
 func TestInit_rejectsUnknownFormat(t *testing.T) {
-	if err := Init("info", "protobuf"); err == nil {
+	if err := Init("info", "protobuf", ""); err == nil {
 		t.Error("expected error for unknown format")
+	}
+}
+
+func TestInit_logFileWritesToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "esops.log")
+	if err := Init("info", "text", path); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	Logger().Info("test.event", "context", "local-es")
+
+	data, err := os.ReadFile(path) // #nosec G304 -- test-local path under TempDir
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "test.event") || !strings.Contains(got, "context=local-es") {
+		t.Errorf("log file missing expected line: %s", got)
+	}
+
+	// Mode 0600: logs can carry cluster/context names, so lock them down.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("log file perms = %o, want 0600", perm)
+	}
+}
+
+func TestInit_logFileAppendsAcrossInvocations(t *testing.T) {
+	// Two Init calls with the same path must not truncate the file —
+	// operators expect log history to survive subsequent invocations
+	// of the CLI.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "esops.log")
+	if err := Init("info", "text", path); err != nil {
+		t.Fatalf("Init 1: %v", err)
+	}
+	Logger().Info("first.run")
+	if err := Init("info", "text", path); err != nil {
+		t.Fatalf("Init 2: %v", err)
+	}
+	Logger().Info("second.run")
+
+	data, err := os.ReadFile(path) // #nosec G304 -- test-local path under TempDir
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "first.run") || !strings.Contains(got, "second.run") {
+		t.Errorf("log file lost prior content: %s", got)
+	}
+}
+
+func TestInit_logFileRejectsUnopenablePath(t *testing.T) {
+	// Parent directory doesn't exist — OpenFile fails; Init must surface
+	// the error so the user sees their --log-file request refused rather
+	// than silently falling back to stderr.
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-dir", "esops.log")
+	err := Init("info", "text", missing)
+	if err == nil {
+		t.Fatal("expected Init to fail when parent directory is missing")
+	}
+	if !strings.Contains(err.Error(), "opening log file") {
+		t.Errorf("err = %v, want message about opening the log file", err)
 	}
 }
 

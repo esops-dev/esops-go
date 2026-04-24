@@ -26,21 +26,31 @@ var (
 )
 
 // Init configures the process-wide logger from --log-level / --log-format
-// values. It writes to stderr so stdout stays reserved for the requested
-// data, per the output contract in CLAUDE.md §6.
-func Init(level, format string) error {
+// / --log-file values. Empty logFile keeps the default destination of
+// stderr so stdout stays reserved for the requested data — the output
+// contract is that stdout only ever carries the data the user asked for,
+// and everything else (progress, logs, errors) lands on stderr or in an
+// explicit log file. A non-empty logFile is opened in append mode with
+// 0600 permissions — log lines commonly include context/cluster names,
+// and there's no reason for other system users to read them.
+func Init(level, format, logFile string) error {
 	lvl, err := parseLevel(level)
 	if err != nil {
 		return err
 	}
 	opts := &slog.HandlerOptions{Level: lvl}
 
+	w, err := resolveWriter(logFile)
+	if err != nil {
+		return err
+	}
+
 	var inner slog.Handler
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "", "text":
-		inner = slog.NewTextHandler(os.Stderr, opts)
+		inner = slog.NewTextHandler(w, opts)
 	case "json":
-		inner = slog.NewJSONHandler(os.Stderr, opts)
+		inner = slog.NewJSONHandler(w, opts)
 	default:
 		return fmt.Errorf("unknown log format %q (supported: text, json)", format)
 	}
@@ -49,6 +59,21 @@ func Init(level, format string) error {
 	logger = slog.New(newRedactingHandler(inner))
 	mu.Unlock()
 	return nil
+}
+
+// resolveWriter returns os.Stderr when path is empty, otherwise opens
+// (creating if needed) the file in append mode with 0600 permissions.
+// The parent directory must already exist; creating it implicitly would
+// silently hide typos in --log-file.
+func resolveWriter(path string) (io.Writer, error) {
+	if path == "" {
+		return os.Stderr, nil
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G302,G304 -- path is user-supplied via --log-file / log_file; 0600 is intentional
+	if err != nil {
+		return nil, fmt.Errorf("opening log file %q: %w", path, err)
+	}
+	return f, nil
 }
 
 // Logger returns the current process-wide logger. Safe to call before
@@ -80,7 +105,8 @@ func parseLevel(s string) (slog.Level, error) {
 const redactedValue = "<redacted>"
 
 // redactKeys is the lowercase set of attribute keys whose values are
-// replaced before reaching the underlying handler. Matches CLAUDE.md §8.
+// replaced before reaching the underlying handler. Second line of
+// defence behind "never log a secret in the first place".
 var redactKeys = map[string]struct{}{
 	"authorization": {},
 	"password":      {},

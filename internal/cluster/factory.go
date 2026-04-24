@@ -34,13 +34,13 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl, AllocationExplain: impl}, nil
 	case types.DialectOpenSearch:
 		impl, err := osadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport)
 		if err != nil {
 			return nil, err
 		}
-		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl, AllocationExplain: impl}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}

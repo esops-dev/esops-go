@@ -169,8 +169,9 @@ healthy ones:
 These values come straight from `_cat/shards?h=unassigned.reason,...`
 and are identical across dialects. The `unassigned_details` field is
 especially useful for `ALLOCATION_FAILED` shards, where the cluster
-embeds the last allocation error. For deeper analysis reach for
-`ops allocation-explain` (not yet wired up).
+embeds the last allocation error. For deeper analysis — the
+per-decider breakdown of why a shard landed where it did — reach for
+[`ops allocation-explain`](#esops-ops-allocation-explain).
 
 ### Examples
 
@@ -209,3 +210,128 @@ esops --context local-os ops shards --index esops-*
 A cluster full of unassigned shards still exits 0 — `shards` reports
 the allocation truthfully, it doesn't judge it. Alerting on
 `UNASSIGNED` rows is the caller's job.
+
+## `esops ops allocation-explain`
+
+Wraps `/_cluster/allocation/explain`. Where [`ops shards`](#esops-ops-shards)
+tells you **which** shards are unassigned, `allocation-explain` tells
+you **why** — the per-decider breakdown the cluster evaluated (disk
+watermark, `same_shard`, `awaiting_info`, shard-awareness filter, …)
+on each node.
+
+Two invocation shapes:
+
+```sh
+# No flags: the cluster picks the first unassigned shard it finds.
+# Fails with HTTP 400 if the cluster has no unassigned shards.
+esops ops allocation-explain
+
+# Targeted: name the specific shard to explain. Works for BOTH
+# unassigned ("why can't this go anywhere?") and assigned
+# ("why did the cluster land it here, and could it rebalance?").
+esops ops allocation-explain --index esops-users --shard 0 --primary
+```
+
+```sh
+$ esops ops allocation-explain --index esops-users --primary
+context=local-es dialect=elasticsearch version=9.3.3 index=esops-users shard=0 state=started
+INDEX        SHARD  ROLE  STATE    NODE  CAN_ALLOCATE
+esops-users  0      p     started  es01  -
+
+REBALANCE: This shard is in a well-balanced location and satisfies all allocation rules so it will remain on this node. [...]
+
+NODE  DECISION       DECIDERS
+es02  worse_balance  -
+```
+
+For an unassigned shard the top block gains an `UNASSIGNED_REASON`
+section and a prose `EXPLANATION:` line, and the node-decision
+summary lists the NO-rulings that blocked allocation:
+
+```
+INDEX            SHARD  ROLE  STATE       NODE  CAN_ALLOCATE
+test-unassigned  0      r     unassigned  -     no
+
+UNASSIGNED_REASON: INDEX_CREATED
+LAST_STATUS:       no_attempt
+
+EXPLANATION: cannot allocate because all nodes already hold a copy
+
+NODE  DECISION  DECIDERS
+es01  no        same_shard=no
+es02  no        same_shard=no
+```
+
+Like every `ops` command, the `context=…` banner lands on stderr and
+the table on stdout, so `| jq` and shell redirections keep working
+regardless of `--output`.
+
+### Flags
+
+| Flag                      | Purpose                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------ |
+| `--index`                 | Index to explain. Omit to let the cluster pick any unassigned shard.                 |
+| `--shard`                 | Shard number (requires `--index`). Defaults to `0`.                                  |
+| `--primary`               | Explain the primary copy (requires `--index`). Default is replica.                   |
+| `--include-disk-info`     | Include per-node disk info (free space, watermarks) in the response.                 |
+| `--include-yes-decisions` | Include YES decider rulings in the output — noisier, useful for "why did it pick X". |
+
+`--shard` and `--primary` only make sense with an `--index` — the
+business layer rejects them up-front with exit code 2 if you forget.
+Shard `0` is a valid value, so the existence of `--index` (not `--shard 0`)
+is the gate.
+
+### Output formats
+
+| Flag             | Intended for                                                                                         |
+| ---------------- | ---------------------------------------------------------------------------------------------------- |
+| `-o table` (def) | Human eyes. Header block + node-decisions summary, with NO-rulings compressed into one cell per node. |
+| `-o wide`        | Same header, but the node-decisions table expands into one row per decider with the full explanation prose. |
+| `-o json`        | Scripts. Stable schema: `index`, `shard`, `primary`, `current_state`, optional `current_node` / `unassigned_info`, plus `node_decisions[].deciders[]`. |
+| `-o yaml`        | Same shape as JSON.                                                                                  |
+
+NDJSON is not supported: the endpoint returns exactly one record per
+call, so streaming adds no value.
+
+Empty fields are omitted. An assigned shard carries no `unassigned_info`
+key; an unassigned shard carries no `current_node` key. The cluster
+is the source of truth — when it doesn't report a field, esops emits
+nothing rather than a synthetic default.
+
+### Examples
+
+```sh
+# "Something's unassigned, I don't know what" — cluster picks one.
+esops ops allocation-explain
+
+# Ask the full decider breakdown for one shard, including YES deciders.
+esops ops allocation-explain --index esops-logs-000001 --primary \
+  --include-yes-decisions -o wide
+
+# Is it a disk issue? Watermark info is opt-in.
+esops ops allocation-explain --index big-index --shard 0 \
+  --include-disk-info -o json | jq '.cluster_info // "disk info not returned"'
+
+# Frequency of NO-rulings across all nodes for one shard.
+esops ops allocation-explain --index big-index --shard 0 -o json \
+  | jq -r '.node_decisions[].deciders[]? | select(.decision=="NO") | .decider' \
+  | sort | uniq -c
+```
+
+### Exit codes
+
+`allocation-explain` follows the project-wide exit-code contract:
+
+| Code | Meaning                                                      |
+| ---- | ------------------------------------------------------------ |
+| 0    | Cluster answered; explanation rendered.                      |
+| 1    | Generic error (including HTTP 400 from the cluster — e.g. "no unassigned shards" when called with no flags). |
+| 2    | Usage error (`--shard` or `--primary` without `--index`).    |
+| 3    | Cluster unreachable.                                         |
+| 4    | Authentication failed (HTTP 401).                            |
+| 5    | Authorization failed (HTTP 403).                             |
+
+A `no` answer from the cluster is still a successful query: the
+explanation prints and the process exits 0. Scripts should look at
+`can_allocate` / `current_state` in the JSON output, not at the exit
+code.

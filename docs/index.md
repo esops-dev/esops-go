@@ -8,7 +8,9 @@ opening, closing, and template work.
 All `esops index list` output is read-only — safe to run against
 production at any time. Mutating subcommands (`rollover`, `shrink`,
 `close`, `open`, `delete`) land in later releases and will respect the
-blast-radius limits documented in the root [CLAUDE.md](../CLAUDE.md).
+project's blast-radius limits: destructive operations refuse to run
+when their resolved pattern exceeds a safety threshold unless the
+caller opts in with an explicit flag (e.g. `--max-indices N`).
 
 See [`config.md`](./config.md) for how contexts and the active cluster
 are resolved.
@@ -145,5 +147,5 @@ reports the allocation truthfully, it does not judge it. Alerting on
   `sigv4` fields in the config are accepted by the parser but rejected
   at connect time.
 - No `--context` protection gate is enforced on `index list` because it
-  is read-only. Mutating subcommands (future) will gate on
-  `protection: prod` as specified in the project CLAUDE.md.
+  is read-only. Mutating subcommands (future) will gate on the
+  per-context `protection: prod` tier.

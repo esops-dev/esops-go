@@ -131,6 +131,136 @@ func Indices(w io.Writer, indices []types.Index, f Format) error {
 	}
 }
 
+// AllocationExplain renders a single allocation-explain record. JSON/YAML
+// emit the neutral AllocationExplanation shape directly; the table format
+// is a two-section layout operators read top-to-bottom: a header block
+// with the shard-level facts ("is it assigned? why not?") followed by a
+// per-node decision table. Wide expands the decision table into a full
+// deciders dump (one row per decider rule), which is the signal-dense
+// view when debugging "why did the cluster not pick node X?".
+func AllocationExplain(w io.Writer, ex types.AllocationExplanation, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(ex)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(ex)
+	case FormatWide:
+		return allocationExplainTable(w, ex, true)
+	case FormatTable, "":
+		return allocationExplainTable(w, ex, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func allocationExplainTable(w io.Writer, ex types.AllocationExplanation, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+
+	role := "r"
+	if ex.Primary {
+		role = "p"
+	}
+	node := "-"
+	if ex.CurrentNode != nil && ex.CurrentNode.Name != "" {
+		node = ex.CurrentNode.Name
+	}
+	canAllocate := ex.CanAllocate
+	if canAllocate == "" {
+		canAllocate = "-"
+	}
+	_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tSTATE\tNODE\tCAN_ALLOCATE")
+	_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+		ex.Index, ex.Shard, role, ex.CurrentState, node, canAllocate)
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	// Narrative block: reason for unassignment + human-language
+	// explanation strings. Kept outside the tabwriter so free-form prose
+	// wraps naturally in terminals.
+	if ex.UnassignedInfo != nil {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "UNASSIGNED_REASON: %s\n", ex.UnassignedInfo.Reason)
+		if ex.UnassignedInfo.At != "" {
+			_, _ = fmt.Fprintf(w, "UNASSIGNED_AT:     %s\n", ex.UnassignedInfo.At)
+		}
+		if ex.UnassignedInfo.LastAllocationStatus != "" {
+			_, _ = fmt.Fprintf(w, "LAST_STATUS:       %s\n", ex.UnassignedInfo.LastAllocationStatus)
+		}
+		if ex.UnassignedInfo.Details != "" {
+			_, _ = fmt.Fprintf(w, "DETAILS:           %s\n", ex.UnassignedInfo.Details)
+		}
+	}
+	if ex.AllocateExplanation != "" {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "EXPLANATION: %s\n", ex.AllocateExplanation)
+	}
+	if ex.MoveExplanation != "" {
+		_, _ = fmt.Fprintf(w, "MOVE: %s\n", ex.MoveExplanation)
+	}
+	if ex.RebalanceExplanation != "" {
+		_, _ = fmt.Fprintf(w, "REBALANCE: %s\n", ex.RebalanceExplanation)
+	}
+	if ex.Note != "" {
+		_, _ = fmt.Fprintf(w, "NOTE: %s\n", ex.Note)
+	}
+
+	if len(ex.NodeDecisions) == 0 {
+		return nil
+	}
+
+	_, _ = fmt.Fprintln(w)
+	nw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(nw, "NODE\tDECISION\tWEIGHT\tDECIDER\tRULING\tEXPLANATION")
+		for _, d := range ex.NodeDecisions {
+			if len(d.Deciders) == 0 {
+				_, _ = fmt.Fprintf(nw, "%s\t%s\t%d\t-\t-\t-\n",
+					d.NodeName, d.NodeDecision, d.WeightRanking)
+				continue
+			}
+			for _, dd := range d.Deciders {
+				_, _ = fmt.Fprintf(nw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+					d.NodeName, d.NodeDecision, d.WeightRanking,
+					dd.Decider, dd.Decision, dd.Explanation)
+			}
+		}
+	} else {
+		_, _ = fmt.Fprintln(nw, "NODE\tDECISION\tDECIDERS")
+		for _, d := range ex.NodeDecisions {
+			_, _ = fmt.Fprintf(nw, "%s\t%s\t%s\n",
+				d.NodeName, d.NodeDecision, summariseDeciders(d.Deciders))
+		}
+	}
+	return nw.Flush()
+}
+
+// summariseDeciders compresses a node's deciders list into a single
+// cell for the default table. Only NO/THROTTLE rulings get surfaced —
+// YES rulings are noise unless the operator passed --include-yes.
+// Empty or all-yes lists render "-" so the column stays grep-friendly.
+func summariseDeciders(ds []types.AllocationDecider) string {
+	if len(ds) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(ds))
+	for _, d := range ds {
+		if strings.EqualFold(d.Decision, "YES") {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", d.Decider, strings.ToLower(d.Decision)))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
 func indicesTable(w io.Writer, indices []types.Index, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if wide {

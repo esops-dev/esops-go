@@ -48,7 +48,8 @@ func initLogger(ctx context.Context, cmd *cli.Command) (context.Context, error) 
 	defaults := readDefaults(cmd.String("config"))
 	level := resolveSetting(cmd, "log-level", defaults.LogLevel, "info")
 	format := resolveSetting(cmd, "log-format", defaults.LogFormat, defaultLogFormat())
-	if err := logging.Init(level, format); err != nil {
+	logFile := resolveSetting(cmd, "log-file", defaults.LogFile, "")
+	if err := logging.Init(level, format, logFile); err != nil {
 		return ctx, err
 	}
 	return ctx, nil
@@ -142,6 +143,10 @@ func globalFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:  "log-format",
 			Usage: "Log format: text | json (overrides defaults.log_format; auto-json under CI=true)",
+		},
+		&cli.StringFlag{
+			Name:  "log-file",
+			Usage: "Append log lines to PATH instead of stderr (file created with mode 0600; overrides defaults.log_file)",
 		},
 		&cli.BoolFlag{
 			Name:  "dry-run",

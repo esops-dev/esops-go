@@ -7,17 +7,26 @@
 # Usage:
 #   scripts/seed-dev.sh --url http://localhost:9200
 #   scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!'
+#
+# Flags:
+#   --with-unassigned    Also create `esops-stuck-replicas`, an index
+#                        over-replicated on purpose (replicas=3) so it stays
+#                        YELLOW on the 2-node ES cluster and on the 1-node
+#                        OS cluster. Exercises `ops allocation-explain`
+#                        and the unassigned-reason path in `ops shards`.
 
 set -euo pipefail
 
 URL=""
 AUTH=""
+WITH_UNASSIGNED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --url)  URL="$2";  shift 2 ;;
-    --user) AUTH="$2"; shift 2 ;;
+    --url)             URL="$2";  shift 2 ;;
+    --user)            AUTH="$2"; shift 2 ;;
+    --with-unassigned) WITH_UNASSIGNED=1; shift ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -187,6 +196,23 @@ for i in $(seq 1 20); do
   body+="{\"user_id\":\"$uid\",\"name\":\"$fn $ln\",\"email\":\"$email\",\"country\":\"$country\",\"signup_date\":\"$signup\"}"$'\n'
 done
 bulk "/esops-users/_bulk?refresh=wait_for" "$body"
+
+if (( WITH_UNASSIGNED )); then
+  # Over-replicate on purpose: 3 replicas + 1 primary = 4 copies needed.
+  # ES dev (2 data nodes) places 2 copies, leaves 2 unassigned.
+  # OS dev (1 data node) places 1 primary,  leaves 3 unassigned.
+  # Either way the cluster goes YELLOW and `ops allocation-explain` has
+  # a real unassigned shard to reason about.
+  echo ">>> creating esops-stuck-replicas (replicas=3, deliberately unallocatable)"
+  curl -sS "${AUTH_ARG[@]}" -o /dev/null -X DELETE "$URL/esops-stuck-replicas" || true
+  http PUT /esops-stuck-replicas '{
+    "settings": {"number_of_shards": 1, "number_of_replicas": 3},
+    "mappings": {"properties": {"note": {"type": "text"}}}
+  }'
+  # One doc so the index shows a size > 0 in `ops shards` / `index list`.
+  http POST /esops-stuck-replicas/_doc '{"note":"seeded to force unassigned replicas — see ops allocation-explain"}'
+  INDEXES+=(esops-stuck-replicas)
+fi
 
 echo ">>> done. doc counts:"
 for idx in "${INDEXES[@]}"; do

@@ -38,6 +38,7 @@ type Defaults struct {
 	Output     string        `koanf:"output"`
 	LogLevel   string        `koanf:"log_level"`
 	LogFormat  string        `koanf:"log_format"`
+	LogFile    string        `koanf:"log_file"`
 	Timeout    time.Duration `koanf:"timeout"`
 	MaxRetries int           `koanf:"max_retries"`
 	Compress   bool          `koanf:"compress"`
@@ -181,7 +182,7 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// checkSafety enforces the two CLAUDE.md §8 rules:
+// checkSafety enforces the two config-secrecy rules:
 //   - world-readable file + inline plaintext secret = refuse (unless
 //     ESOPS_ALLOW_INSECURE_CONFIG=1)
 //   - inline plaintext secret in any mode = warn (unless

@@ -168,6 +168,101 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 	return out, nil
 }
 
+// AllocationExplain implements client.AllocationExplainer.
+//
+// When req.Index is empty we pass nil — the cluster picks any unassigned
+// shard it finds, matching the raw endpoint's default. Otherwise we set
+// the typed body {index, shard, primary}. include_disk_info /
+// include_yes_decisions go through Params as query strings.
+//
+// OS's typed response always materialises CurrentNode and UnassignedInfo
+// as zero-valued structs; we collapse those back to nil on the neutral
+// type so JSON/YAML output omits them (matching ES behaviour).
+func (c *Client) AllocationExplain(ctx context.Context, req types.AllocationExplainRequest) (types.AllocationExplanation, error) {
+	osReq := &osapi.ClusterAllocationExplainReq{
+		Params: osapi.ClusterAllocationExplainParams{},
+	}
+	if req.IncludeDiskInfo {
+		t := true
+		osReq.Params.IncludeDiskInfo = &t
+	}
+	if req.IncludeYesDecisions {
+		t := true
+		osReq.Params.IncludeYesDecisions = &t
+	}
+	if req.Index != "" {
+		osReq.Body = &osapi.ClusterAllocationExplainBody{
+			Index:   req.Index,
+			Shard:   req.Shard,
+			Primary: req.Primary,
+		}
+	}
+
+	resp, err := c.api.Cluster.AllocationExplain(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.AllocationExplanation{}, classifyResponseErr(err, status)
+	}
+
+	out := types.AllocationExplanation{
+		Index:                  resp.Index,
+		Shard:                  resp.Shard,
+		Primary:                resp.Primary,
+		CurrentState:           resp.CurrentState,
+		CanAllocate:            resp.CanAllocate,
+		AllocateExplanation:    resp.AllocateExplanation,
+		CanRemainOnCurrentNode: resp.CanRemainOnCurrentNode,
+		CanRebalanceCluster:    resp.CanRebalanceCluster,
+		RebalanceExplanation:   resp.RebalanceExplanation,
+	}
+	// OS materialises these as zero-valued structs even when absent from
+	// the JSON — treat "has identifying field" as "present". ID/Name are
+	// the only fields the cluster guarantees to set for a real current_node;
+	// Reason is the one unassigned_info guarantees.
+	if resp.CurrentNode.NodeID != "" || resp.CurrentNode.NodeName != "" {
+		out.CurrentNode = &types.AllocationNode{
+			ID:               resp.CurrentNode.NodeID,
+			Name:             resp.CurrentNode.NodeName,
+			TransportAddress: resp.CurrentNode.TransportAddress,
+			WeightRanking:    resp.CurrentNode.WeightRanking,
+		}
+	}
+	if resp.UnassignedInfo.Reason != "" {
+		out.UnassignedInfo = &types.AllocationUnassigned{
+			Reason:               resp.UnassignedInfo.Reason,
+			At:                   resp.UnassignedInfo.At,
+			LastAllocationStatus: resp.UnassignedInfo.LastAllocationStatus,
+		}
+	}
+	if len(resp.NodeAllocationDecisions) > 0 {
+		out.NodeDecisions = make([]types.AllocationNodeDecision, 0, len(resp.NodeAllocationDecisions))
+		for _, d := range resp.NodeAllocationDecisions {
+			nd := types.AllocationNodeDecision{
+				NodeID:           d.NodeID,
+				NodeName:         d.NodeName,
+				TransportAddress: d.TransportAddress,
+				NodeDecision:     d.NodeDecision,
+				WeightRanking:    d.WeightRanking,
+			}
+			if len(d.Deciders) > 0 {
+				nd.Deciders = make([]types.AllocationDecider, 0, len(d.Deciders))
+				for _, dd := range d.Deciders {
+					nd.Deciders = append(nd.Deciders, types.AllocationDecider{
+						Decider:     dd.Decider,
+						Decision:    dd.Decision,
+						Explanation: dd.Explanation,
+					})
+				}
+			}
+			out.NodeDecisions = append(out.NodeDecisions, nd)
+		}
+	}
+	return out, nil
+}
+
 // statusOf returns the HTTP status code from the opensearch-go Response
 // embedded in a typed response's Inspect(). Returns 0 when the transport
 // errored before a response came back — the caller treats that as
