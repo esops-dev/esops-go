@@ -47,9 +47,10 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 }
 
 // buildTransport returns the http.RoundTripper handed to the upstream
-// clients. It honours TLS config and an overall per-request timeout.
+// clients. It honours TLS config (including an mTLS client keypair
+// carried on cc.Auth) and an overall per-request timeout.
 func buildTransport(cc config.Context) (http.RoundTripper, error) {
-	tlsConf, err := buildTLSConfig(cc.TLS)
+	tlsConf, err := buildTLSConfig(cc.Auth, cc.TLS)
 	if err != nil {
 		return nil, err
 	}

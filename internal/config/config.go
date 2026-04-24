@@ -252,7 +252,10 @@ func contextsWithPlaintextSecret(cfg Config) []string {
 }
 
 func hasPlaintextSecret(a Auth) bool {
-	for _, v := range []string{a.Password, a.APIKey, a.Token, a.ClientKey} {
+	// ClientCert/ClientKey are filesystem paths, not secret material — the
+	// key's contents stay on disk, so a literal path in the config is not
+	// a leaked credential. Only password/api_key/token carry live secrets.
+	for _, v := range []string{a.Password, a.APIKey, a.Token} {
 		if v == "" {
 			continue
 		}

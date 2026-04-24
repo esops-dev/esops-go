@@ -90,7 +90,7 @@ func Probe(ctx context.Context, cc config.Context) (types.ClusterInfo, error) {
 }
 
 func probeHTTPClient(cc config.Context) (*http.Client, error) {
-	tlsConf, err := buildTLSConfig(cc.TLS)
+	tlsConf, err := buildTLSConfig(cc.Auth, cc.TLS)
 	if err != nil {
 		return nil, err
 	}
@@ -104,8 +104,13 @@ func probeHTTPClient(cc config.Context) (*http.Client, error) {
 	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
-func buildTLSConfig(t config.TLS) (*tls.Config, error) {
-	if t.CACert == "" && !t.Insecure {
+// buildTLSConfig returns a *tls.Config when any TLS-layer setting is in
+// play: a CA override, insecure mode, or an mTLS client keypair carried
+// on the Auth block. Returns nil when the Go default TLS behaviour is
+// sufficient so the upstream client can fall back to its own transport.
+func buildTLSConfig(a config.Auth, t config.TLS) (*tls.Config, error) {
+	wantMTLS := strings.EqualFold(a.Type, "mtls")
+	if t.CACert == "" && !t.Insecure && !wantMTLS {
 		return nil, nil
 	}
 	conf := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -123,6 +128,16 @@ func buildTLSConfig(t config.TLS) (*tls.Config, error) {
 		}
 		conf.RootCAs = pool
 	}
+	if wantMTLS {
+		if a.ClientCert == "" || a.ClientKey == "" {
+			return nil, errors.New("auth.type=mtls requires both auth.client_cert and auth.client_key")
+		}
+		pair, err := tls.LoadX509KeyPair(a.ClientCert, a.ClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("loading client keypair (%s, %s): %w", a.ClientCert, a.ClientKey, err)
+		}
+		conf.Certificates = []tls.Certificate{pair}
+	}
 	return conf, nil
 }
 
@@ -136,7 +151,11 @@ func applyAuth(req *http.Request, a config.Auth) error {
 		}
 		req.SetBasicAuth(a.Username, a.Password)
 		return nil
+	case "mtls":
+		// Identity travels on the TLS keypair; nothing to add at the
+		// HTTP layer. Keypair presence is validated in buildTLSConfig.
+		return nil
 	default:
-		return fmt.Errorf("auth type %q is not implemented yet (v0.1.0 supports: basic)", a.Type)
+		return fmt.Errorf("auth type %q is not implemented yet (v0.1.0 supports: basic, mtls)", a.Type)
 	}
 }

@@ -15,7 +15,7 @@ GOBIN   := $(shell $(GO) env GOPATH)/bin
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-integration lint security update tidy clean release-snapshot dev-up dev-down dev-logs dev-seed dev-seed-unassigned
+.PHONY: help build test test-integration lint security update tidy clean release-snapshot certs certs-clean dev-up dev-down dev-logs dev-seed dev-seed-unassigned
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -53,7 +53,13 @@ release-snapshot: ## Build a local goreleaser snapshot
 	@command -v goreleaser >/dev/null || { echo "install: https://goreleaser.com/install/"; exit 1; }
 	goreleaser release --snapshot --clean
 
-dev-up: ## Start local ES (no auth, :9200/:9201) + OS (auth, :9202) clusters
+certs: ## Generate throw-away dev certs for the mTLS cluster (idempotent)
+	./scripts/certs/generate.sh
+
+certs-clean: ## Remove generated dev certs
+	rm -rf scripts/certs/out
+
+dev-up: certs ## Start local ES (:9200/:9201) + OS (:9202) + ES-mTLS (:9203) clusters
 	docker compose up -d --wait
 
 dev-down: ## Stop local dev clusters and remove their ephemeral state

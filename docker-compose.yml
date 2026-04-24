@@ -4,9 +4,13 @@
 #   Exposed on http://localhost:9200 (es01) and http://localhost:9201 (es02).
 # - `os01`: single-node OpenSearch 3.x with the security plugin enabled.
 #   Exposed on http://localhost:9202, basic auth admin:EsopsDev123!
+# - `es-mtls`: single-node Elasticsearch 9.x with HTTPS + PKI realm for
+#   client-certificate auth. Exposed on https://localhost:9203. Client cert
+#   CN=esops-client is mapped to superuser by the `es-mtls-setup` sidecar.
+#   Throw-away certs live under ./scripts/certs/out (run `make certs`).
 #
 # Data is intentionally ephemeral (no volumes). `docker compose down` wipes state.
-# Bring up with: `make dev-up` (or `docker compose up -d --wait`).
+# Bring up with: `make dev-up` (or `make certs && docker compose up -d --wait`).
 
 services:
   es01:
@@ -81,6 +85,71 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+
+  # ── ES with HTTPS + PKI client-cert auth (mTLS) ───────────────────────
+  # Security is on and the HTTP layer demands TLS; client_authentication
+  # is `optional` so the one-shot `es-mtls-setup` container can bootstrap
+  # the PKI role mapping via basic auth. Once that runs, clients presenting
+  # the `CN=esops-client` cert are authenticated by the PKI realm.
+  es-mtls:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.3.3
+    container_name: esops-es-mtls
+    environment:
+      - node.name=es-mtls
+      - cluster.name=esops-dev-es-mtls
+      - discovery.type=single-node
+      - bootstrap.memory_lock=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - ELASTIC_PASSWORD=EsopsDev123!
+      - xpack.security.enabled=true
+      # Trial license: PKI realm is a gold-tier feature, not in basic.
+      # Local dev only — the trial self-expires after 30 days, but
+      # `make dev-down && make dev-up` resets it.
+      - xpack.license.self_generated.type=trial
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/server.key
+      - xpack.security.http.ssl.certificate=certs/server.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca.crt
+      - xpack.security.http.ssl.client_authentication=optional
+      - xpack.security.authc.realms.pki.pki1.order=1
+      - xpack.security.authc.realms.pki.pki1.certificate_authorities=certs/ca.crt
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    # ES 9.3's entitlement system only permits reads under the config
+    # dir, so the certs bind-mount lives there (not /certs).
+    volumes:
+      - ./scripts/certs/out:/usr/share/elasticsearch/config/certs:ro
+    ports:
+      - "9203:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --cacert /usr/share/elasticsearch/config/certs/ca.crt -u elastic:EsopsDev123! https://localhost:9200/_cluster/health | grep -Eq '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+
+  # One-shot: after es-mtls is healthy, create the PKI role mapping that
+  # grants the esops-client cert `superuser`. Idempotent via PUT.
+  es-mtls-setup:
+    image: curlimages/curl:8.10.1
+    container_name: esops-es-mtls-setup
+    depends_on:
+      es-mtls:
+        condition: service_healthy
+    volumes:
+      - ./scripts/certs/out:/certs:ro
+    restart: "no"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        curl -fsS --cacert /certs/ca.crt -u elastic:EsopsDev123! \
+          -X PUT https://es-mtls:9200/_security/role_mapping/esops-client \
+          -H 'Content-Type: application/json' \
+          -d '{"roles":["superuser"],"rules":{"field":{"dn":"CN=esops-client"}},"enabled":true}'
+        echo
 
 networks:
   default:
