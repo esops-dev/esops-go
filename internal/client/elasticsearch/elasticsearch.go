@@ -151,6 +151,95 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 	return out, nil
 }
 
+// catIndicesRow mirrors a single /_cat/indices?format=json row. Every
+// numeric column is quoted by the cluster; store/docs are null for
+// closed or freshly-created indices. Fields not present in the `h=`
+// selector are simply absent from the JSON payload.
+type catIndicesRow struct {
+	Health             string  `json:"health"`
+	Status             string  `json:"status"`
+	Index              string  `json:"index"`
+	UUID               string  `json:"uuid"`
+	Pri                *string `json:"pri"`
+	Rep                *string `json:"rep"`
+	DocsCount          *string `json:"docs.count"`
+	DocsDeleted        *string `json:"docs.deleted"`
+	StoreSize          *string `json:"store.size"`
+	PriStoreSize       *string `json:"pri.store.size"`
+	CreationDate       *string `json:"creation.date"`
+}
+
+// indicesColumns is the explicit h= selector for /_cat/indices. _cat
+// APIs replace (not extend) the default columns when h is set, so every
+// field we surface must be listed here.
+var indicesColumns = []string{
+	"health", "status", "index", "uuid",
+	"pri", "rep",
+	"docs.count", "docs.deleted",
+	"store.size", "pri.store.size",
+	"creation.date",
+}
+
+// Indices implements client.IndexInspector. Index patterns are forwarded
+// to the cluster as a path segment; we always ask for bytes=b and a full
+// wildcard expansion (open+closed+hidden) so the business layer can
+// honour the neutral IndexFilter semantics uniformly.
+func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error) {
+	ci := c.api.Cat.Indices
+	opts := []func(*esapi.CatIndicesRequest){
+		ci.WithContext(ctx),
+		ci.WithFormat("json"),
+		ci.WithBytes("b"),
+		ci.WithH(indicesColumns...),
+		// Ask for everything; the business layer filters hidden/closed.
+		// Without this, ES 8+ hides dot-prefixed indices by default.
+		ci.WithExpandWildcards("open,closed,hidden"),
+	}
+	if filter.Index != "" {
+		opts = append(opts, ci.WithIndex(splitCSV(filter.Index)...))
+	}
+
+	resp, err := c.api.Cat.Indices(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, esopsclient.ErrAuth
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, esopsclient.ErrForbidden
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("cat indices returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var rows []catIndicesRow
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, errors.Join(errors.New("decoding cat indices response"), err)
+	}
+
+	out := make([]types.Index, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, types.Index{
+			Name:               r.Index,
+			UUID:               r.UUID,
+			Health:             r.Health,
+			Status:             r.Status,
+			Primaries:          atoiOrZero(derefString(r.Pri)),
+			Replicas:           atoiOrZero(derefString(r.Rep)),
+			DocsCount:          atoi64Ptr(r.DocsCount),
+			DocsDeleted:        atoi64Ptr(r.DocsDeleted),
+			StoreBytes:         atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  atoi64Ptr(r.PriStoreSize),
+			CreationDateMillis: atoi64Ptr(r.CreationDate),
+		})
+	}
+	return out, nil
+}
+
 func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := parts[:0]

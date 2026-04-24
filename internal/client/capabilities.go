@@ -18,6 +18,14 @@ type ShardInspector interface {
 	Shards(ctx context.Context, filter types.ShardFilter) ([]types.Shard, error)
 }
 
+// IndexInspector exposes read-only index-listing operations backed by
+// /_cat/indices. The filter's Index field is forwarded to the cluster;
+// Health/Status/Hidden/Sort are applied in the business layer so the
+// same filter produces the same view on ES and OS.
+type IndexInspector interface {
+	Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error)
+}
+
 // Client is the composite surface returned by factory.New. It embeds
 // cluster metadata (from the probe) plus every capability interface.
 // Business-logic callers should depend on the capability interfaces, not
@@ -26,4 +34,5 @@ type Client struct {
 	Info types.ClusterInfo
 	HealthInspector
 	ShardInspector
+	IndexInspector
 }

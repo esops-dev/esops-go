@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -19,13 +20,19 @@ import (
 type Format string
 
 const (
-	FormatTable Format = "table"
-	FormatJSON  Format = "json"
-	FormatYAML  Format = "yaml"
-	FormatWide  Format = "wide"
+	FormatTable  Format = "table"
+	FormatJSON   Format = "json"
+	FormatYAML   Format = "yaml"
+	FormatWide   Format = "wide"
+	FormatNDJSON Format = "ndjson"
 )
 
 // Parse validates and normalises a --output value.
+//
+// NDJSON is accepted only for commands that opt in via a dedicated
+// renderer (currently `index list`). Commands whose renderer does not
+// implement ndjson return a per-command "not supported" error — the
+// parse step no longer rejects the format up-front.
 func Parse(s string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "table":
@@ -37,10 +44,18 @@ func Parse(s string) (Format, error) {
 	case "wide":
 		return FormatWide, nil
 	case "ndjson":
-		return "", fmt.Errorf("ndjson output is not implemented yet")
+		return FormatNDJSON, nil
 	default:
-		return "", fmt.Errorf("unknown output format %q (supported: table, json, yaml, wide)", s)
+		return "", fmt.Errorf("unknown output format %q (supported: table, json, ndjson, yaml, wide)", s)
 	}
+}
+
+// formatNotSupported returns a uniform error message for commands whose
+// renderer does not (yet) implement a particular Format. Keeps the
+// ndjson-not-yet-streaming story consistent without each renderer
+// inventing its own wording.
+func formatNotSupported(cmd string, f Format) error {
+	return fmt.Errorf("output format %q is not supported for %s", f, cmd)
 }
 
 // Health renders a ClusterHealth in the requested format to w.
@@ -61,6 +76,8 @@ func Health(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, f Format
 		return healthTable(w, h, info, true)
 	case FormatTable, "":
 		return healthTable(w, h, info, false)
+	case FormatNDJSON:
+		return formatNotSupported("health", f)
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
@@ -86,9 +103,91 @@ func Shards(w io.Writer, shards []types.Shard, f Format) error {
 		return shardsTable(w, shards, true)
 	case FormatTable, "":
 		return shardsTable(w, shards, false)
+	case FormatNDJSON:
+		return formatNotSupported("shards", f)
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
+}
+
+// Indices renders a slice of Index rows in the requested format. Table
+// output shows the columns an operator reaches for when triaging an
+// index-count or size question (name, health, status, primaries/replicas,
+// docs, size). Wide adds deleted docs, UUID, creation date and
+// primary-store bytes. JSON/YAML emit the neutral Index shape;
+// NDJSON writes one Index per line so large lists don't have to be
+// held in the downstream consumer's memory in one blob.
+func Indices(w io.Writer, indices []types.Index, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(indices)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, ix := range indices {
+			if err := enc.Encode(ix); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(indices)
+	case FormatWide:
+		return indicesTable(w, indices, true)
+	case FormatTable, "":
+		return indicesTable(w, indices, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indicesTable(w io.Writer, indices []types.Index, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tHEALTH\tSTATUS\tPRI\tREP\tDOCS\tDELETED\tSTORE\tPRI_STORE\tUUID\tCREATED")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tHEALTH\tSTATUS\tPRI\tREP\tDOCS\tSTORE")
+	}
+	for _, ix := range indices {
+		health := ix.Health
+		if health == "" {
+			health = "-"
+		}
+		if wide {
+			uuid := ix.UUID
+			if uuid == "" {
+				uuid = "-"
+			}
+			created := formatCreation(ix.CreationDateMillis)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n",
+				ix.Name, health, ix.Status,
+				ix.Primaries, ix.Replicas,
+				ix.DocsCount, ix.DocsDeleted,
+				humanBytes(ix.StoreBytes), humanBytes(ix.PrimaryStoreBytes),
+				uuid, created,
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+				ix.Name, health, ix.Status,
+				ix.Primaries, ix.Replicas,
+				ix.DocsCount, humanBytes(ix.StoreBytes),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// formatCreation renders an epoch-millis creation timestamp as RFC3339.
+// Zero (unknown) renders as "-" so the wide table stays grep-friendly.
+func formatCreation(ms int64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
 func shardsTable(w io.Writer, shards []types.Shard, wide bool) error {
