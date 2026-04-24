@@ -11,8 +11,9 @@ import (
 
 // Shards returns the shard list from the cluster, then applies the
 // client-side filters (state/node/role) and a stable sort. The Index
-// filter on f is already applied by the upstream client; we re-apply it
-// here only defensively would be overkill, so we trust the adapter.
+// field on f is already applied by the adapter via the cluster API;
+// re-applying it here would be defensive duplication, so we trust the
+// adapter to honour it.
 func Shards(ctx context.Context, c client.ShardInspector, f types.ShardFilter) ([]types.Shard, error) {
 	raw, err := c.Shards(ctx, f)
 	if err != nil {

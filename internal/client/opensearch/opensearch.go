@@ -4,11 +4,10 @@
 package opensearch
 
 import (
-	"context"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
+
+	"context"
 
 	os "github.com/opensearch-project/opensearch-go/v4"
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
@@ -41,7 +40,11 @@ func New(addrs []string, username, password string, httpTransport http.RoundTrip
 func (c *Client) Health(ctx context.Context) (types.ClusterHealth, error) {
 	resp, err := c.api.Cluster.Health(ctx, nil)
 	if err != nil {
-		return types.ClusterHealth{}, classifyOSError(err, resp)
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.ClusterHealth{}, classifyResponseErr(err, status)
 	}
 	return types.ClusterHealth{
 		ClusterName:                 resp.ClusterName,
@@ -80,12 +83,16 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 		},
 	}
 	if filter.Index != "" {
-		req.Indices = splitCSV(filter.Index)
+		req.Indices = esopsclient.SplitCSV(filter.Index)
 	}
 
 	resp, err := c.api.Cat.Shards(ctx, req)
 	if err != nil {
-		return nil, classifyShardsError(err, resp)
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
 	}
 
 	out := make([]types.Shard, 0, len(resp.Shards))
@@ -95,14 +102,14 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 			Shard:             s.Shard,
 			Primary:           s.Prirep == "p",
 			State:             s.State,
-			Docs:              atoi64Ptr(s.Docs),
-			StoreBytes:        atoi64Ptr(s.Store),
-			Node:              derefString(s.Node),
-			IP:                derefString(s.IP),
-			UnassignedReason:  derefString(s.UnassignedReason),
-			UnassignedAt:      derefString(s.UnassignedAt),
-			UnassignedFor:     derefString(s.UnassignedFor),
-			UnassignedDetails: derefString(s.UnassignedDetails),
+			Docs:              esopsclient.Atoi64Ptr(s.Docs),
+			StoreBytes:        esopsclient.Atoi64Ptr(s.Store),
+			Node:              esopsclient.DerefString(s.Node),
+			IP:                esopsclient.DerefString(s.IP),
+			UnassignedReason:  esopsclient.DerefString(s.UnassignedReason),
+			UnassignedAt:      esopsclient.DerefString(s.UnassignedAt),
+			UnassignedFor:     esopsclient.DerefString(s.UnassignedFor),
+			UnassignedDetails: esopsclient.DerefString(s.UnassignedDetails),
 		})
 	}
 	return out, nil
@@ -130,12 +137,16 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 		},
 	}
 	if filter.Index != "" {
-		req.Indices = splitCSV(filter.Index)
+		req.Indices = esopsclient.SplitCSV(filter.Index)
 	}
 
 	resp, err := c.api.Cat.Indices(ctx, req)
 	if err != nil {
-		return nil, classifyIndicesError(err, resp)
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
 	}
 
 	out := make([]types.Index, 0, len(resp.Indices))
@@ -145,99 +156,38 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 			UUID:               r.UUID,
 			Health:             r.Health,
 			Status:             r.Status,
-			Primaries:          intPtrOrZero(r.Primary),
-			Replicas:           intPtrOrZero(r.Replica),
-			DocsCount:          int64PtrOrZero(r.DocsCount),
-			DocsDeleted:        int64PtrOrZero(r.DocDeleted),
-			StoreBytes:         atoi64Ptr(r.StoreSize),
-			PrimaryStoreBytes:  atoi64Ptr(r.PrimaryStoreSize),
+			Primaries:          esopsclient.IntPtrOrZero(r.Primary),
+			Replicas:           esopsclient.IntPtrOrZero(r.Replica),
+			DocsCount:          esopsclient.Int64PtrOrZero(r.DocsCount),
+			DocsDeleted:        esopsclient.Int64PtrOrZero(r.DocDeleted),
+			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PrimaryStoreSize),
 			CreationDateMillis: int64(r.CreationDate),
 		})
 	}
 	return out, nil
 }
 
-func intPtrOrZero(p *int) int {
-	if p == nil {
+// statusOf returns the HTTP status code from the opensearch-go Response
+// embedded in a typed response's Inspect(). Returns 0 when the transport
+// errored before a response came back — the caller treats that as
+// "unreachable" regardless of status.
+func statusOf(r *os.Response) int {
+	if r == nil {
 		return 0
 	}
-	return *p
+	return r.StatusCode
 }
 
-func int64PtrOrZero(p *int) int64 {
-	if p == nil {
-		return 0
+// classifyResponseErr unifies error classification: auth/forbidden go to
+// the sentinel errors by status code; everything else bubbles up as
+// ErrUnreachable wrapping the original transport error.
+func classifyResponseErr(err error, status int) error {
+	switch status {
+	case http.StatusUnauthorized:
+		return esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return esopsclient.ErrForbidden
 	}
-	return int64(*p)
-}
-
-func splitCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func atoi64Ptr(p *string) int64 {
-	if p == nil {
-		return 0
-	}
-	n, _ := strconv.ParseInt(*p, 10, 64)
-	return n
-}
-
-func derefString(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
-}
-
-func classifyShardsError(err error, resp *osapi.CatShardsResp) error {
-	if resp != nil {
-		r := resp.Inspect().Response
-		if r != nil {
-			switch r.StatusCode {
-			case http.StatusUnauthorized:
-				return esopsclient.ErrAuth
-			case http.StatusForbidden:
-				return esopsclient.ErrForbidden
-			}
-		}
-	}
-	return fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
-}
-
-func classifyIndicesError(err error, resp *osapi.CatIndicesResp) error {
-	if resp != nil {
-		r := resp.Inspect().Response
-		if r != nil {
-			switch r.StatusCode {
-			case http.StatusUnauthorized:
-				return esopsclient.ErrAuth
-			case http.StatusForbidden:
-				return esopsclient.ErrForbidden
-			}
-		}
-	}
-	return fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
-}
-
-func classifyOSError(err error, resp *osapi.ClusterHealthResp) error {
-	if resp != nil {
-		r := resp.Inspect().Response
-		if r != nil {
-			switch r.StatusCode {
-			case http.StatusUnauthorized:
-				return esopsclient.ErrAuth
-			case http.StatusForbidden:
-				return esopsclient.ErrForbidden
-			}
-		}
-	}
-	return fmt.Errorf("%w: %v", esopsclient.ErrUnreachable, err)
+	return esopsclient.ClassifyTransport(err)
 }

@@ -7,8 +7,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/cluster"
-	"github.com/dj-wasabi/esops-go/internal/config"
+	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
+	"github.com/dj-wasabi/esops-go/internal/logging"
 	esopsops "github.com/dj-wasabi/esops-go/internal/ops"
 	"github.com/dj-wasabi/esops-go/internal/output"
 	"github.com/dj-wasabi/esops-go/internal/types"
@@ -56,22 +56,9 @@ func runShards(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("--unassigned and --state are mutually exclusive")
 	}
 
-	cfg, _, err := config.LoadDefault(cmd.String("config"))
-	if err != nil {
-		return err
-	}
-	name, cc, err := cfg.ResolveContext(cmd.String("context"))
-	if err != nil {
-		return err
-	}
-	applyOverrides(&cc, cmd)
-
-	format, err := output.Parse(cmd.String("output"))
-	if err != nil {
-		return err
-	}
-
-	c, err := cluster.New(ctx, cc)
+	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+		SupportedFormats: cmdsetup.FormatsStandard,
+	})
 	if err != nil {
 		return err
 	}
@@ -91,11 +78,16 @@ func runShards(ctx context.Context, cmd *cli.Command) error {
 		filter.Role = types.ShardRoleReplica
 	}
 
-	shards, err := esopsops.Shards(ctx, c, filter)
+	shards, err := esopsops.Shards(ctx, s.Client.Shards, filter)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "context=%s dialect=%s version=%s shards=%d\n", name, c.Info.Dialect, c.Info.Version, len(shards))
-	return output.Shards(os.Stdout, shards, format)
+	logging.Logger().Info("ops.shards",
+		"context", s.ContextName,
+		"dialect", string(s.Client.Info.Dialect),
+		"version", s.Client.Info.Version,
+		"shards", len(shards),
+	)
+	return output.Shards(os.Stdout, shards, s.Format)
 }

@@ -26,13 +26,14 @@ type IndexInspector interface {
 	Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error)
 }
 
-// Client is the composite surface returned by factory.New. It embeds
-// cluster metadata (from the probe) plus every capability interface.
+// Client is the composite surface returned by the cluster factory: the
+// probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
-// on *Client directly.
+// on *Client directly — composing (rather than embedding) the interfaces
+// is what makes that a compile-time constraint instead of a convention.
 type Client struct {
-	Info types.ClusterInfo
-	HealthInspector
-	ShardInspector
-	IndexInspector
+	Info    types.ClusterInfo
+	Health  HealthInspector
+	Shards  ShardInspector
+	Indices IndexInspector
 }

@@ -27,12 +27,10 @@ const (
 	FormatNDJSON Format = "ndjson"
 )
 
-// Parse validates and normalises a --output value.
-//
-// NDJSON is accepted only for commands that opt in via a dedicated
-// renderer (currently `index list`). Commands whose renderer does not
-// implement ndjson return a per-command "not supported" error — the
-// parse step no longer rejects the format up-front.
+// Parse validates and normalises a --output value. Per-command
+// restrictions (e.g. "health doesn't support ndjson") are enforced by
+// cmdsetup.Prepare using the command's SupportedFormats allowlist — the
+// renderers here assume the format has already been cleared for use.
 func Parse(s string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "table":
@@ -48,14 +46,6 @@ func Parse(s string) (Format, error) {
 	default:
 		return "", fmt.Errorf("unknown output format %q (supported: table, json, ndjson, yaml, wide)", s)
 	}
-}
-
-// formatNotSupported returns a uniform error message for commands whose
-// renderer does not (yet) implement a particular Format. Keeps the
-// ndjson-not-yet-streaming story consistent without each renderer
-// inventing its own wording.
-func formatNotSupported(cmd string, f Format) error {
-	return fmt.Errorf("output format %q is not supported for %s", f, cmd)
 }
 
 // Health renders a ClusterHealth in the requested format to w.
@@ -76,8 +66,6 @@ func Health(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, f Format
 		return healthTable(w, h, info, true)
 	case FormatTable, "":
 		return healthTable(w, h, info, false)
-	case FormatNDJSON:
-		return formatNotSupported("health", f)
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
@@ -103,8 +91,6 @@ func Shards(w io.Writer, shards []types.Shard, f Format) error {
 		return shardsTable(w, shards, true)
 	case FormatTable, "":
 		return shardsTable(w, shards, false)
-	case FormatNDJSON:
-		return formatNotSupported("shards", f)
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
