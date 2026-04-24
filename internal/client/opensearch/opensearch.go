@@ -4,7 +4,10 @@
 package opensearch
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"context"
@@ -285,4 +288,159 @@ func classifyResponseErr(err error, status int) error {
 		return esopsclient.ErrForbidden
 	}
 	return esopsclient.ClassifyTransport(err)
+}
+
+// osInternalUserWire mirrors an entry from GET /_plugins/_security/api/internalusers.
+// Reserved flags defaults shipped with the plugin (admin, kibanaserver).
+// Hidden is true for system entities the UI hides by default — we
+// surface them anyway, that's what an audit is for. OpenDistro legacy
+// naming on opendistro_security_roles is preserved in the wire type for
+// clarity, then flattened to Roles in the neutral view.
+type osInternalUserWire struct {
+	Reserved      bool     `json:"reserved"`
+	Hidden        bool     `json:"hidden"`
+	BackendRoles  []string `json:"backend_roles"`
+	SecurityRoles []string `json:"opendistro_security_roles"`
+	Description   string   `json:"description"`
+}
+
+// osRoleWire mirrors an entry from GET /_plugins/_security/api/roles.
+// Index patterns are embedded per-block alongside the actions they grant;
+// we flatten the patterns across blocks for the audit view.
+type osRoleWire struct {
+	Reserved           bool     `json:"reserved"`
+	Hidden             bool     `json:"hidden"`
+	Description        string   `json:"description"`
+	ClusterPermissions []string `json:"cluster_permissions"`
+	IndexPermissions   []struct {
+		IndexPatterns []string `json:"index_patterns"`
+	} `json:"index_permissions"`
+}
+
+// Audit implements client.SecurityAuditor against the OpenSearch security
+// plugin. The plugin ships with every production OS build, so unlike ES
+// we don't expect a "security disabled" branch — if the endpoint 404s we
+// still return a disabled status (user removed the plugin) rather than
+// erroring out. 401/403 bubble up for the operator to diagnose.
+func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
+	report := types.SecurityReport{
+		Status: types.SecurityStatus{Dialect: string(types.DialectOpenSearch)},
+	}
+
+	users, disabled, note, err := c.fetchOSUsers(ctx)
+	if err != nil {
+		return report, err
+	}
+	if disabled {
+		report.Status.Note = note
+		return report, nil
+	}
+	report.Status.Enabled = true
+	report.Users = users
+
+	roles, err := c.fetchOSRoles(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.Roles = roles
+	return report, nil
+}
+
+func (c *Client) fetchOSUsers(ctx context.Context) ([]types.SecurityUser, bool, string, error) {
+	body, status, err := c.doSecurityGET(ctx, "/_plugins/_security/api/internalusers")
+	if err != nil {
+		return nil, false, "", err
+	}
+	if status == http.StatusNotFound {
+		return nil, true, "security plugin endpoint not found at /_plugins/_security/api/internalusers", nil
+	}
+	if status == http.StatusUnauthorized {
+		return nil, false, "", esopsclient.ErrAuth
+	}
+	if status == http.StatusForbidden {
+		return nil, false, "", esopsclient.ErrForbidden
+	}
+	if status >= 400 {
+		return nil, false, "", esopsclient.ClassifyStatus("security internalusers", status, body)
+	}
+
+	var raw map[string]osInternalUserWire
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, false, "", errors.Join(errors.New("decoding OS internalusers response"), err)
+	}
+	out := make([]types.SecurityUser, 0, len(raw))
+	for name, u := range raw {
+		out = append(out, types.SecurityUser{
+			Username: name,
+			// OS internalusers has no explicit enable flag. Built-ins (admin,
+			// kibanaserver) are always active; user-defined accounts can be
+			// "disabled" only by deleting them. Report true so the table
+			// column is meaningful on ES and OS alike.
+			Enabled:      true,
+			Reserved:     u.Reserved,
+			Roles:        u.SecurityRoles,
+			BackendRoles: u.BackendRoles,
+			FullName:     u.Description,
+		})
+	}
+	return out, false, "", nil
+}
+
+func (c *Client) fetchOSRoles(ctx context.Context) ([]types.SecurityRole, error) {
+	body, status, err := c.doSecurityGET(ctx, "/_plugins/_security/api/roles")
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusUnauthorized {
+		return nil, esopsclient.ErrAuth
+	}
+	if status == http.StatusForbidden {
+		return nil, esopsclient.ErrForbidden
+	}
+	if status >= 400 {
+		return nil, esopsclient.ClassifyStatus("security roles", status, body)
+	}
+
+	var raw map[string]osRoleWire
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, errors.Join(errors.New("decoding OS roles response"), err)
+	}
+	out := make([]types.SecurityRole, 0, len(raw))
+	for name, r := range raw {
+		patterns := make([]string, 0)
+		for _, ix := range r.IndexPermissions {
+			patterns = append(patterns, ix.IndexPatterns...)
+		}
+		out = append(out, types.SecurityRole{
+			Name:              name,
+			Reserved:          r.Reserved,
+			ClusterPrivileges: r.ClusterPermissions,
+			IndexPatterns:     esopsclient.UniqueStrings(patterns),
+			Description:       r.Description,
+		})
+	}
+	return out, nil
+}
+
+// doSecurityGET drops down to the underlying opensearch-go transport so
+// we can hit the /_plugins/_security/api/* endpoints that opensearch-go/v4
+// doesn't wrap in typed helpers. Returns (body, status, err) — the body
+// is read into memory so the caller can use it in either a decode or an
+// error message without a second pass over the response.
+func (c *Client) doSecurityGET(ctx context.Context, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.api.Client.Perform(req)
+	if err != nil {
+		return nil, 0, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
 }

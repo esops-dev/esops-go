@@ -335,3 +335,172 @@ A `no` answer from the cluster is still a successful query: the
 explanation prints and the process exits 0. Scripts should look at
 `can_allocate` / `current_state` in the JSON output, not at the exit
 code.
+
+## `esops ops audit`
+
+Summarises the security posture of the cluster and the connection
+esops is making to it — a single command to answer "who can talk to
+this cluster, with what, and how am I reaching it?". Combines three
+sources:
+
+1. **TLS posture.** Computed from the context config, not from the
+   cluster: the URL scheme, whether `insecure: true` is set, whether
+   a custom CA is in play, which auth type is configured, and whether
+   a client cert is being presented.
+2. **Security status.** Dialect-aware probe. Reports whether the
+   cluster actually has a security feature turned on at all —
+   because an ES cluster with `xpack.security.enabled=false` or an OS
+   without the security plugin is a valid (and worth surfacing)
+   state, not an error.
+3. **Users and roles.** Native-realm users on Elasticsearch
+   (`/_security/user`, `/_security/role`); internal users and roles on
+   OpenSearch via the security plugin (`/_plugins/_security/api/internalusers`,
+   `/_plugins/_security/api/roles`).
+
+```sh
+$ esops --context local-es-mtls ops audit
+TLS
+  scheme:     https
+  insecure:   false
+  cacert_set: true
+  auth:       mtls
+  client_cert: true
+
+SECURITY
+  dialect:  elasticsearch
+  enabled:  true
+
+USERS
+USERNAME                ENABLED  RESERVED  ROLES
+elastic                 true     true      superuser
+kibana_system           true     true      kibana_system
+...
+
+ROLES
+NAME                     RESERVED  CLUSTER    INDEX_PATTERNS
+kibana_admin             true      -          -
+kibana_system            true      monitor,…  .kibana*,.reindexed-v8-kibana*,…
+superuser                true      all        *
+...
+```
+
+User-defined entities sort before reserved (built-in) ones, so an
+operator scanning for "did somebody add a user here?" reads the top of
+each table and stops. Within each group, entries are sorted by name.
+
+### Security disabled clusters
+
+When the cluster runs without a security feature, `ops audit` still
+succeeds and reports the status rather than erroring:
+
+```sh
+$ esops --context local-es ops audit          # xpack.security.enabled=false
+TLS
+  scheme:     http
+  insecure:   false
+  cacert_set: false
+  auth:       none
+
+SECURITY
+  dialect:  elasticsearch
+  enabled:  false
+  note:     no handler found for uri [/_security/user] and method [GET]
+```
+
+The note quotes the cluster's own error string so you can distinguish
+between "feature disabled by config" and "endpoint not registered"
+without shelling into the box. The `USERS` and `ROLES` sections are
+omitted — there's nothing for the cluster to return.
+
+The same graceful-degradation applies to OpenSearch if the security
+plugin is absent (rare on production builds, but possible on stripped
+distributions).
+
+### Output formats
+
+| Flag             | Intended for                                                                                         |
+| ---------------- | ---------------------------------------------------------------------------------------------------- |
+| `-o table` (def) | Human eyes. Four-section layout: TLS → SECURITY → USERS → ROLES. Long cluster-privilege and index-pattern cells are truncated with `…`; use `-o wide` for the full strings. |
+| `-o wide`        | Adds `BACKEND_ROLES`, `FULL_NAME`, `EMAIL` to USERS and `DESCRIPTION` to ROLES, and drops the cluster/pattern truncation. |
+| `-o json`        | Scripts. One top-level object with `tls`, `status`, `users`, `roles` keys. Stable field names, matches the neutral domain types. |
+| `-o yaml`        | Same shape as JSON.                                                                                  |
+
+NDJSON is not supported: `audit` emits one structured report, not a
+stream of records.
+
+Empty fields are omitted from JSON/YAML (`backend_roles` is absent for
+ES users, `email` is absent for OS users, etc.). Scripts should default
+to an empty array when the key is missing.
+
+### Dialect differences worth knowing
+
+The CLI surface is identical, but the data behind the columns isn't —
+the two products don't model identity the same way, and `ops audit`
+does not pretend otherwise:
+
+| Field              | Elasticsearch source                         | OpenSearch source                       |
+| ------------------ | -------------------------------------------- | ----------------------------------------|
+| `enabled`          | `enabled` on the user record                 | Always `true` (OS has no disable flag; delete the user to disable). |
+| `reserved`         | `metadata._reserved`                         | `reserved` on the record                |
+| `roles`            | `roles` (native-realm role names)            | `opendistro_security_roles`             |
+| `backend_roles`    | — (always empty)                             | `backend_roles` (external LDAP/OIDC)    |
+| `full_name` / `email` | Native-realm metadata                     | OS has no email; `description` is mapped to `full_name` when present |
+| role `cluster_privileges` | `cluster` array                       | `cluster_permissions` array             |
+| role `index_patterns` | Union of `indices[].names`                | Union of `index_permissions[].index_patterns` |
+
+Per-action privilege detail, field-level security (FLS), and
+document-level security (DLS) are deliberately not in the MVP output —
+they'd double the column width without helping the "is anything
+user-defined with wildcard access?" question most operators are
+asking. A future `--deep` flag can expand that; the JSON schema is
+designed to grow compatibly.
+
+### What `ops audit` does **not** do
+
+- **No identity migration.** `ops audit` reads security state; it does
+  not copy users or roles between clusters. ES and OS security models
+  are not interchangeable. See the non-goals in the project brief.
+- **No API keys, role mappings, tenants, or action groups (yet).**
+  Scoped out of v0.1.0 to keep the output readable. These are well-defined
+  endpoints and will be added when a concrete user asks.
+- **No privilege analysis.** The tool surfaces what the cluster reports;
+  it does not score "is this dangerous?" A wildcard index pattern on a
+  user-defined role is information — judging it is your job.
+
+### Examples
+
+```sh
+# Every user-defined entity across the cluster, scripted.
+esops ops audit -o json | jq '{
+  users: [.users[] | select(.reserved == false)],
+  roles: [.roles[] | select(.reserved == false)]
+}'
+
+# Anyone with cluster_privileges including "all"? (superuser auditing.)
+esops ops audit -o json | jq '.roles[]
+  | select(.cluster_privileges // [] | index("all"))
+  | .name'
+
+# mTLS-only: prove what's being presented on the wire.
+esops --context local-es-mtls ops audit -o json | jq .tls
+
+# Cross-dialect: same command, OpenSearch — watch `backend_roles`
+# appear in -o wide.
+esops --context local-os ops audit -o wide
+```
+
+### Exit codes
+
+`audit` follows the project-wide exit-code contract:
+
+| Code | Meaning                                                      |
+| ---- | ------------------------------------------------------------ |
+| 0    | Cluster reachable; audit rendered (including when security is disabled). |
+| 1    | Generic error (unexpected cluster response, decode failure). |
+| 3    | Cluster unreachable.                                         |
+| 4    | Authentication failed (HTTP 401) — check the configured credentials. |
+| 5    | Authorization failed (HTTP 403) — the caller is authenticated but cannot read the security endpoints. On ES this typically means the user lacks `manage_security`; on OS it means the account is not mapped to an admin backend role. |
+
+A "security disabled" cluster exits 0 — the absence is the finding, not
+an error. Scripts that want to fail on disabled security should assert
+`jq -e '.status.enabled'` on the JSON output.

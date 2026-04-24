@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
@@ -384,4 +385,198 @@ func classifyResponse(op string, status int, body io.Reader) error {
 	}
 	raw, _ := io.ReadAll(body)
 	return esopsclient.ClassifyStatus(op, status, raw)
+}
+
+// securityUserWire mirrors an entry in GET /_security/user. The endpoint
+// returns a JSON object keyed by username; we decode the value side
+// into this struct. Metadata._reserved flags built-in users (elastic,
+// kibana_system, etc.) that ship with an ES distribution.
+type securityUserWire struct {
+	Username string   `json:"username"`
+	Roles    []string `json:"roles"`
+	FullName string   `json:"full_name"`
+	Email    string   `json:"email"`
+	Enabled  bool     `json:"enabled"`
+	Metadata struct {
+		Reserved bool `json:"_reserved"`
+	} `json:"metadata"`
+}
+
+// securityRoleWire mirrors an entry in GET /_security/role. The indices
+// block is a list of {names, privileges, ...} records; we flatten the
+// names across records so the audit view shows "what patterns this role
+// touches" without exploding per-privilege detail at the table layer.
+type securityRoleWire struct {
+	Cluster  []string `json:"cluster"`
+	Indices  []struct {
+		Names []string `json:"names"`
+	} `json:"indices"`
+	Metadata struct {
+		Reserved bool `json:"_reserved"`
+	} `json:"metadata"`
+}
+
+// Audit implements client.SecurityAuditor against ES's native security
+// realm. Flow:
+//
+//  1. GET /_security/user. If it 400s with a body indicating security is
+//     not enabled, short-circuit to a "security disabled" report — this
+//     is the ES-with-xpack.security.enabled=false case, valid and worth
+//     surfacing.
+//  2. Otherwise decode users, then GET /_security/role and decode roles.
+//
+// 401/403 bubble up as ErrAuth/ErrForbidden. Other 4xx/5xx bubble up
+// wrapped. The report's Status always identifies the dialect.
+func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
+	report := types.SecurityReport{
+		Status: types.SecurityStatus{Dialect: string(types.DialectElasticsearch)},
+	}
+
+	users, note, disabled, err := c.fetchESUsers(ctx)
+	if err != nil {
+		return report, err
+	}
+	if disabled {
+		report.Status.Note = note
+		return report, nil
+	}
+	report.Status.Enabled = true
+	report.Users = users
+
+	roles, err := c.fetchESRoles(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.Roles = roles
+	return report, nil
+}
+
+// fetchESUsers returns (users, note, disabled, err). When disabled is
+// true, the cluster has security turned off and note carries the human
+// explanation — the caller should emit a "security disabled" report
+// rather than an error.
+func (c *Client) fetchESUsers(ctx context.Context) ([]types.SecurityUser, string, bool, error) {
+	resp, err := c.api.Security.GetUser(c.api.Security.GetUser.WithContext(ctx))
+	if err != nil {
+		return nil, "", false, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, "", false, esopsclient.ClassifyStatus("security get user", resp.StatusCode, nil)
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		if isSecurityDisabledBody(raw) {
+			return nil, securityDisabledNote(raw), true, nil
+		}
+		return nil, "", false, esopsclient.ClassifyStatus("security get user", resp.StatusCode, raw)
+	}
+
+	var raw map[string]securityUserWire
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, "", false, errors.Join(errors.New("decoding security users response"), err)
+	}
+	out := make([]types.SecurityUser, 0, len(raw))
+	for name, u := range raw {
+		username := u.Username
+		if username == "" {
+			username = name
+		}
+		out = append(out, types.SecurityUser{
+			Username: username,
+			Enabled:  u.Enabled,
+			Reserved: u.Metadata.Reserved,
+			Roles:    u.Roles,
+			FullName: u.FullName,
+			Email:    u.Email,
+		})
+	}
+	return out, "", false, nil
+}
+
+func (c *Client) fetchESRoles(ctx context.Context) ([]types.SecurityRole, error) {
+	resp, err := c.api.Security.GetRole(c.api.Security.GetRole.WithContext(ctx))
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("security get role", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var raw map[string]securityRoleWire
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, errors.Join(errors.New("decoding security roles response"), err)
+	}
+
+	out := make([]types.SecurityRole, 0, len(raw))
+	for name, r := range raw {
+		patterns := make([]string, 0)
+		for _, ix := range r.Indices {
+			patterns = append(patterns, ix.Names...)
+		}
+		out = append(out, types.SecurityRole{
+			Name:              name,
+			Reserved:          r.Metadata.Reserved,
+			ClusterPrivileges: r.Cluster,
+			IndexPatterns:     esopsclient.UniqueStrings(patterns),
+		})
+	}
+	return out, nil
+}
+
+// isSecurityDisabledBody sniffs an ES error body for the signals that
+// mean "this cluster has no security feature registered", without which
+// there's nothing for `ops audit` to report. Two flavours seen in the
+// wild:
+//
+//   - "Security must be explicitly enabled" / "security is not enabled"
+//     (returned by older/licensed paths when the feature exists but is off)
+//   - "no handler found for uri [/_security/..." (ES 9.3 with
+//     xpack.security.enabled=false — the handler isn't registered at all)
+//
+// Matched case-insensitively so minor version tweaks don't regress the
+// detection. The classifier is intentionally conservative: on a match we
+// return "security disabled" as the audit outcome; a miss bubbles up as a
+// generic error with the body in the message, which is the right
+// behaviour for unknown 4xx/5xx.
+func isSecurityDisabledBody(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	switch {
+	case strings.Contains(lower, "security must be explicitly enabled"):
+		return true
+	case strings.Contains(lower, "security is not enabled"):
+		return true
+	case strings.Contains(lower, "no handler found") && strings.Contains(lower, "/_security/"):
+		return true
+	case strings.Contains(lower, "security_exception") && strings.Contains(lower, "disabled"):
+		return true
+	}
+	return false
+}
+
+// securityDisabledNote extracts the cluster's own reason string from an
+// ES error body so the audit output quotes the cluster rather than
+// paraphrasing. Two body shapes: `{"error":{"reason":"..."}}` (the
+// typical typed error) and `{"error":"..."}` (the 9.x "no handler found"
+// bare-string form). Falls back to a generic message when neither
+// matches — surfacing *something* beats going silent.
+func securityDisabledNote(body []byte) string {
+	var typed struct {
+		Error struct {
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &typed); err == nil && typed.Error.Reason != "" {
+		return typed.Error.Reason
+	}
+	var bare struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &bare); err == nil && bare.Error != "" {
+		return bare.Error
+	}
+	return "security is disabled on this cluster"
 }
