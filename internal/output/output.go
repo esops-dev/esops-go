@@ -66,6 +66,109 @@ func Health(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, f Format
 	}
 }
 
+// Shards renders a slice of Shard rows in the requested format. Table
+// output shows the columns an operator reaches for first during an
+// incident (index, shard, role, state, node, size). Wide adds docs,
+// IP, and the raw STORE_BYTES. JSON/YAML emit the neutral Shard shape
+// unchanged — scripts depend on stable field names.
+func Shards(w io.Writer, shards []types.Shard, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(shards)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(shards)
+	case FormatWide:
+		return shardsTable(w, shards, true)
+	case FormatTable, "":
+		return shardsTable(w, shards, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func shardsTable(w io.Writer, shards []types.Shard, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+
+	// REASON is appended to the default table only when at least one row
+	// actually has a reason — keeps the happy-path view tight, but makes
+	// `ops shards --unassigned` self-explanatory without -o wide.
+	showReason := wide
+	if !showReason {
+		for _, s := range shards {
+			if s.UnassignedReason != "" {
+				showReason = true
+				break
+			}
+		}
+	}
+
+	switch {
+	case wide:
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tSTATE\tDOCS\tSTORE\tSTORE_BYTES\tNODE\tIP\tREASON\tSINCE")
+	case showReason:
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tSTATE\tSTORE\tNODE\tREASON")
+	default:
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tSTATE\tSTORE\tNODE")
+	}
+
+	for _, s := range shards {
+		role := "r"
+		if s.Primary {
+			role = "p"
+		}
+		node := s.Node
+		if node == "" {
+			node = "-"
+		}
+		reason := s.UnassignedReason
+		if reason == "" {
+			reason = "-"
+		}
+		switch {
+		case wide:
+			ip := s.IP
+			if ip == "" {
+				ip = "-"
+			}
+			since := s.UnassignedFor
+			if since == "" {
+				since = "-"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\n",
+				s.Index, s.Shard, role, s.State,
+				s.Docs, humanBytes(s.StoreBytes), s.StoreBytes, node, ip, reason, since)
+		case showReason:
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+				s.Index, s.Shard, role, s.State, humanBytes(s.StoreBytes), node, reason)
+		default:
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+				s.Index, s.Shard, role, s.State, humanBytes(s.StoreBytes), node)
+		}
+	}
+	return tw.Flush()
+}
+
+// humanBytes formats byte counts in the same kubectl-ish style used by
+// the upstream _cat/shards default output: one decimal place, IEC units.
+// A zero-byte shard (unassigned, empty, or system) renders as "0b".
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%db", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cb", float64(n)/float64(div), "kmgtpe"[exp])
+}
+
 func healthTable(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if wide {

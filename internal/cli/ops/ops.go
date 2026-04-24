@@ -14,6 +14,7 @@ func Command() *cli.Command {
 		Usage: "Day-to-day cluster operations",
 		Commands: []*cli.Command{
 			healthCommand(),
+			shardsCommand(),
 		},
 	}
 }

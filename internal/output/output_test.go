@@ -142,3 +142,155 @@ func TestHealth_rejectsUnknownFormat(t *testing.T) {
 		t.Fatal("expected error for unknown format")
 	}
 }
+
+func sampleShards() []types.Shard {
+	return []types.Shard{
+		{Index: "logs", Shard: 0, Primary: true, State: "STARTED", Docs: 200, StoreBytes: 34981, Node: "es01", IP: "10.0.0.1"},
+		{Index: "logs", Shard: 1, Primary: true, State: "UNASSIGNED",
+			UnassignedReason: "NODE_LEFT", UnassignedAt: "2026-04-24T09:18:19.440Z", UnassignedFor: "12.3s",
+			UnassignedDetails: "node_left[abc123]"},
+		{Index: "users", Shard: 0, Primary: true, State: "STARTED", Docs: 20, StoreBytes: 9255, Node: "es02", IP: "10.0.0.2"},
+	}
+}
+
+func allStartedShards() []types.Shard {
+	return []types.Shard{
+		{Index: "logs", Shard: 0, Primary: true, State: "STARTED", Docs: 200, StoreBytes: 34981, Node: "es01", IP: "10.0.0.1"},
+		{Index: "users", Shard: 0, Primary: true, State: "STARTED", Docs: 20, StoreBytes: 9255, Node: "es02", IP: "10.0.0.2"},
+	}
+}
+
+func TestShards_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, sampleShards(), output.FormatJSON); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	for _, field := range []string{"index", "shard", "primary", "state", "docs", "store_bytes"} {
+		if _, ok := rows[0][field]; !ok {
+			t.Errorf("missing field %q in JSON row: %+v", field, rows[0])
+		}
+	}
+	// omitempty: unassigned shard has no node/ip fields.
+	if _, ok := rows[1]["node"]; ok {
+		t.Errorf("unassigned shard should not have a node field: %+v", rows[1])
+	}
+	// omitempty: STARTED shards never carry an unassigned_reason.
+	for _, field := range []string{"unassigned_reason", "unassigned_at", "unassigned_for", "unassigned_details"} {
+		if _, ok := rows[0][field]; ok {
+			t.Errorf("STARTED shard must omit %q (saw %+v)", field, rows[0])
+		}
+	}
+	// Unassigned shard carries the full reason quartet.
+	wantReason := map[string]string{
+		"unassigned_reason":  "NODE_LEFT",
+		"unassigned_at":      "2026-04-24T09:18:19.440Z",
+		"unassigned_for":     "12.3s",
+		"unassigned_details": "node_left[abc123]",
+	}
+	for k, want := range wantReason {
+		if got, _ := rows[1][k].(string); got != want {
+			t.Errorf("rows[1][%q] = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestShards_yamlIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, sampleShards(), output.FormatYAML); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	var rows []map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid YAML: %v\noutput: %s", err, buf.String())
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+}
+
+func TestShards_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, sampleShards(), output.FormatTable); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"INDEX", "SHARD", "ROLE", "STATE", "STORE", "NODE", "logs", "users", "UNASSIGNED"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestShards_wideIncludesDocsIPAndBytes(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, sampleShards(), output.FormatWide); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"DOCS", "IP", "STORE_BYTES", "REASON", "SINCE", "10.0.0.1", "34981", "NODE_LEFT", "12.3s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestShards_defaultTableAppendsReasonWhenUnassignedPresent(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, sampleShards(), output.FormatTable); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "REASON") {
+		t.Errorf("default table should append REASON column when unassigned shards are present:\n%s", out)
+	}
+	if !strings.Contains(out, "NODE_LEFT") {
+		t.Errorf("default table should show reason value for unassigned shards:\n%s", out)
+	}
+}
+
+func TestShards_defaultTableOmitsReasonWhenAllHealthy(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, allStartedShards(), output.FormatTable); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	if strings.Contains(buf.String(), "REASON") {
+		t.Errorf("default table should NOT show REASON when every shard is STARTED:\n%s", buf.String())
+	}
+}
+
+func TestShards_unassignedRendersDashForNode(t *testing.T) {
+	only := []types.Shard{{Index: "x", Shard: 0, Primary: true, State: "UNASSIGNED"}}
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, only, output.FormatTable); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	// tabwriter expands to spaces, so look for the dash at the end of the data row.
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) < 2 || !strings.HasSuffix(lines[1], "-") {
+		t.Errorf("expected '-' at end of data row for empty node:\n%s", buf.String())
+	}
+}
+
+func TestShards_rejectsUnknownFormat(t *testing.T) {
+	err := output.Shards(&bytes.Buffer{}, sampleShards(), output.Format("bogus"))
+	if err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestShards_emptyTableStillPrintsHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Shards(&buf, nil, output.FormatTable); err != nil {
+		t.Fatalf("Shards: %v", err)
+	}
+	if !strings.Contains(buf.String(), "INDEX") {
+		t.Errorf("empty result should still render header:\n%s", buf.String())
+	}
+}
