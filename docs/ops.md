@@ -504,3 +504,269 @@ esops --context local-os ops audit -o wide
 A "security disabled" cluster exits 0 — the absence is the finding, not
 an error. Scripts that want to fail on disabled security should assert
 `jq -e '.status.enabled'` on the JSON output.
+
+## `esops ops hot-threads`
+
+Wraps `/_nodes/hot_threads` — the JVM introspection endpoint both
+Elasticsearch and OpenSearch expose in the same text format. The
+canonical "what is this node actually doing?" view when CPU is pinned,
+a thread is blocking on a lock, or the cluster is waiting on I/O.
+
+```sh
+$ esops ops hot-threads --threads 1 --snapshots 2
+::: {es01}{…}{…}{es01}{172.22.0.2}{…}{…}{9.3.3}{…}{…}
+   Hot threads at 2026-04-24T19:24:02.965Z, interval=500ms, busiestThreads=1, ignoreIdleThreads=true:
+
+::: {es02}{…}{…}{es02}{172.22.0.4}{…}{…}{9.3.3}{…}{…}
+   Hot threads at 2026-04-24T19:24:02.969Z, interval=500ms, busiestThreads=1, ignoreIdleThreads=true:
+```
+
+The output is the cluster's own text block: a `::: {node}` header per
+node, followed by the sampled stack frames for each of the busiest
+threads it saw. esops does not reshape or parse this — the format is
+a cluster-version implementation detail, and the canonical form is the
+one a support engineer will expect in a ticket paste.
+
+### Flags
+
+| Flag              | Purpose                                                                      |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `--node NAME`     | Limit to one or more nodes (repeatable, or comma-separated). Omit = all.     |
+| `--threads N`     | Number of busy threads per node (cluster default: 3).                        |
+| `--interval D`    | Sampling interval between snapshots (cluster default: 500ms).                |
+| `--snapshots N`   | Number of stacktrace snapshots per thread (cluster default: 10).             |
+| `--type T`        | Sampling dimension: `cpu` (default), `wait`, `block`, or `mem`.              |
+| `--show-idle`     | Include threads parked on idle socket/queue selectors (default: hide them).  |
+
+The valid `--type` values are validated client-side — a typo fails fast
+with exit code 1 rather than round-tripping to the cluster for an HTTP
+400. `--threads` and `--snapshots` must be positive.
+
+### Output formats
+
+| Flag             | Intended for                                                                |
+| ---------------- | --------------------------------------------------------------------------- |
+| `-o table` (def) | Human eyes. The cluster's raw text, verbatim.                               |
+| `-o wide`        | Same as `table` — the text block has no "narrow vs. wide" dimension.        |
+| `-o json`        | Scripts. `{ "text": "...\n..." }` — one object, one string field.           |
+| `-o yaml`        | Same shape as JSON.                                                         |
+
+NDJSON is not supported: hot-threads emits one text blob, not a stream
+of records.
+
+The JSON/YAML envelope keeps the scripted contract ("JSON output is a
+single object") intact without pretending there's a per-node schema
+that can be queried. For per-node triage, rely on the `::: {node}`
+markers in the text — `grep -B1 -A30 ':::'` is the standard idiom.
+
+### Dialect differences worth knowing
+
+The four `--type` values are all accepted on Elasticsearch. On
+OpenSearch, the typed client's parameter struct only wires `cpu`;
+esops falls back to a raw GET with the query parameter set for
+`wait`/`block`/`mem` so the CLI surface stays identical. The cluster
+itself supports all four dimensions — only the SDK wrapping differs.
+
+### Examples
+
+```sh
+# Default bundle: all nodes, cluster defaults (3 threads, 10 snapshots, 500ms).
+esops ops hot-threads
+
+# Single node, higher-resolution sample.
+esops ops hot-threads --node es01 --threads 5 --snapshots 20 --interval 1s
+
+# Find wait/block contention, not CPU.
+esops ops hot-threads --type wait
+
+# Script-friendly: grab the text blob only.
+esops ops hot-threads -o json | jq -r '.text' > hot.txt
+
+# OpenSearch — same CLI.
+esops --context local-os ops hot-threads --type block
+```
+
+### Exit codes
+
+`hot-threads` follows the project-wide exit-code contract:
+
+| Code | Meaning                                                          |
+| ---- | ---------------------------------------------------------------- |
+| 0    | Cluster answered; output rendered.                               |
+| 1    | Generic error (invalid `--type`, non-positive `--threads`, etc.). |
+| 2    | Usage error (unknown flag, bad `--output`).                      |
+| 3    | Cluster unreachable.                                             |
+| 4    | Authentication failed (HTTP 401).                                |
+| 5    | Authorization failed (HTTP 403).                                 |
+
+## `esops ops diag`
+
+Collects a diagnostic bundle for the active cluster and writes it as a
+single gzipped tarball. The default capture answers "why is this cluster
+behaving this way?" — cluster health, node stats, hot threads, pending
+and running tasks, shard allocation, snapshot repositories, and the
+dialect-specific lifecycle policies (ILM on Elasticsearch, ISM on
+OpenSearch). Every response is captured verbatim so Elastic/OpenSearch
+support can parse it with their own tools without second-guessing
+esops's normalised view.
+
+```sh
+$ esops ops diag
+wrote esops-diag-esops-dev-es-20260424T190352Z.tar.gz (18 artifacts, 0 failed)
+
+$ tar -tzf esops-diag-*.tar.gz | head
+manifest.json
+cluster_info.json
+cluster_health.json
+cluster_state.json
+cluster_stats.json
+cluster_settings.json
+cluster_pending_tasks.json
+cluster_allocation_explain.json
+nodes_info.json
+nodes_stats.json
+```
+
+Read the manifest without unpacking:
+
+```sh
+$ tar -xOzf esops-diag-*.tar.gz manifest.json | jq '{cluster, artifact_count: (.artifacts|length)}'
+{
+  "cluster": { "name": "esops-dev-es", "dialect": "elasticsearch", "version": "9.3.3" },
+  "artifact_count": 18
+}
+```
+
+The progress line (`wrote …`) goes to stderr so `--out -` remains safe
+for piping straight into an upload.
+
+### What's in the bundle
+
+Always captured (when the endpoint exists on this dialect):
+
+| File                         | Endpoint                                   | Purpose                                   |
+| ---------------------------- | ------------------------------------------ | ----------------------------------------- |
+| `manifest.json`              | — (tool-generated)                         | Index: tool version, cluster identity, per-artifact status and size. |
+| `cluster_info.json`          | `GET /`                                    | Product, version, build.                  |
+| `cluster_health.json`        | `/_cluster/health?level=indices`           | Overall + per-index health.               |
+| `cluster_state.json`         | `/_cluster/state/_all`                     | Routing, metadata, master node — usually the bulk of the bundle by size. |
+| `cluster_stats.json`         | `/_cluster/stats`                          | Rolled-up cluster-level numbers.          |
+| `cluster_settings.json`      | `/_cluster/settings?include_defaults=true&flat_settings=true` | Effective settings (persistent + transient + defaults). |
+| `cluster_pending_tasks.json` | `/_cluster/pending_tasks`                  | Queue of cluster-manager tasks not yet applied. |
+| `cluster_allocation_explain.json` | `/_cluster/allocation/explain`        | First unassigned shard explained; 400 when cluster is healthy (recorded). |
+| `nodes_info.json`            | `/_nodes`                                  | Per-node settings, plugins, JVM, OS.      |
+| `nodes_stats.json`           | `/_nodes/stats`                            | Per-node indexing, search, JVM, FS, thread pool counters. |
+| `nodes_hot_threads.txt`      | `/_nodes/hot_threads`                      | Sampled hot threads (text, not JSON).     |
+| `tasks.json`                 | `/_tasks?detailed=true`                    | Currently-running tasks (reindex, force merge, snapshot, …). |
+| `cat_allocation.json`        | `/_cat/allocation?format=json&bytes=b`     | Per-node shard/disk allocation.           |
+| `cat_shards.json`            | `/_cat/shards?format=json&bytes=b`         | One row per shard.                        |
+| `cat_indices.json`           | `/_cat/indices?format=json&bytes=b&expand_wildcards=open,closed,hidden` | One row per index, including hidden/closed. |
+| `cat_recovery.json`          | `/_cat/recovery?format=json&bytes=b&active_only=true` | In-flight shard recoveries. |
+| `snapshot_repositories.json` | `/_snapshot`                               | Registered snapshot repositories.         |
+| `ilm_policies.json` *(ES)*   | `/_ilm/policy`                             | Every ILM policy in the cluster.          |
+| `ilm_status.json` *(ES)*     | `/_ilm/status`                             | ILM service running/stopped.              |
+| `ism_policies.json` *(OS)*   | `/_plugins/_ism/policies`                  | Every ISM policy in the cluster.          |
+
+Opt-in (off by default):
+
+| Flag                      | File                              | Endpoint                                 | Why it's opt-in                         |
+| ------------------------- | --------------------------------- | ---------------------------------------- | --------------------------------------- |
+| `--include-slowlog`       | `index_slowlog_settings.json`     | `/_all/_settings?…slowlog…&include_defaults=true` | Exposes which queries the cluster would log — review before sharing. |
+| `--include-mappings`      | `index_mappings.json`             | `/_all/_mapping`                         | Can be hundreds of MB on clusters with many indices. |
+| `--include-idle-threads`  | `nodes_hot_threads_with_idle.txt` | `/_nodes/hot_threads?ignore_idle_threads=false` | Noisy by default (the cluster hides idle threads for a reason), but the right next step when the busy-only capture doesn't explain the symptom — parked threads in contended locks look "idle" to the default filter. |
+
+The HTTP slow-log settings are captured, not the log *file* — the cluster
+doesn't expose log contents over its API, only the configuration that
+controls them.
+
+### Redaction
+
+The bundle never contains the cluster URL, an `Authorization` header,
+a password, or a client-certificate path. The only place such values
+could appear is the manifest, and the manifest is tool-generated — we
+simply don't write connection details into it. Response bodies come
+from the cluster and do not include the credentials used to reach it.
+
+If an endpoint's natural response embeds something you consider
+sensitive for your environment (IP addresses in `nodes_info`, index
+names in `cat_indices`, user-identifying fields in `cluster_state`),
+review the bundle before sharing it upstream. esops does not
+hash-replace cluster-returned content — operators need to see it for
+triage, and judging "is this sensitive *here*?" is site-specific.
+
+### Flags
+
+| Flag                 | Purpose                                                            |
+| -------------------- | ------------------------------------------------------------------ |
+| `--out PATH`, `-O`   | Write the tarball to PATH. Use `-` for stdout. Default: `./esops-diag-<cluster>-<timestamp>.tar.gz`. |
+| `--include-slowlog`  | Also capture per-index slow-log settings.                          |
+| `--include-mappings` | Also capture `/_all/_mapping` (large on big clusters).             |
+
+`ops diag` does not accept `-o`/`--output`: the command produces a
+tarball, not a tabular view. Global flags (`--context`, `--url`,
+`--timeout`, `--insecure`, `--cacert`, `--log-*`) work as usual.
+
+### Streaming the bundle
+
+`--out -` writes the tarball to stdout and the progress line to stderr,
+so the bundle can be piped straight into an upload without touching
+disk:
+
+```sh
+# Attach the bundle to a GitHub issue.
+esops ops diag --out - | gh issue create --title 'Cluster issue' --body-file -
+
+# Pipe into S3 without ever landing on the laptop.
+esops ops diag --out - | aws s3 cp - s3://support-bucket/$(hostname)-diag-$(date -u +%Y%m%d).tar.gz
+```
+
+### Bundle shape
+
+```
+manifest.json                     Tool-generated index (always first).
+cluster_info.json                 One file per collected endpoint, verbatim.
+cluster_health.json
+...
+```
+
+Files are ordered "broad → narrow" in the tar stream (cluster → nodes →
+shards → features), so `tar -tzf` lists reads top-down from high-level
+context. The manifest's `artifacts` array mirrors the same order.
+
+### Examples
+
+```sh
+# Default bundle for support tickets.
+esops ops diag
+
+# Full bundle including mappings and slow-log settings.
+esops ops diag --include-mappings --include-slowlog
+
+# Targeted capture of an OpenSearch context.
+esops --context local-os ops diag --out os-triage.tar.gz
+
+# Inspect a bundle in place without unpacking.
+tar -xOzf esops-diag-*.tar.gz manifest.json | jq '.artifacts[] | select(.status != 200)'
+
+# Extract a single artifact for inspection.
+tar -xOzf esops-diag-*.tar.gz nodes_hot_threads.txt | less
+```
+
+### Exit codes
+
+`diag` follows the project-wide exit-code contract:
+
+| Code | Meaning                                                      |
+| ---- | ------------------------------------------------------------ |
+| 0    | Bundle written; some artifacts may have non-2xx status but the collection completed. |
+| 1    | Generic error (output file could not be opened, tar write failure, etc.). |
+| 3    | Cluster unreachable.                                         |
+| 4    | Authentication failed — stops early, does not write a half-empty bundle. |
+| 5    | Authorization failed — same rationale as 4.                  |
+
+A 400 or 404 from a single endpoint is recorded in `manifest.json` and
+does not fail the run: a healthy cluster legitimately returns 400 on
+`/_cluster/allocation/explain` (nothing is unassigned), and lifecycle
+endpoints 404 on the wrong dialect. Scripts that need to gate on these
+should iterate `manifest.artifacts[].status` rather than rely on the
+exit code.

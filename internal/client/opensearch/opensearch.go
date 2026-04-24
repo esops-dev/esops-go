@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"context"
 
@@ -443,4 +445,126 @@ func (c *Client) doSecurityGET(ctx context.Context, path string) ([]byte, int, e
 		return nil, resp.StatusCode, err
 	}
 	return body, resp.StatusCode, nil
+}
+
+// HotThreads implements client.HotThreadsInspector. The OS v4 SDK's
+// typed NodesHotThreadsParams does not expose the `type` query
+// parameter, so a non-default Type (wait/block/mem) falls back to DoGET
+// via buildHotThreadsPath — OS does accept the param on the wire, only
+// the typed wrapper omits it.
+func (c *Client) HotThreads(ctx context.Context, req types.HotThreadsRequest) (types.HotThreads, error) {
+	if req.Type != "" && !strings.EqualFold(req.Type, "cpu") {
+		return c.hotThreadsViaGET(ctx, req)
+	}
+
+	osReq := &osapi.NodesHotThreadsReq{
+		NodeID: req.Nodes,
+		Params: osapi.NodesHotThreadsParams{
+			Threads:           req.Threads,
+			Interval:          req.Interval,
+			Snapshots:         req.Snapshots,
+			IgnoreIdleThreads: req.IgnoreIdleThreads,
+		},
+	}
+	resp, err := c.api.Nodes.HotThreads(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp)
+		}
+		return types.HotThreads{}, classifyResponseErr(err, status)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return types.HotThreads{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.HotThreads{}, esopsclient.ErrForbidden
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return types.HotThreads{}, errors.Join(errors.New("reading hot_threads response"), err)
+	}
+	if resp.StatusCode >= 400 {
+		return types.HotThreads{}, esopsclient.ClassifyStatus("nodes hot_threads", resp.StatusCode, body)
+	}
+	return types.HotThreads{Text: string(body)}, nil
+}
+
+// buildHotThreadsPath renders /_nodes[/<id>]/hot_threads with the query
+// parameters the cluster honours. Used only by hotThreadsViaGET — the
+// typed SDK wrapper handles the happy path. Keys are alphabetically
+// ordered so a test of "was type=wait sent?" can pin the full URL
+// without worrying about map iteration order.
+func buildHotThreadsPath(req types.HotThreadsRequest) string {
+	var p strings.Builder
+	p.WriteString("/_nodes")
+	if len(req.Nodes) > 0 {
+		p.WriteString("/")
+		p.WriteString(strings.Join(req.Nodes, ","))
+	}
+	p.WriteString("/hot_threads")
+
+	q := make([]string, 0, 6)
+	if req.IgnoreIdleThreads != nil {
+		q = append(q, "ignore_idle_threads="+strconv.FormatBool(*req.IgnoreIdleThreads))
+	}
+	if req.Interval > 0 {
+		q = append(q, "interval="+req.Interval.String())
+	}
+	if req.Snapshots != nil {
+		q = append(q, "snapshots="+strconv.Itoa(*req.Snapshots))
+	}
+	if req.Threads != nil {
+		q = append(q, "threads="+strconv.Itoa(*req.Threads))
+	}
+	if req.Type != "" {
+		q = append(q, "type="+req.Type)
+	}
+	if len(q) > 0 {
+		p.WriteString("?")
+		p.WriteString(strings.Join(q, "&"))
+	}
+	return p.String()
+}
+
+// hotThreadsViaGET is the fallback for Type values (wait/block/mem) the
+// typed OS client doesn't expose. The cluster accepts the param via the
+// wire, so we just assemble the URL ourselves and GET it.
+func (c *Client) hotThreadsViaGET(ctx context.Context, req types.HotThreadsRequest) (types.HotThreads, error) {
+	body, status, err := c.doSecurityGET(ctx, buildHotThreadsPath(req))
+	if err != nil {
+		return types.HotThreads{}, err
+	}
+	switch status {
+	case http.StatusUnauthorized:
+		return types.HotThreads{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.HotThreads{}, esopsclient.ErrForbidden
+	}
+	if status >= 400 {
+		return types.HotThreads{}, esopsclient.ClassifyStatus("nodes hot_threads", status, body)
+	}
+	return types.HotThreads{Text: string(body)}, nil
+}
+
+// DoGET implements client.ClusterDiagnoser via the same path the typed
+// opensearch-go client uses, so auth/transport match the rest of the
+// adapter. 401/403 translate to sentinel errors; transport failures wrap
+// ErrUnreachable; any other non-2xx returns body and status so the diag
+// collector records the cluster's own response verbatim — a 404 on
+// /_ilm/... is expected on OpenSearch, not a bundle failure.
+func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
+	body, status, err := c.doSecurityGET(ctx, path)
+	if err != nil {
+		return nil, status, err
+	}
+	switch status {
+	case http.StatusUnauthorized:
+		return body, status, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return body, status, esopsclient.ErrForbidden
+	}
+	return body, status, nil
 }
