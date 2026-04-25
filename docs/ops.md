@@ -40,7 +40,7 @@ it at something else for a one-off:
 
 ```sh
 esops --context local-os ops health          # named context from config
-esops --url http://localhost:9200 ops health # bypass the config (v0.1.0: still uses current context's auth)
+esops --url http://localhost:9200 ops health # bypass the config (still uses current context's auth)
 ```
 
 ### Output formats
@@ -465,7 +465,7 @@ designed to grow compatibly.
   not copy users or roles between clusters. ES and OS security models
   are not interchangeable. See the non-goals in the project brief.
 - **No API keys, role mappings, tenants, or action groups (yet).**
-  Scoped out of v0.1.0 to keep the output readable. These are well-defined
+  Scoped out for now to keep the output readable. These are well-defined
   endpoints and will be added when a concrete user asks.
 - **No privilege analysis.** The tool surfaces what the cluster reports;
   it does not score "is this dangerous?" A wildcard index pattern on a

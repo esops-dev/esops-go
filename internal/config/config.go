@@ -3,7 +3,7 @@
 // The file shape matches config/esops.example.yaml: a set of named
 // `contexts`, a `current-context` pointer, and `defaults` that contexts
 // inherit. Secret indirection (${env:VAR}, ${file:...}, ${keyring:...})
-// is applied at load time. For v0.1.0 only ${env:...} is implemented;
+// is applied at load time. Currently only ${env:...} is implemented;
 // the other prefixes return an explicit error so users aren't silently
 // passed a literal `${file:/...}` string to an auth header.
 package config

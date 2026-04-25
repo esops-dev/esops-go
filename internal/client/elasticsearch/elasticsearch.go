@@ -50,17 +50,17 @@ type Options struct {
 // the provider. TLS and transport tweaks come in via httpTransport;
 // opts plumbs through max_retries / compress from config.
 //
-// SigV4 is rejected here: v0.1.0 supports SigV4 on OpenSearch only.
-// The go-elasticsearch client has no first-class SigV4 helper and
-// adding one means hand-rolling the canonical-request math, which
-// belongs behind a deliberate feature gate rather than as a quiet
-// fallback that 401s every request.
+// SigV4 is rejected here: SigV4 is currently OpenSearch-only. The
+// go-elasticsearch client has no first-class SigV4 helper and adding
+// one means hand-rolling the canonical-request math, which belongs
+// behind a deliberate feature gate rather than as a quiet fallback
+// that 401s every request.
 func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper, opts Options) (*Client, error) {
 	if provider == nil {
 		return nil, errors.New("elasticsearch client: nil auth provider")
 	}
 	if provider.Type() == auth.TypeSigV4 {
-		return nil, errors.New("auth.type=sigv4 is not supported on Elasticsearch in v0.1.0; use bearer or basic")
+		return nil, errors.New("auth.type=sigv4 is not supported on Elasticsearch; use bearer or basic")
 	}
 	cfg := es.Config{
 		Addresses: addrs,

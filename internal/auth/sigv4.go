@@ -16,7 +16,7 @@ import (
 // sigV4Provider signs requests with AWS SigV4 using the standard AWS
 // credential chain (env vars, shared config, IRSA, IMDS). Credentials
 // are never read from the esops config file — accepting access keys in
-// YAML is a footgun the tool deliberately doesn't enable. v0.1.0 is
+// YAML is a footgun the tool deliberately doesn't enable. Currently
 // OpenSearch-only; the ES adapter rejects sigv4 at construction time
 // because go-elasticsearch has no first-class SigV4 helper and adding
 // one means hand-rolling the canonical-request math.
