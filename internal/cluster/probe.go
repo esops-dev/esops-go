@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dj-wasabi/esops-go/internal/auth"
 	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/config"
 	"github.com/dj-wasabi/esops-go/internal/types"
@@ -30,16 +31,18 @@ func Probe(ctx context.Context, cc config.Context) (types.ClusterInfo, error) {
 	}
 	addr := strings.TrimRight(addrs[0], "/")
 
-	httpc, err := probeHTTPClient(cc)
+	provider, err := auth.From(cc.Auth)
+	if err != nil {
+		return types.ClusterInfo{}, err
+	}
+
+	httpc, err := probeHTTPClient(cc, provider)
 	if err != nil {
 		return types.ClusterInfo{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/", nil)
 	if err != nil {
-		return types.ClusterInfo{}, err
-	}
-	if err := applyAuth(req, cc.Auth); err != nil {
 		return types.ClusterInfo{}, err
 	}
 
@@ -89,19 +92,19 @@ func Probe(ctx context.Context, cc config.Context) (types.ClusterInfo, error) {
 	return info, nil
 }
 
-func probeHTTPClient(cc config.Context) (*http.Client, error) {
+func probeHTTPClient(cc config.Context, provider auth.Provider) (*http.Client, error) {
 	tlsConf, err := buildTLSConfig(cc.Auth, cc.TLS)
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{
+	var base http.RoundTripper = &http.Transport{
 		TLSClientConfig: tlsConf,
 	}
 	timeout := cc.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	return &http.Client{Transport: transport, Timeout: timeout}, nil
+	return &http.Client{Transport: auth.WrapTransport(provider, base), Timeout: timeout}, nil
 }
 
 // buildTLSConfig returns a *tls.Config when any TLS-layer setting is in
@@ -139,23 +142,4 @@ func buildTLSConfig(a config.Auth, t config.TLS) (*tls.Config, error) {
 		conf.Certificates = []tls.Certificate{pair}
 	}
 	return conf, nil
-}
-
-func applyAuth(req *http.Request, a config.Auth) error {
-	switch strings.ToLower(a.Type) {
-	case "", "none":
-		return nil
-	case "basic":
-		if a.Username == "" {
-			return errors.New("auth.type=basic requires a username")
-		}
-		req.SetBasicAuth(a.Username, a.Password)
-		return nil
-	case "mtls":
-		// Identity travels on the TLS keypair; nothing to add at the
-		// HTTP layer. Keypair presence is validated in buildTLSConfig.
-		return nil
-	default:
-		return fmt.Errorf("auth type %q is not implemented yet (v0.1.0 supports: basic, mtls)", a.Type)
-	}
 }

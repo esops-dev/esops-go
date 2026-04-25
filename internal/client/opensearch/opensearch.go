@@ -18,6 +18,7 @@ import (
 	os "github.com/opensearch-project/opensearch-go/v4"
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
+	"github.com/dj-wasabi/esops-go/internal/auth"
 	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -39,12 +40,25 @@ type Options struct {
 	CompressRequestBody bool
 }
 
-func New(addrs []string, username, password string, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+// New builds a client against the given addresses with auth carried by
+// the provider. TLS and transport tweaks come in via httpTransport;
+// opts plumbs through max_retries / compress from config.
+//
+// API key auth is rejected here: it's an Elasticsearch-only header
+// scheme. OpenSearch users wanting key-based auth set up a bearer token
+// at the proxy in front of the cluster (or use SigV4 when fronted by
+// IAM); failing fast at construction beats every request returning 401
+// with no clue why.
+func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+	if provider == nil {
+		return nil, errors.New("opensearch client: nil auth provider")
+	}
+	if provider.Type() == auth.TypeAPIKey {
+		return nil, errors.New("auth.type=api_key is Elasticsearch-only; OpenSearch has no equivalent — use bearer, basic, or sigv4")
+	}
 	osCfg := os.Config{
 		Addresses: addrs,
-		Username:  username,
-		Password:  password,
-		Transport: httpTransport,
+		Transport: auth.WrapTransport(provider, httpTransport),
 	}
 	switch {
 	case opts.MaxRetries < 0:

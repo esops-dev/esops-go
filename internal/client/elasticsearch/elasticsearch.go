@@ -17,6 +17,7 @@ import (
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
+	"github.com/dj-wasabi/esops-go/internal/auth"
 	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -45,15 +46,25 @@ type Options struct {
 	CompressRequestBody bool
 }
 
-// New builds a client against the given addresses + basic-auth credentials.
-// TLS and transport tweaks come in via httpTransport; opts plumbs through
-// max_retries / compress from config.
-func New(addrs []string, username, password string, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+// New builds a client against the given addresses with auth carried by
+// the provider. TLS and transport tweaks come in via httpTransport;
+// opts plumbs through max_retries / compress from config.
+//
+// SigV4 is rejected here: v0.1.0 supports SigV4 on OpenSearch only.
+// The go-elasticsearch client has no first-class SigV4 helper and
+// adding one means hand-rolling the canonical-request math, which
+// belongs behind a deliberate feature gate rather than as a quiet
+// fallback that 401s every request.
+func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+	if provider == nil {
+		return nil, errors.New("elasticsearch client: nil auth provider")
+	}
+	if provider.Type() == auth.TypeSigV4 {
+		return nil, errors.New("auth.type=sigv4 is not supported on Elasticsearch in v0.1.0; use bearer or basic")
+	}
 	cfg := es.Config{
 		Addresses: addrs,
-		Username:  username,
-		Password:  password,
-		Transport: httpTransport,
+		Transport: auth.WrapTransport(provider, httpTransport),
 	}
 	switch {
 	case opts.MaxRetries < 0:

@@ -57,9 +57,10 @@ type Context struct {
 	Compress    bool          `koanf:"compress"`
 }
 
-// Auth carries credentials for a context. Only `basic` is wired up in
-// v0.1.0 — the other fields are accepted by the parser so configs are
-// forward-compatible, but the client factory will reject them.
+// Auth carries credentials for a context. The `type` field selects the
+// method; required and forbidden fields per type are enforced by
+// ValidateAuth at config load. Indirection (${env:VAR} etc.) on
+// password / api_key / token is resolved later, in ResolveContext.
 type Auth struct {
 	Type       string `koanf:"type"`
 	Username   string `koanf:"username"`
@@ -172,9 +173,19 @@ func Parse(path string) (Config, error) {
 // world-readable files with inline plaintext secrets are refused unless
 // ESOPS_ALLOW_INSECURE_CONFIG=1; plaintext secrets in any mode produce a
 // warning unless ESOPS_ALLOW_PLAINTEXT_SECRETS=1.
+//
+// Per-context auth blocks are also validated (required/forbidden
+// fields per type) before secrets are flagged — the check is purely
+// structural and runs against parsed values, so a `password:
+// ${env:VAR}` reads as "password set" regardless of whether VAR is
+// exported yet. Dialect-specific rejections (api_key on OS, sigv4 on
+// ES) happen at adapter construction once the probe knows the cluster.
 func Load(path string) (Config, error) {
 	cfg, err := Parse(path)
 	if err != nil {
+		return Config{}, err
+	}
+	if err := validateAllAuth(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := checkSafety(path, cfg); err != nil {
