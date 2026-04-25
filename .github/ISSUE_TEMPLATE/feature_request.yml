@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose a new command, flag, or behaviour.
+title: "[feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Before filing, please check the
+        explicit non-goals in the README — features that belong in
+        Kibana, OpenSearch Dashboards, Curator, or an ML tool will be
+        closed.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I've searched existing issues and this isn't a duplicate.
+          required: true
+        - label: This fits the project scope (SRE/DevOps ops + migrations against self-managed ES/OS).
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What are you trying to accomplish? What does the workflow look
+        like today (curl, scripts, another tool)? Concrete examples
+        beat abstract requirements.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        What would the CLI look like? Sketch the command, flags, and
+        output. If the behaviour differs between ES and OS, say how.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and risk
+      description: |
+        Is this destructive? Does it need `--dry-run`, blast-radius
+        limits, or protected-context handling? Any new dependencies?
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Links to upstream docs, related issues, prior art.

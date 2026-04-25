@@ -1,0 +1,114 @@
+name: Bug report
+description: Something doesn't work the way it should against an Elasticsearch or OpenSearch cluster.
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Security issues:** please do **not** report them here. Use
+        the private channel described in [SECURITY.md](https://github.com/dj-wasabi/esops-go/blob/main/SECURITY.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I've searched existing issues and this isn't a duplicate.
+          required: true
+        - label: This is a bug, not a question or feature request.
+          required: true
+        - label: This isn't a security vulnerability (those go through SECURITY.md).
+          required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: esops version
+      description: |
+        Output of `esops -v --output json`. Don't paraphrase — the
+        commit, build date, and linked client versions matter for triage.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Cluster dialect
+      options:
+        - Elasticsearch
+        - OpenSearch
+        - Both (cross-dialect migration)
+        - Unknown / detection failed
+    validations:
+      required: true
+
+  - type: input
+    id: cluster_version
+    attributes:
+      label: Cluster version
+      description: e.g. ES 9.3.1, OS 2.13.0. Include both for cross-dialect migrations.
+      placeholder: "ES 9.3.1"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Client OS and architecture
+      placeholder: "linux/amd64, darwin/arm64, windows/amd64, ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: |
+        The exact `esops` invocation. **Redact secrets and hostnames.**
+        Include relevant config snippets if the bug depends on config
+        (passwords stripped).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include the exit code and any error message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Run with `--log-level debug --log-format json` and paste the
+        relevant output. Strip credentials and cluster URLs first.
+      render: text
+
+  - type: textarea
+    id: diag
+    attributes:
+      label: Diagnostic bundle (optional)
+      description: |
+        For cluster-state issues, attach a `esops ops diag` bundle.
+        It's already redacted, but double-check before uploading.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Workarounds tried, recent changes, related issues, etc.

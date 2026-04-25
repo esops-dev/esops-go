@@ -1,0 +1,24 @@
+# Code owners for esops-go.
+#
+# Order matters: the last matching pattern wins. The catch-all at the
+# top assigns review on every PR; more specific patterns below scope
+# review for sensitive areas.
+#
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*                              @dj-wasabi
+
+# Build, release, and supply-chain plumbing — review every change.
+/.github/                      @dj-wasabi
+/.goreleaser.yaml              @dj-wasabi
+/Makefile                      @dj-wasabi
+/go.mod                        @dj-wasabi
+/go.sum                        @dj-wasabi
+
+# Security-sensitive surfaces.
+/internal/auth/                @dj-wasabi
+/internal/config/              @dj-wasabi
+/SECURITY.md                   @dj-wasabi
+
+# Client abstraction — the dialect-divergence boundary.
+/internal/client/              @dj-wasabi
