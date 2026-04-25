@@ -4,14 +4,12 @@ Operations CLI for self-managed Elasticsearch and OpenSearch clusters.
 
 [![CI](https://github.com/dj-wasabi/esops-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dj-wasabi/esops-go/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dj-wasabi/esops-go?include_prereleases&sort=semver)](https://github.com/dj-wasabi/esops-go/releases)
-[![Go Reference](https://pkg.go.dev/badge/github.com/dj-wasabi/esops-go.svg)](https://pkg.go.dev/github.com/dj-wasabi/esops-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/dj-wasabi/esops-go)](https://goreportcard.com/report/github.com/dj-wasabi/esops-go)
 [![License](https://img.shields.io/github/license/dj-wasabi/esops-go)](LICENSE)
 
 > [!WARNING]
-> Early scaffolding. Interfaces and exit codes are not yet stable. Not production ready.
+> Early scaffolding. Interfaces and exit codes are not yet stable. Not yet production ready.
 
-`esops`` is a Go based binary for Site Reliability Engineering (SRE) and DevOps processes. These processes can be both day-to-day maintenance and large scale migration efforts on a long-term basis against both Elasticsearch and OpenSearch. Both product implementations have the same Command Line Interface (CLI) as the rest of its counterparts. The actual implementations only differ in implementation (i.e. ILM & ISM etc.) or through snapshot key differences and/or re-indexing dialect.
+`esops` is a Go based binary for Site Reliability Engineering (SRE) and DevOps processes. These processes can be both day-to-day maintenance and large scale migration efforts on a long-term basis against both Elasticsearch and OpenSearch. Both product implementations have the same Command Line Interface (CLI) as the rest of its counterparts. The actual implementations only differ in implementation (i.e. ILM & ISM etc.) or through snapshot key differences and/or re-indexing dialect.
 
 ## Why esops
 
@@ -27,11 +25,17 @@ As an Elasticsearch (ES) or OpenSearch (OS) deployment ages, there are many case
 ## Features
 
 **Cluster Operations**  - Health, Shard Allocation Explanation, Shard Distribution, Hot Threads, Security Audit, Rebalance Helper, Redacted Diagnostic Bundle
+
 **Migrating databases** - Pre-flight Check, Mapping Plan One with Incompatibility Diffs, Task based Reindex With Resume + Auto Throttle, Doc Count And Sampled Checksum Verify, Atomic Alias-swap Cutover
+
 **Manage your Indexes** - List, Optimise, Rollover, Shrink, Open/Close, Aliases, Settings and Template ILM (ES) and ISM (OS) Policies 
+
 **Manage your Snapshots**  - List, Create, Verify, Restore, Retention Prune 
+
 **Multiple Settings** - Named contexts like kubectl's with per-context protection levels; Explicit acknowledgement is needed for destructive operations against prod context.
+
 **Authentication** - Basic, API key, bearer, mTLS, AWS SigV4 
+
 **Look what happens** - Optional structured slog logs OpenTelemetry tracing to your own OTLP collector - No telemetry to project.
 
 ## Install
@@ -79,7 +83,7 @@ Then:
 
 ```sh
 esops ops health
-esops index list --output json | jq '.[] | select(.health != "green")'
+esops index list --health red
 esops migrate plan --from idx-v1 --to idx-v2
 esops migrate reindex --from idx-v1 --to idx-v2 --auto-throttle
 esops migrate verify --source idx-v1 --target idx-v2
