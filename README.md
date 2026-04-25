@@ -15,28 +15,18 @@ Operations CLI for self-managed Elasticsearch and OpenSearch clusters.
 
 As an Elasticsearch (ES) or OpenSearch (OS) deployment ages, there are many cases where command lines using 'curl' and 'jq' commands are used for things like checking shard skew, allocating explain requests, reindexing drivers, pruning snapshots and swapping aliases. Instead of having a long list of individual command lines, the `esops` system has a single binary file to do everything above.
 
-* When connecting to an ES or OS target, it will probe the target to determine the correct client type to use (ES vs. OS), so it doesn't trust purely user-configured settings/bindings, to avoid silently corrupting an OS-cluster by executing an ES-defined request against it.
-
 * Performs a reindex operation as an adaptive throttled and resumable task rather than an action that needs a synchronous HTTP call to be monitored.
-
 * It will not allow operations that may cause unbounded mutations by default. For any destructive operation, the system calculates the “blast radius” of the operation it’s proposing, and also requires the user to explicitly opt-in to allow the operation to go past the defined threshold.
 * Produce scriptable output (table / JSON / NDJSON / YAML) with standard exit codes and stable schema(s). Documentation will be provided on how to use the various exit codes.
 
 ## Features
 
-**Cluster Operations**  - Health, Shard Allocation Explanation, Shard Distribution, Hot Threads, Security Audit, Rebalance Helper, Redacted Diagnostic Bundle
-
-**Migrating databases** - Pre-flight Check, Mapping Plan One with Incompatibility Diffs, Task based Reindex With Resume + Auto Throttle, Doc Count And Sampled Checksum Verify, Atomic Alias-swap Cutover
-
-**Manage your Indexes** - List, Optimise, Rollover, Shrink, Open/Close, Aliases, Settings and Template ILM (ES) and ISM (OS) Policies 
-
-**Manage your Snapshots**  - List, Create, Verify, Restore, Retention Prune 
-
-**Multiple Settings** - Named contexts like kubectl's with per-context protection levels; Explicit acknowledgement is needed for destructive operations against prod context.
-
-**Authentication** - Basic, API key, bearer, mTLS, AWS SigV4 
-
-**Look what happens** - Optional structured slog logs OpenTelemetry tracing to your own OTLP collector - No telemetry to project.
+* **Cluster Operations**  - Health, Shard Allocation Explanation, Shard Distribution, Hot Threads, Security Audit, Rebalance Helper, Redacted Diagnostic Bundle
+* **Migrating databases** - Pre-flight Check, Mapping Plan One with Incompatibility Diffs, Task based Reindex With Resume + Auto Throttle, Doc Count And Sampled Checksum Verify, Atomic Alias-swap Cutover
+* **Manage your Indexes** - List, Optimise, Rollover, Shrink, Open/Close, Aliases, Settings and Template ILM (ES) and ISM (OS) Policies 
+* **Manage your Snapshots**  - List, Create, Verify, Restore, Retention Prune 
+* **Multiple Settings** - Named contexts like kubectl's with per-context protection levels; Explicit acknowledgement is needed for destructive operations against prod context.
+* **Authentication** - Basic, API key, bearer, mTLS, AWS SigV4 
 
 ## Install
 
