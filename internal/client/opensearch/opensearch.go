@@ -4,6 +4,7 @@
 package opensearch
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -266,6 +267,174 @@ func (c *Client) AllocationExplain(ctx context.Context, req types.AllocationExpl
 		}
 	}
 	return out, nil
+}
+
+// rerouteResponseWire mirrors the /_cluster/reroute response. The OS
+// typed ClusterRerouteResp also exposes a State field carrying the full
+// routing table — we don't surface it (operator-facing view is
+// acknowledged + explanations), so a hand-decoded shape keeps the
+// adapter boundary clean and matches the ES side byte-for-byte.
+type rerouteResponseWire struct {
+	Acknowledged bool                     `json:"acknowledged"`
+	Explanations []rerouteExplanationWire `json:"explanations,omitempty"`
+}
+
+type rerouteExplanationWire struct {
+	Command   string                `json:"command"`
+	Decisions []rerouteDecisionWire `json:"decisions,omitempty"`
+}
+
+type rerouteDecisionWire struct {
+	Decider     string `json:"decider"`
+	Decision    string `json:"decision"`
+	Explanation string `json:"explanation,omitempty"`
+}
+
+// Reroute implements client.RerouteExecutor against OS's
+// /_cluster/reroute. The wire shape is identical to ES (commands array
+// + dry_run/explain/retry_failed query flags), so the adapter
+// delegates the body construction and response normalisation to the
+// shared helpers in this package.
+//
+// We bypass the typed ClusterRerouteResp because it materialises a full
+// routing-table dump on every response — bytes we don't surface and
+// don't want to pay the decode for. A raw POST through the underlying
+// transport keeps the response decode targeted.
+func (c *Client) Reroute(ctx context.Context, req types.RerouteRequest) (types.RerouteResult, error) {
+	body, err := buildRerouteBody(req.Commands)
+	if err != nil {
+		return types.RerouteResult{}, err
+	}
+
+	path := "/_cluster/reroute?metric=none"
+	if req.DryRun {
+		path += "&dry_run=true"
+	}
+	if req.Explain {
+		path += "&explain=true"
+	}
+	if req.RetryFailed {
+		path += "&retry_failed=true"
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
+	if err != nil {
+		return types.RerouteResult{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return types.RerouteResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return types.RerouteResult{}, errors.Join(errors.New("reading cluster reroute response"), err)
+	}
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return types.RerouteResult{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.RerouteResult{}, esopsclient.ErrForbidden
+	}
+	if resp.StatusCode >= 400 {
+		return types.RerouteResult{}, esopsclient.ClassifyStatus("cluster reroute", resp.StatusCode, respBody)
+	}
+
+	var wire rerouteResponseWire
+	if err := json.Unmarshal(respBody, &wire); err != nil {
+		return types.RerouteResult{}, errors.Join(errors.New("decoding cluster reroute response"), err)
+	}
+	return toRerouteResult(req, wire), nil
+}
+
+// buildRerouteBody turns a typed command list into the cluster's
+// {"commands":[{"<action>": {<args>}}, ...]} envelope. The body shape
+// is identical to ES — kept in this package (rather than promoted to
+// the shared `client` package) because the per-action argument keys
+// are part of the cluster contract, and a future divergence between
+// dialects (OS adding a new action ES doesn't have, or vice versa)
+// is a per-package change, not a shared-helper churn.
+func buildRerouteBody(cmds []types.RerouteCommand) ([]byte, error) {
+	wire := struct {
+		Commands []map[string]any `json:"commands"`
+	}{Commands: make([]map[string]any, 0, len(cmds))}
+
+	for _, cmd := range cmds {
+		args, err := rerouteArgs(cmd)
+		if err != nil {
+			return nil, err
+		}
+		wire.Commands = append(wire.Commands, map[string]any{string(cmd.Action): args})
+	}
+	return json.Marshal(wire)
+}
+
+func rerouteArgs(cmd types.RerouteCommand) (map[string]any, error) {
+	switch cmd.Action {
+	case types.RerouteMove:
+		return map[string]any{
+			"index":     cmd.Index,
+			"shard":     cmd.Shard,
+			"from_node": cmd.FromNode,
+			"to_node":   cmd.ToNode,
+		}, nil
+	case types.RerouteCancel:
+		args := map[string]any{
+			"index": cmd.Index,
+			"shard": cmd.Shard,
+			"node":  cmd.FromNode,
+		}
+		if cmd.AllowPrimary {
+			args["allow_primary"] = true
+		}
+		return args, nil
+	case types.RerouteAllocateReplica:
+		return map[string]any{
+			"index": cmd.Index,
+			"shard": cmd.Shard,
+			"node":  cmd.ToNode,
+		}, nil
+	case types.RerouteAllocateEmptyPrimary, types.RerouteAllocateStalePrimary:
+		return map[string]any{
+			"index":            cmd.Index,
+			"shard":            cmd.Shard,
+			"node":             cmd.ToNode,
+			"accept_data_loss": cmd.AcceptDataLoss,
+		}, nil
+	case types.RerouteRetryFailed:
+		return nil, fmt.Errorf("retry_failed has no command body; use RerouteRequest.RetryFailed instead")
+	default:
+		return nil, fmt.Errorf("unsupported reroute action %q", cmd.Action)
+	}
+}
+
+func toRerouteResult(req types.RerouteRequest, wire rerouteResponseWire) types.RerouteResult {
+	out := types.RerouteResult{
+		Acknowledged: wire.Acknowledged,
+		DryRun:       req.DryRun,
+		Commands:     req.Commands,
+	}
+	if len(wire.Explanations) > 0 {
+		out.Explanations = make([]types.RerouteExplanation, 0, len(wire.Explanations))
+		for _, e := range wire.Explanations {
+			ex := types.RerouteExplanation{Command: e.Command}
+			if len(e.Decisions) > 0 {
+				ex.Decisions = make([]types.RerouteDecision, 0, len(e.Decisions))
+				for _, d := range e.Decisions {
+					ex.Decisions = append(ex.Decisions, types.RerouteDecision{
+						Decider:     d.Decider,
+						Decision:    d.Decision,
+						Explanation: d.Explanation,
+					})
+				}
+			}
+			out.Explanations = append(out.Explanations, ex)
+		}
+	}
+	return out
 }
 
 // statusOf returns the HTTP status code from the opensearch-go Response

@@ -57,6 +57,24 @@ type HotThreadsInspector interface {
 	HotThreads(ctx context.Context, req types.HotThreadsRequest) (types.HotThreads, error)
 }
 
+// RerouteExecutor wraps /_cluster/reroute — the cluster-state mutation
+// behind `ops rebalance`. The endpoint shape is identical on both
+// dialects (POST a body of {commands: [...]}, plus dry_run/explain/
+// retry_failed query flags) so one capability covers ES and OS.
+//
+// Implementations must surface the cluster's own acknowledged flag and
+// any explanations[] block verbatim — operators rely on the cluster's
+// per-decider prose to triage a refused move; rephrasing it would lose
+// signal. Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a bad command shape that the cluster
+//     rejects with a 400 + reason)
+type RerouteExecutor interface {
+	Reroute(ctx context.Context, req types.RerouteRequest) (types.RerouteResult, error)
+}
+
 // ClusterDiagnoser performs raw HTTP GETs against cluster endpoints for
 // the `ops diag` bundle. Purposely minimal — a generic raw-HTTP escape
 // hatch is a power tool we only want the diag collector using, so the
@@ -88,4 +106,5 @@ type Client struct {
 	Security          SecurityAuditor
 	Diag              ClusterDiagnoser
 	HotThreads        HotThreadsInspector
+	Reroute           RerouteExecutor
 }

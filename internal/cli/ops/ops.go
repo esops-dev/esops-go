@@ -19,6 +19,7 @@ func Command() *cli.Command {
 			auditCommand(),
 			diagCommand(),
 			hotThreadsCommand(),
+			rebalanceCommand(),
 		},
 	}
 }

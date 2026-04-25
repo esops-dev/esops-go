@@ -197,6 +197,124 @@ func Audit(w io.Writer, a types.SecurityAudit, f Format) error {
 	}
 }
 
+// Rebalance renders a /_cluster/reroute outcome. Table output is a
+// two-section layout: a one-line "did the master ack? was it a dry
+// run?" header, then a per-command summary listing the action and
+// the {from,to} nodes the command targeted. Wide mode adds the cluster's
+// per-decider explanations[] block when the request was made with
+// --explain — operators reading "the cluster refused my move, why?" want
+// the deciders inline, not behind a second command. JSON/YAML emit the
+// neutral RerouteResult shape directly.
+func Rebalance(w io.Writer, r types.RerouteResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return rebalanceTable(w, r, true)
+	case FormatTable, "":
+		return rebalanceTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func rebalanceTable(w io.Writer, r types.RerouteResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ACKNOWLEDGED\tDRY_RUN\tCOMMANDS")
+	_, _ = fmt.Fprintf(hw, "%t\t%t\t%d\n", r.Acknowledged, r.DryRun, len(r.Commands))
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	if len(r.Commands) > 0 {
+		_, _ = fmt.Fprintln(w)
+		cw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(cw, "ACTION\tINDEX\tSHARD\tFROM\tTO\tFLAGS")
+		for _, cmd := range r.Commands {
+			_, _ = fmt.Fprintf(cw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+				cmd.Action,
+				dashIfEmpty(cmd.Index),
+				cmd.Shard,
+				dashIfEmpty(cmd.FromNode),
+				dashIfEmpty(cmd.ToNode),
+				dashIfEmpty(rebalanceFlags(cmd)),
+			)
+		}
+		if err := cw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if len(r.Explanations) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "EXPLANATIONS")
+	ew := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(ew, "COMMAND\tDECIDER\tDECISION\tEXPLANATION")
+		for _, ex := range r.Explanations {
+			if len(ex.Decisions) == 0 {
+				_, _ = fmt.Fprintf(ew, "%s\t-\t-\t-\n", ex.Command)
+				continue
+			}
+			for _, d := range ex.Decisions {
+				_, _ = fmt.Fprintf(ew, "%s\t%s\t%s\t%s\n",
+					ex.Command, d.Decider, d.Decision, d.Explanation)
+			}
+		}
+	} else {
+		_, _ = fmt.Fprintln(ew, "COMMAND\tDECISIONS")
+		for _, ex := range r.Explanations {
+			_, _ = fmt.Fprintf(ew, "%s\t%s\n", ex.Command, summariseRerouteDecisions(ex.Decisions))
+		}
+	}
+	return ew.Flush()
+}
+
+// rebalanceFlags renders the boolean knobs (allow_primary,
+// accept_data_loss) as a compact "k1,k2" cell — only flags that are
+// actually set make it into the cell, so the column reads "-" for the
+// happy path of a routine move.
+func rebalanceFlags(cmd types.RerouteCommand) string {
+	parts := make([]string, 0, 2)
+	if cmd.AllowPrimary {
+		parts = append(parts, "allow_primary")
+	}
+	if cmd.AcceptDataLoss {
+		parts = append(parts, "accept_data_loss")
+	}
+	return strings.Join(parts, ",")
+}
+
+// summariseRerouteDecisions compresses a deciders list into a single
+// cell for the default table — same logic as the allocation-explain
+// summary: NO/THROTTLE rulings carry the signal, YES rulings are noise
+// unless the operator asked for them.
+func summariseRerouteDecisions(ds []types.RerouteDecision) string {
+	if len(ds) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(ds))
+	for _, d := range ds {
+		if strings.EqualFold(d.Decision, "YES") {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", d.Decider, strings.ToLower(d.Decision)))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
 func auditTable(w io.Writer, a types.SecurityAudit, wide bool) error {
 	// Section 1: TLS posture. Four compact key/value lines; no tabwriter
 	// needed — the short keys keep alignment without it.
