@@ -18,6 +18,16 @@ type ShardInspector interface {
 	Shards(ctx context.Context, filter types.ShardFilter) ([]types.Shard, error)
 }
 
+// NodeInspector exposes /_cat/nodes — the cluster-side source of truth
+// for node names and roles. Used by ops shards analyze to identify the
+// real set of data nodes for skew analysis: a "shard count per node"
+// derived from /_cat/shards alone misses freshly-added or drained data
+// nodes (zero shards = invisible) which is the most interesting case
+// to surface.
+type NodeInspector interface {
+	Nodes(ctx context.Context) ([]types.Node, error)
+}
+
 // IndexInspector exposes read-only index-listing operations backed by
 // /_cat/indices. The filter's Index field is forwarded to the cluster;
 // Health/Status/Hidden/Sort are applied in the business layer so the
@@ -101,6 +111,7 @@ type Client struct {
 	Info              types.ClusterInfo
 	Health            HealthInspector
 	Shards            ShardInspector
+	Nodes             NodeInspector
 	Indices           IndexInspector
 	AllocationExplain AllocationExplainer
 	Security          SecurityAuditor

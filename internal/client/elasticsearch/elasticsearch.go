@@ -1143,3 +1143,83 @@ func securityDisabledNote(body []byte) string {
 	}
 	return "security is disabled on this cluster"
 }
+
+// catNodesRow mirrors a /_cat/nodes?h=name,node.role row. node.role is
+// the comma-separated full-name role list (data, data_hot, ingest,
+// master, …) — distinct from the deprecated abbreviated `role` column
+// which packs the roles into single chars and would force us to maintain
+// a translation table per cluster version.
+type catNodesRow struct {
+	Name string `json:"name"`
+	Role string `json:"node.role"`
+}
+
+// Nodes implements client.NodeInspector via /_cat/nodes. We surface the
+// authoritative node→role map so the analysis layer can identify real
+// data nodes — including ones that hold zero shards, which is precisely
+// the case the analysis exists to catch.
+func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
+	cn := c.api.Cat.Nodes
+	resp, err := c.api.Cat.Nodes(
+		cn.WithContext(ctx),
+		cn.WithFormat("json"),
+		cn.WithH("name", "node.role"),
+	)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cat nodes", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var rows []catNodesRow
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, errors.Join(errors.New("decoding cat nodes response"), err)
+	}
+
+	out := make([]types.Node, 0, len(rows))
+	for _, r := range rows {
+		roles := splitNodeRoles(r.Role)
+		out = append(out, types.Node{
+			Name:       r.Name,
+			Roles:      roles,
+			IsDataNode: hasDataRole(roles),
+		})
+	}
+	return out, nil
+}
+
+// splitNodeRoles parses /_cat/nodes node.role into a clean slice. The
+// cluster format is "data,ingest,master" — empty entries (which can
+// arise from a coordinating-only node returning "") are dropped so
+// hasDataRole's prefix check doesn't accidentally match "".
+func splitNodeRoles(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// hasDataRole returns true when any role is "data" or one of the
+// tier-aware data_* variants (data_hot / data_warm / data_cold /
+// data_content / data_frozen). HasPrefix("data") covers all of them
+// in one check.
+func hasDataRole(roles []string) bool {
+	for _, r := range roles {
+		if strings.HasPrefix(r, "data") {
+			return true
+		}
+	}
+	return false
+}

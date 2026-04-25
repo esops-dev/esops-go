@@ -901,3 +901,104 @@ func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
 	}
 	return body, status, nil
 }
+
+// Nodes implements client.NodeInspector via /_cat/nodes. The OS API uses
+// node.roles (plural) for the comma-separated full-name role list — on
+// ES that column is node.role (singular); the typed clients hide the
+// naming split, but the column requested here has to match the OS spelling.
+//
+// We request both the (abbreviated) Role and (full-name) Roles columns
+// and prefer Roles. Older OS clusters that omit Roles fall through to
+// a best-effort parse of the abbreviated form so the data-node identity
+// stays accurate even on legacy versions.
+func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
+	req := &osapi.CatNodesReq{
+		Params: osapi.CatNodesParams{
+			H: []string{"name", "node.role", "node.roles"},
+		},
+	}
+	resp, err := c.api.Cat.Nodes(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
+	}
+
+	out := make([]types.Node, 0, len(resp.Nodes))
+	for _, n := range resp.Nodes {
+		roles := splitNodeRoles(n.Roles)
+		if len(roles) == 0 {
+			roles = abbreviatedRolesToFull(n.Role)
+		}
+		out = append(out, types.Node{
+			Name:       n.Name,
+			Roles:      roles,
+			IsDataNode: hasDataRole(roles),
+		})
+	}
+	return out, nil
+}
+
+// splitNodeRoles parses a /_cat/nodes "data,ingest,master"-style list
+// into a clean slice. Empty entries (which arise from a coordinating-only
+// node returning "") are dropped so hasDataRole's prefix check doesn't
+// accidentally match the empty string.
+func splitNodeRoles(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// abbreviatedRolesToFull is a best-effort decode of the legacy single-char
+// role column ("dim" for data+ingest+master). Only the chars relevant to
+// data-node identification are mapped — anything else gets surfaced
+// verbatim so an operator inspecting the raw JSON sees what the cluster
+// reported. Used only when node.roles is absent (older OS versions).
+func abbreviatedRolesToFull(s string) []string {
+	if s == "" {
+		return nil
+	}
+	mapping := map[rune]string{
+		'd': "data",
+		'h': "data_hot",
+		'w': "data_warm",
+		'c': "data_cold",
+		's': "data_content",
+		'f': "data_frozen",
+		'm': "master",
+		'i': "ingest",
+		'r': "remote_cluster_client",
+	}
+	out := make([]string, 0, len(s))
+	for _, r := range s {
+		if name, ok := mapping[r]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// hasDataRole returns true when any role is "data" or one of the
+// tier-aware data_* variants (data_hot / data_warm / data_cold /
+// data_content / data_frozen). HasPrefix("data") covers all of them
+// in one check.
+func hasDataRole(roles []string) bool {
+	for _, r := range roles {
+		if strings.HasPrefix(r, "data") {
+			return true
+		}
+	}
+	return false
+}

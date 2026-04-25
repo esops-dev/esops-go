@@ -911,3 +911,194 @@ func healthTable(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, wid
 	}
 	return tw.Flush()
 }
+
+// ShardAnalysis renders a ShardAnalysis report. JSON/YAML emit the
+// neutral shape unchanged so scripts get a stable schema. Table/wide
+// renders the multi-section human view: THRESHOLDS header → PER-NODE
+// → TOP → INDICES → UNASSIGNED → SUMMARY. Sections that the request
+// excluded come through as nil slices and are skipped here — empty
+// section outputs would mislead.
+func ShardAnalysis(w io.Writer, a types.ShardAnalysis, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(a)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(a)
+	case FormatWide:
+		return shardAnalysisTable(w, a, true)
+	case FormatTable, "":
+		return shardAnalysisTable(w, a, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// shardAnalysisTable renders the report as a series of section-headed
+// tables separated by blank lines. The header line names the active
+// thresholds so a captured stdout (e.g. saved to a ticket) is
+// interpretable without re-running the command.
+//
+// wide currently adds nothing — kept for symmetry with other renderers
+// and to leave a hook open for future per-shard / per-node columns
+// without an API change.
+func shardAnalysisTable(w io.Writer, a types.ShardAnalysis, wide bool) error {
+	_ = wide
+
+	t := a.Thresholds
+	_, _ = fmt.Fprintf(w, "THRESHOLDS  oversized=%s  critical=%s  undersized=%s  skew=%d%%\n",
+		humanBytes(t.OversizedBytes), humanBytes(t.CriticalBytes),
+		humanBytes(t.UndersizedBytes), t.SkewPercent,
+	)
+
+	if a.Nodes != nil {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "PER-NODE DISTRIBUTION")
+		if a.Summary.SkewSkippedReason != "" {
+			_, _ = fmt.Fprintf(w, "(skew analysis skipped: %s)\n", a.Summary.SkewSkippedReason)
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "NODE\tSHARDS\tSTORE\tSHARDS_VS_MED\tSTORE_VS_MED\tSTATUS")
+		for _, n := range a.Nodes {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+				n.Node, n.Shards, humanBytes(n.StoreBytes),
+				signedPercent(n.ShardsDeviationPercent),
+				signedPercent(n.StoreDeviationPercent),
+				n.Status,
+			)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if a.TopShards != nil {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "TOP HOT SHARDS  (%d largest)\n", len(a.TopShards))
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tNODE\tSTORE\tSTATUS")
+		for _, s := range a.TopShards {
+			role := "r"
+			if s.Primary {
+				role = "p"
+			}
+			node := s.Node
+			if node == "" {
+				node = "-"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+				s.Index, s.Shard, role, node, humanBytes(s.StoreBytes), s.Status,
+			)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if a.IndicesAtRisk != nil {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "INDICES WITH SHARD-SIZE ISSUES  (%d %s)\n",
+			len(a.IndicesAtRisk), pluralize(len(a.IndicesAtRisk), "index", "indices"))
+		if len(a.IndicesAtRisk) == 0 {
+			_, _ = fmt.Fprintln(w, "(none)")
+		} else {
+			tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(tw, "INDEX\tPRIMARIES\tAVG_PRIMARY\tMAX_PRIMARY\tSTATUS")
+			for _, ix := range a.IndicesAtRisk {
+				status := ix.Status
+				if ix.Note != "" {
+					status = fmt.Sprintf("%s (%s)", ix.Status, ix.Note)
+				}
+				_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n",
+					ix.Index, ix.Primaries,
+					humanBytes(ix.AvgPrimaryBytes), humanBytes(ix.MaxPrimaryBytes),
+					status,
+				)
+			}
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The unassigned section is rendered when the request asked for it.
+	// We can tell the difference between "asked for it but the cluster
+	// has none" (Total == 0, Indices nil) and "didn't ask" (whole
+	// section skipped — Total stays in Summary): asked-for-it always
+	// emits the heading. Sections != nil is the gate.
+	if sectionRendered(a, "unassigned") {
+		_, _ = fmt.Fprintln(w)
+		switch a.Unassigned.Total {
+		case 0:
+			_, _ = fmt.Fprintln(w, "UNASSIGNED  none")
+		default:
+			_, _ = fmt.Fprintf(w, "UNASSIGNED  %d %s across %d %s (%s)\n",
+				a.Unassigned.Total, pluralize(a.Unassigned.Total, "shard", "shards"),
+				len(a.Unassigned.Indices), pluralize(len(a.Unassigned.Indices), "index", "indices"),
+				strings.Join(a.Unassigned.Indices, ", "),
+			)
+			if len(a.Unassigned.Indices) > 0 {
+				_, _ = fmt.Fprintf(w, "  next: esops ops allocation-explain --index %s\n", a.Unassigned.Indices[0])
+			}
+		}
+	}
+
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintf(w, "SUMMARY  %d oversized · %d critical · %d undersized · %d node%s skewed · %d unassigned\n",
+		a.Summary.OversizedShards, a.Summary.CriticalShards,
+		a.Summary.UndersizedIndices,
+		a.Summary.SkewedNodes, plural(a.Summary.SkewedNodes),
+		a.Summary.UnassignedShards,
+	)
+	return nil
+}
+
+// sectionRendered tells whether the analysis carries a given section
+// (i.e. the operator didn't gate it off via --by). Each section's
+// presence has a distinct signal:
+//   - nodes / top / indices: nil slice = section was excluded
+//   - unassigned: there's no obvious nil-marker on the struct, so we
+//     rely on the convention that AnalyzeShards leaves Indices==nil
+//     and Total==0 when the section is gated, and populates one or
+//     both otherwise.
+func sectionRendered(a types.ShardAnalysis, name string) bool {
+	switch name {
+	case "nodes":
+		return a.Nodes != nil
+	case "top":
+		return a.TopShards != nil
+	case "indices":
+		return a.IndicesAtRisk != nil
+	case "unassigned":
+		return a.Unassigned.Total > 0 || a.Unassigned.Indices != nil
+	}
+	return false
+}
+
+// signedPercent renders a deviation percent with an explicit sign,
+// matching the "+12%" / "-6%" form in the spec output. Zero renders
+// as "+0%" — the explicit sign keeps the column visually aligned.
+func signedPercent(p int) string {
+	if p >= 0 {
+		return fmt.Sprintf("+%d%%", p)
+	}
+	return fmt.Sprintf("%d%%", p)
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
