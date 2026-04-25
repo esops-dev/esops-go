@@ -39,6 +39,10 @@ func exitCode(err error) int {
 		return 5
 	case errors.Is(err, client.ErrUnsupported):
 		return 6
+	case errors.Is(err, client.ErrDryRunBlocker):
+		return 7
+	case errors.Is(err, client.ErrBlastRadius):
+		return 8
 	case errors.Is(err, cmdsetup.ErrProtected):
 		return 9
 	case errors.Is(err, client.ErrUnknownProduct):

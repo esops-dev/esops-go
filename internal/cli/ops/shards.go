@@ -57,7 +57,7 @@ func runShards(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
-		SupportedFormats: cmdsetup.FormatsStandard,
+		SupportedFormats: cmdsetup.FormatsStreaming,
 	})
 	if err != nil {
 		return err

@@ -4,18 +4,27 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
 	"github.com/dj-wasabi/esops-go/internal/version"
 )
+
+// defaultDiagConcurrency caps the number of in-flight collectors when
+// req.Concurrency is unset. 4 is empirically a good default: enough
+// parallelism to overlap network round-trips, low enough to not look
+// like a synthetic load on a struggling cluster.
+const defaultDiagConcurrency = 4
 
 // diagCollector describes one endpoint the diag bundle captures. Dialect
 // is set when the endpoint is product-specific (ILM on ES, ISM on OS);
@@ -52,6 +61,19 @@ var baseCollectors = []diagCollector{
 	{Name: "cat_indices", Path: "/_cat/indices?format=json&bytes=b&expand_wildcards=open,closed,hidden"},
 	{Name: "cat_recovery", Path: "/_cat/recovery?format=json&bytes=b&active_only=true"},
 	{Name: "snapshot_repositories", Path: "/_snapshot"},
+	// Templates: explaining "why does this index have this mapping?"
+	// almost always lands on a template. Composable templates (8.x+)
+	// reference component templates; capturing both keeps the chain
+	// reconstructible from the bundle alone. The legacy /_template
+	// endpoint covers 7.x clusters that haven't migrated.
+	{Name: "index_templates", Path: "/_index_template"},
+	{Name: "component_templates", Path: "/_component_template"},
+	{Name: "legacy_templates", Path: "/_template"},
+	// Cross-cluster setups: when the symptom is "remote search is
+	// slow" or "reindex from remote stalled", the first thing support
+	// asks for is what /_remote/info reports. 404s on standalone
+	// clusters with no remotes configured — recorded as such.
+	{Name: "remote_info", Path: "/_remote/info"},
 	// Dialect-specific lifecycle endpoints. The "wrong" dialect 404s
 	// (ILM on OS, ISM on ES); we filter before calling so the manifest
 	// only lists entries the collector actually attempted.
@@ -85,6 +107,19 @@ var invalidFilenameChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // it as a gzipped tarball to out. Returns the manifest it produced so
 // callers can log artifact counts without re-reading the file.
 //
+// Each collector's response body is streamed directly into the tarball
+// as the collector finishes, then released — only artifact metadata
+// (name/path/status/bytes) accumulates across the run. Without this,
+// `--include-mappings` against a 10k-index cluster would hold hundreds
+// of MB of mapping JSON in RAM alongside every other artifact's body
+// before the tarball was assembled.
+//
+// manifest.json is written as the final entry rather than the first.
+// Tar is sequential anyway — `tar -xOf bundle manifest.json` finds the
+// member regardless of position — and writing it last lets the manifest
+// reflect every artifact that actually streamed without holding bodies
+// in memory to compute lengths up-front.
+//
 // The collector makes best-effort progress: a transport error on one
 // endpoint records an Error on that artifact and keeps going. Auth
 // errors (ErrAuth/ErrForbidden) abort the bundle because re-running with
@@ -96,13 +131,121 @@ func Diag(ctx context.Context, c *client.Client, req types.DiagRequest, out io.W
 	}
 
 	plan := planCollectors(c.Info.Dialect, req)
-	artifacts := make([]types.DiagArtifact, 0, len(plan))
-	for _, col := range plan {
-		art := runCollector(ctx, c.Diag, col)
-		if errors.Is(art.rawErr, client.ErrAuth) || errors.Is(art.rawErr, client.ErrForbidden) {
-			return types.DiagManifest{}, art.rawErr
+	concurrency := req.Concurrency
+	if concurrency <= 0 {
+		concurrency = defaultDiagConcurrency
+	}
+	if concurrency > len(plan) {
+		concurrency = len(plan)
+	}
+
+	gz := gzip.NewWriter(out)
+	defer func() { _ = gz.Close() }()
+	tw := tar.NewWriter(gz)
+	defer func() { _ = tw.Close() }()
+
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Workers fetch in parallel; a single goroutine (the loop below)
+	// drains and writes to the tar so we don't have to make tar.Writer
+	// concurrency-safe. Manifest order stays canonical (plan order)
+	// regardless of completion order; tarball entry order is by
+	// completion, which the manifest documents.
+	type collected struct {
+		idx    int
+		art    types.DiagArtifact
+		body   []byte
+	}
+	results := make(chan collected, concurrency)
+
+	var (
+		fatalOnce sync.Once
+		fatalErr  error
+		sem       = make(chan struct{}, concurrency)
+		wg        sync.WaitGroup
+	)
+	wg.Add(len(plan))
+	for i, col := range plan {
+		go func(i int, col diagCollector) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-cctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			body, status, err := c.Diag.DoGET(cctx, col.Path)
+			if errors.Is(err, client.ErrAuth) || errors.Is(err, client.ErrForbidden) {
+				fatalOnce.Do(func() {
+					fatalErr = err
+					cancel()
+				})
+				return
+			}
+			art := types.DiagArtifact{
+				Name:   col.Name,
+				Path:   col.Path,
+				File:   artifactFileName(col),
+				Status: status,
+				Bytes:  len(body),
+			}
+			// Hash whatever body we captured — including non-2xx
+			// responses (a 404's "{"error":"not_found"}" body still
+			// lands in the tarball; recording its hash lets a verifier
+			// confirm the recorded status came from this exact body).
+			// Skipped only when there's no body at all, which happens
+			// on transport-level failures.
+			if len(body) > 0 {
+				sum := sha256.Sum256(body)
+				art.SHA256 = hex.EncodeToString(sum[:])
+			}
+			if err != nil {
+				art.Error = err.Error()
+			}
+			select {
+			case results <- collected{idx: i, art: art, body: body}:
+			case <-cctx.Done():
+			}
+		}(i, col)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	artifacts := make([]types.DiagArtifact, len(plan))
+	seen := make([]bool, len(plan))
+	for r := range results {
+		artifacts[r.idx] = r.art
+		seen[r.idx] = true
+		// Skip the tar entry only when there's literally nothing to
+		// record — no body AND no HTTP response (transport-level
+		// failure). The manifest still names the attempt with its error.
+		if len(r.body) > 0 || r.art.Status != 0 {
+			if werr := writeTarEntry(tw, r.art.File, r.body); werr != nil {
+				cancel()
+				return types.DiagManifest{}, werr
+			}
 		}
-		artifacts = append(artifacts, art.DiagArtifact)
+		// r.body is no longer referenced — eligible for GC before
+		// the next result arrives.
+	}
+
+	if fatalErr != nil {
+		return types.DiagManifest{}, fatalErr
+	}
+
+	// Compact: cancelled-before-fired tasks left zero-valued slots
+	// (they shouldn't happen on the success path — `seen` will be all
+	// true — but be explicit so any future cancellation source can't
+	// leak empty rows into the manifest).
+	finalArtifacts := make([]types.DiagArtifact, 0, len(plan))
+	for i, a := range artifacts {
+		if seen[i] {
+			finalArtifacts = append(finalArtifacts, a)
+		}
 	}
 
 	manifest := types.DiagManifest{
@@ -115,10 +258,29 @@ func Diag(ctx context.Context, c *client.Client, req types.DiagRequest, out io.W
 			Dialect: string(c.Info.Dialect),
 			Version: c.Info.Version,
 		},
-		Artifacts: artifacts,
+		Artifacts: finalArtifacts,
 	}
 
-	if err := writeBundle(out, manifest); err != nil {
+	mBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return manifest, fmt.Errorf("encoding manifest: %w", err)
+	}
+	// Hash the rendered bytes — what the tarball will hold and what a
+	// verifier will re-hash. Computed AFTER marshaling because the
+	// manifest's content (each artifact's SHA256, Bytes, etc.) is what
+	// the digest must commit to. Surfaced via manifest.SHA256 (json:"-")
+	// so the CLI can print it on stderr; never embedded inside the
+	// manifest itself.
+	manifestSum := sha256.Sum256(mBytes)
+	manifest.SHA256 = hex.EncodeToString(manifestSum[:])
+	if err := writeTarEntry(tw, "manifest.json", mBytes); err != nil {
+		return manifest, err
+	}
+
+	if err := tw.Close(); err != nil {
+		return manifest, err
+	}
+	if err := gz.Close(); err != nil {
 		return manifest, err
 	}
 	return manifest, nil
@@ -166,69 +328,12 @@ func planCollectors(dialect types.Dialect, req types.DiagRequest) []diagCollecto
 	return out
 }
 
-// runArtifact carries the business-layer error alongside the wire-level
-// DiagArtifact so Diag can decide whether to abort (ErrAuth/ErrForbidden)
-// without string-matching on manifest.Error.
-type runArtifact struct {
-	types.DiagArtifact
-	rawErr error
-}
-
-func runCollector(ctx context.Context, d client.ClusterDiagnoser, col diagCollector) runArtifact {
-	body, status, err := d.DoGET(ctx, col.Path)
-	art := types.DiagArtifact{
-		Name:   col.Name,
-		Path:   col.Path,
-		File:   artifactFileName(col),
-		Status: status,
-		Body:   body,
-		Bytes:  len(body),
-	}
-	if err != nil {
-		art.Error = err.Error()
-	}
-	return runArtifact{DiagArtifact: art, rawErr: err}
-}
-
 func artifactFileName(col diagCollector) string {
 	ext := col.Ext
 	if ext == "" {
 		ext = ".json"
 	}
 	return col.Name + ext
-}
-
-// writeBundle assembles the gzipped tarball: manifest.json first (so a
-// reader can `tar -xOf bundle manifest.json | jq` without unpacking),
-// then one file per collected artifact. We skip artifacts whose body is
-// empty AND whose status indicates no response (0) — there's nothing to
-// write; the manifest already records the attempt with its error.
-func writeBundle(out io.Writer, manifest types.DiagManifest) error {
-	gz := gzip.NewWriter(out)
-	defer func() { _ = gz.Close() }()
-	tw := tar.NewWriter(gz)
-	defer func() { _ = tw.Close() }()
-
-	mBytes, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding manifest: %w", err)
-	}
-	if err := writeTarEntry(tw, "manifest.json", mBytes); err != nil {
-		return err
-	}
-
-	for _, art := range manifest.Artifacts {
-		if len(art.Body) == 0 && art.Status == 0 {
-			continue
-		}
-		if err := writeTarEntry(tw, art.File, art.Body); err != nil {
-			return err
-		}
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
 }
 
 func writeTarEntry(tw *tar.Writer, name string, data []byte) error {

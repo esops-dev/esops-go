@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
@@ -25,15 +26,45 @@ type Client struct {
 	api *es.Client
 }
 
+// Options bundles the transport-shaping knobs the upstream ES client
+// honours but esops exposes via config (max_retries, compress). Bare
+// fields rather than functional options because the call site is one
+// place (the cluster factory) and a struct keeps the surface obvious
+// at a glance.
+type Options struct {
+	// MaxRetries: 0 = library default (3). Negative disables retries.
+	// Mirrors es.Config.MaxRetries; we apply DisableRetry for negatives
+	// so "I want no retries" is expressible without conflating zero and
+	// "use the library default".
+	MaxRetries int
+
+	// CompressRequestBody gzips outbound bodies. Useful for big reindex
+	// /_search bodies and for diag captures travelling through narrow
+	// links. Off by default; the upstream's default has stayed off
+	// across versions and operators expect that.
+	CompressRequestBody bool
+}
+
 // New builds a client against the given addresses + basic-auth credentials.
-// TLS and transport tweaks come in via httpTransport.
-func New(addrs []string, username, password string, httpTransport http.RoundTripper) (*Client, error) {
-	c, err := es.NewClient(es.Config{
+// TLS and transport tweaks come in via httpTransport; opts plumbs through
+// max_retries / compress from config.
+func New(addrs []string, username, password string, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+	cfg := es.Config{
 		Addresses: addrs,
 		Username:  username,
 		Password:  password,
 		Transport: httpTransport,
-	})
+	}
+	switch {
+	case opts.MaxRetries < 0:
+		cfg.DisableRetry = true
+	case opts.MaxRetries > 0:
+		cfg.MaxRetries = opts.MaxRetries
+	}
+	if opts.CompressRequestBody {
+		cfg.CompressRequestBody = true
+	}
+	c, err := es.NewClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("elasticsearch client: %w", err)
 	}
@@ -672,19 +703,33 @@ type securityRoleWire struct {
 // Audit implements client.SecurityAuditor against ES's native security
 // realm. Flow:
 //
-//  1. GET /_security/user. If it 400s with a body indicating security is
-//     not enabled, short-circuit to a "security disabled" report — this
-//     is the ES-with-xpack.security.enabled=false case, valid and worth
-//     surfacing.
-//  2. Otherwise decode users, then GET /_security/role and decode roles.
+//  1. GET /_security/user. If it 400s with a body indicating security
+//     is not enabled, short-circuit to a "security disabled" report —
+//     this is the ES-with-xpack.security.enabled=false case, valid and
+//     worth surfacing.
+//  2. Otherwise decode users, GET /_security/role, GET
+//     /_security/role_mapping, GET /_security/api_key (best-effort).
 //
-// 401/403 bubble up as ErrAuth/ErrForbidden. Other 4xx/5xx bubble up
-// wrapped. The report's Status always identifies the dialect.
+// 401/403 on the user endpoint bubble up as ErrAuth/ErrForbidden — if
+// the auth user can't even list users, the audit is fundamentally
+// uninformative and exiting non-zero is the right answer. 403s on the
+// auxiliary endpoints (role_mapping needs `manage_security`, api_key
+// needs `manage_api_key`) are recorded as a per-collection note in the
+// Status block and the audit continues — partial visibility beats a
+// dropped run.
+//
+// Other 4xx/5xx on auxiliary endpoints also note rather than abort,
+// for the same reason: the operator may be on a managed offering that
+// disables some endpoints but still has a usable user/role view.
 func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report := types.SecurityReport{
 		Status: types.SecurityStatus{Dialect: string(types.DialectElasticsearch)},
 	}
 
+	// Step 1: probe users sequentially. The "security disabled" branch
+	// short-circuits the whole audit, so we have to know that before
+	// firing roles/role_mappings/api_keys — which would all 4xx with
+	// the same disabled body and waste round-trips.
 	users, note, disabled, err := c.fetchESUsers(ctx)
 	if err != nil {
 		return report, err
@@ -696,11 +741,45 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.Status.Enabled = true
 	report.Users = users
 
-	roles, err := c.fetchESRoles(ctx)
+	// Step 2: roles + role_mappings + api_keys in parallel — they're
+	// independent reads of the same security backend. On a real cluster
+	// each is ~50–200ms; serial costs ~4× that on every audit.
+	var (
+		roles    []types.SecurityRole
+		mappings []types.SecurityRoleMapping
+		keys     []types.SecurityAPIKey
+		mNote    string
+		kNote    string
+	)
+	err = esopsclient.RunParallel(
+		func() error {
+			r, e := c.fetchESRoles(ctx)
+			roles = r
+			return e
+		},
+		func() error {
+			m, n, e := c.fetchESRoleMappings(ctx)
+			mappings, mNote = m, n
+			return e
+		},
+		func() error {
+			k, n, e := c.fetchESAPIKeys(ctx)
+			keys, kNote = k, n
+			return e
+		},
+	)
 	if err != nil {
 		return report, err
 	}
 	report.Roles = roles
+	report.RoleMappings = mappings
+	report.APIKeys = keys
+	if mNote != "" {
+		report.Status.Notes = append(report.Status.Notes, mNote)
+	}
+	if kNote != "" {
+		report.Status.Notes = append(report.Status.Notes, kNote)
+	}
 	return report, nil
 }
 
@@ -778,6 +857,237 @@ func (c *Client) fetchESRoles(ctx context.Context) ([]types.SecurityRole, error)
 		})
 	}
 	return out, nil
+}
+
+// roleMappingWire mirrors a single GET /_security/role_mapping entry.
+// Roles is the list of granted product roles. Rules is the constraint
+// tree (any/all/field) — too varied to surface meaningfully in a flat
+// audit row, so we extract the leaf identifiers (usernames, groups,
+// realms) into the flat lists Users/BackendRoles/Hosts via flattenRoleMappingRules.
+type roleMappingWire struct {
+	Enabled  bool            `json:"enabled"`
+	Roles    []string        `json:"roles"`
+	Rules    json.RawMessage `json:"rules"`
+	Metadata struct {
+		Reserved bool `json:"_reserved"`
+	} `json:"metadata"`
+}
+
+// fetchESRoleMappings reads /_security/role_mapping. A 403 (caller
+// lacks `manage_security`) returns (nil, "role_mappings: forbidden — needs manage_security cluster privilege", nil)
+// so the audit continues with what's available.
+func (c *Client) fetchESRoleMappings(ctx context.Context) ([]types.SecurityRoleMapping, string, error) {
+	body, status, err := c.doRawGET(ctx, "/_security/role_mapping")
+	if err != nil {
+		return nil, "", err
+	}
+	switch status {
+	case http.StatusForbidden:
+		return nil, "role_mappings: forbidden — needs manage_security cluster privilege", nil
+	case http.StatusUnauthorized:
+		return nil, "", esopsclient.ErrAuth
+	}
+	if status >= 400 {
+		return nil, fmt.Sprintf("role_mappings: HTTP %d (%s)", status, snippet(body)), nil
+	}
+
+	var raw map[string]roleMappingWire
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, "", errors.Join(errors.New("decoding role_mapping response"), err)
+	}
+	out := make([]types.SecurityRoleMapping, 0, len(raw))
+	for name, m := range raw {
+		users, backendRoles, hosts := flattenRoleMappingRules(m.Rules)
+		out = append(out, types.SecurityRoleMapping{
+			Name:         name,
+			Reserved:     m.Metadata.Reserved,
+			Enabled:      m.Enabled,
+			Roles:        m.Roles,
+			BackendRoles: backendRoles,
+			Users:        users,
+			Hosts:        hosts,
+		})
+	}
+	return out, "", nil
+}
+
+// flattenRoleMappingRules walks a /_security/role_mapping rules tree
+// and pulls out the leaf identifiers an operator wants to see at a
+// glance: usernames, group names, hostnames. The cluster's grammar
+// supports nested any/all/except clauses; we don't reproduce that
+// boolean structure — listing every identifier the rule could match
+// is the right shape for an audit ("does any mapping name 'alice'?").
+func flattenRoleMappingRules(rules json.RawMessage) (users, backendRoles, hosts []string) {
+	var node map[string]json.RawMessage
+	if err := json.Unmarshal(rules, &node); err != nil || len(node) == 0 {
+		return nil, nil, nil
+	}
+	var walk func(json.RawMessage)
+	walk = func(raw json.RawMessage) {
+		var n map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return
+		}
+		for k, v := range n {
+			switch k {
+			case "any", "all":
+				var children []json.RawMessage
+				if err := json.Unmarshal(v, &children); err == nil {
+					for _, c := range children {
+						walk(c)
+					}
+				}
+			case "except":
+				walk(v)
+			case "field":
+				var field map[string]json.RawMessage
+				if err := json.Unmarshal(v, &field); err != nil {
+					continue
+				}
+				for fk, fv := range field {
+					values := decodeStringOrSlice(fv)
+					switch fk {
+					case "username":
+						users = append(users, values...)
+					case "groups":
+						backendRoles = append(backendRoles, values...)
+					case "dn":
+						users = append(users, values...)
+					case "metadata.host", "host":
+						hosts = append(hosts, values...)
+					}
+				}
+			}
+		}
+	}
+	walk(rules)
+	return esopsclient.UniqueStrings(users), esopsclient.UniqueStrings(backendRoles), esopsclient.UniqueStrings(hosts)
+}
+
+// decodeStringOrSlice handles the two shapes a `field` value can take:
+// a single string ("alice") or a list (["alice","bob"]). Returns the
+// parsed list either way.
+func decodeStringOrSlice(raw json.RawMessage) []string {
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return []string{single}
+	}
+	var multi []string
+	if err := json.Unmarshal(raw, &multi); err == nil {
+		return multi
+	}
+	return nil
+}
+
+// apiKeyWire mirrors one entry from /_security/api_key. The cluster
+// returns wrapped {"api_keys":[...]}; we decode that envelope, then
+// each entry. Times are unix-millis ints in the wire format; we
+// render them as RFC3339 strings on the way out so the JSON schema
+// stays operator-readable.
+type apiKeyWire struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Username      string `json:"username"`
+	Realm         string `json:"realm"`
+	Invalidated   bool   `json:"invalidated"`
+	CreationMS    int64  `json:"creation"`
+	ExpirationMS  int64  `json:"expiration"`
+}
+
+// fetchESAPIKeys reads /_security/api_key. The endpoint requires
+// `manage_api_key` cluster privilege; a 403 records a status note and
+// returns no keys. Invalidated keys are kept in the output — an
+// audit specifically wants to see "this key was revoked, who issued
+// it, when?".
+func (c *Client) fetchESAPIKeys(ctx context.Context) ([]types.SecurityAPIKey, string, error) {
+	// owner=false (default) returns all keys visible to the auth user;
+	// requires manage_api_key. We deliberately don't restrict to the
+	// caller's own keys — `ops audit` is meant to surface the cluster
+	// state, not just the running identity's view.
+	body, status, err := c.doRawGET(ctx, "/_security/api_key")
+	if err != nil {
+		return nil, "", err
+	}
+	switch status {
+	case http.StatusForbidden:
+		return nil, "api_keys: forbidden — needs manage_api_key cluster privilege", nil
+	case http.StatusUnauthorized:
+		return nil, "", esopsclient.ErrAuth
+	case http.StatusNotFound:
+		// Older ES (pre-7.x) didn't expose the listing endpoint. Treat
+		// as "not available" rather than a hard failure.
+		return nil, "api_keys: endpoint not available on this cluster", nil
+	}
+	if status >= 400 {
+		return nil, fmt.Sprintf("api_keys: HTTP %d (%s)", status, snippet(body)), nil
+	}
+
+	var wrap struct {
+		APIKeys []apiKeyWire `json:"api_keys"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, "", errors.Join(errors.New("decoding api_key response"), err)
+	}
+	out := make([]types.SecurityAPIKey, 0, len(wrap.APIKeys))
+	for _, k := range wrap.APIKeys {
+		out = append(out, types.SecurityAPIKey{
+			ID:          k.ID,
+			Name:        k.Name,
+			Username:    k.Username,
+			Realm:       k.Realm,
+			Invalidated: k.Invalidated,
+			Creation:    formatEpochMillis(k.CreationMS),
+			Expiration:  formatEpochMillis(k.ExpirationMS),
+		})
+	}
+	return out, "", nil
+}
+
+// doRawGET performs a plain GET via the underlying ES transport — same
+// path the typed helpers use, so auth/timeouts/headers match. Used by
+// the audit fetchers that don't have a typed wrapper. Body and status
+// come back paired so the caller can either decode JSON or surface
+// non-2xx detail in a status note.
+func (c *Client) doRawGET(ctx context.Context, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.api.Perform(req)
+	if err != nil {
+		return nil, 0, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
+}
+
+// formatEpochMillis turns an ES millisecond timestamp into RFC3339, or
+// "" when the cluster did not report the field (zero/negative). Stable
+// across ES versions that switched between epoch-ms and ISO strings —
+// we always emit the ISO form to scripts.
+func formatEpochMillis(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
+}
+
+// snippet trims a response body to a short, single-line preview for
+// embedding in a Status note. Long error bodies (HTML 502 pages from
+// load balancers, multi-line stack traces) get clipped so the note
+// stays readable in a table cell.
+func snippet(body []byte) string {
+	const max = 120
+	s := strings.TrimSpace(string(body))
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > max {
+		s = s[:max-1] + "…"
+	}
+	return s
 }
 
 // isSecurityDisabledBody sniffs an ES error body for the signals that

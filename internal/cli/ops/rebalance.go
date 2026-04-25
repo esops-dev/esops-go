@@ -2,12 +2,14 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/logging"
 	esopsops "github.com/dj-wasabi/esops-go/internal/ops"
 	"github.com/dj-wasabi/esops-go/internal/output"
@@ -101,9 +103,15 @@ func runRebalance(ctx context.Context, cmd *cli.Command) error {
 		}}
 	}
 
-	result, err := esopsops.Rebalance(ctx, s.Client.Reroute, req)
-	if err != nil {
-		return err
+	result, opErr := esopsops.Rebalance(ctx, s.Client.Reroute, req)
+	// A dry-run blocker (acknowledged=false) carries a useful result —
+	// the explanations[] block names the deciders. Render it before
+	// returning the sentinel so the operator sees the "why" alongside
+	// the non-zero exit. Validation/transport errors leave the result
+	// zero-valued; skip rendering in that case.
+	ackBlocked := errors.Is(opErr, client.ErrDryRunBlocker)
+	if opErr != nil && !ackBlocked {
+		return opErr
 	}
 
 	logging.Logger().Info("ops.rebalance",
@@ -115,7 +123,10 @@ func runRebalance(ctx context.Context, cmd *cli.Command) error {
 		"acknowledged", result.Acknowledged,
 		"commands", len(result.Commands),
 	)
-	return output.Rebalance(os.Stdout, result, s.Format)
+	if renderErr := output.Rebalance(os.Stdout, result, s.Format); renderErr != nil {
+		return renderErr
+	}
+	return opErr
 }
 
 // rejectInapplicableFlags fails fast when --action retry-failed is paired

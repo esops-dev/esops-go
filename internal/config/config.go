@@ -52,6 +52,7 @@ type Context struct {
 	TLS         TLS           `koanf:"tls"`
 	Protection  string        `koanf:"protection"`
 	MaxInFlight int           `koanf:"max_in_flight"`
+	MaxRetries  int           `koanf:"max_retries"`
 	Timeout     time.Duration `koanf:"timeout"`
 	Compress    bool          `koanf:"compress"`
 }
@@ -286,6 +287,9 @@ func (cfg Config) ResolveContext(name string) (string, Context, error) {
 	}
 	if !ctx.Compress {
 		ctx.Compress = cfg.Defaults.Compress
+	}
+	if ctx.MaxRetries == 0 {
+		ctx.MaxRetries = cfg.Defaults.MaxRetries
 	}
 	if err := resolveContextSecrets(&ctx); err != nil {
 		return name, ctx, fmt.Errorf("context %q: %w", name, err)
