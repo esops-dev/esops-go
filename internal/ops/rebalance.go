@@ -28,11 +28,25 @@ import (
 //     the safety opt-in obvious in shell history.
 //
 // Rebalance returns the cluster's response normalised into types.RerouteResult.
+//
+// When the cluster's response sets acknowledged=false (a dry-run that
+// reported a blocker, or a live request the master rejected), Rebalance
+// returns the result alongside ErrDryRunBlocker so callers can render
+// the explanations block AND bubble exit code 7 up to main. Without
+// this, automation around `ops rebalance --dry-run` would treat a
+// refused move as a successful no-op.
 func Rebalance(ctx context.Context, c client.RerouteExecutor, req types.RerouteRequest) (types.RerouteResult, error) {
 	if err := validateRerouteRequest(req); err != nil {
 		return types.RerouteResult{}, err
 	}
-	return c.Reroute(ctx, req)
+	result, err := c.Reroute(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	if !result.Acknowledged {
+		return result, fmt.Errorf("%w: cluster did not acknowledge the reroute", client.ErrDryRunBlocker)
+	}
+	return result, nil
 }
 
 func validateRerouteRequest(req types.RerouteRequest) error {

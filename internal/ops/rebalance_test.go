@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/ops"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -54,6 +55,41 @@ func TestRebalance_passesRequestThrough(t *testing.T) {
 	}
 	if !got.Acknowledged {
 		t.Errorf("got %+v, want Acknowledged=true", got)
+	}
+}
+
+func TestRebalance_unacknowledgedReturnsBlocker(t *testing.T) {
+	// acknowledged=false on a dry-run is the cluster's "I refuse" signal.
+	// The business layer surfaces ErrDryRunBlocker so main.go maps it to
+	// exit code 7, while still returning the result so the caller can
+	// render the explanations[] block before exiting non-zero.
+	fake := &fakeRerouteExecutor{result: types.RerouteResult{
+		Acknowledged: false,
+		Explanations: []types.RerouteExplanation{{Command: "move"}},
+	}}
+	result, err := ops.Rebalance(context.Background(), fake, types.RerouteRequest{
+		Commands: []types.RerouteCommand{moveCommand()},
+		DryRun:   true,
+	})
+	if !errors.Is(err, client.ErrDryRunBlocker) {
+		t.Errorf("err = %v, want ErrDryRunBlocker", err)
+	}
+	if result.Acknowledged {
+		t.Errorf("result.Acknowledged = true; expected the unack flag to round-trip for rendering")
+	}
+	if len(result.Explanations) != 1 {
+		t.Errorf("result.Explanations not preserved (got %d, want 1)", len(result.Explanations))
+	}
+}
+
+func TestRebalance_acknowledgedSucceeds(t *testing.T) {
+	// Symmetric to the blocker test: ack=true means success — no error.
+	fake := &fakeRerouteExecutor{result: types.RerouteResult{Acknowledged: true}}
+	_, err := ops.Rebalance(context.Background(), fake, types.RerouteRequest{
+		Commands: []types.RerouteCommand{moveCommand()},
+	})
+	if err != nil {
+		t.Errorf("err = %v, want nil on acknowledged=true", err)
 	}
 }
 

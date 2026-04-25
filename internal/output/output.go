@@ -75,13 +75,23 @@ func Health(w io.Writer, h types.ClusterHealth, info types.ClusterInfo, f Format
 // output shows the columns an operator reaches for first during an
 // incident (index, shard, role, state, node, size). Wide adds docs,
 // IP, and the raw STORE_BYTES. JSON/YAML emit the neutral Shard shape
-// unchanged — scripts depend on stable field names.
+// unchanged — scripts depend on stable field names. NDJSON writes one
+// Shard per line so a 200k-shard pipe doesn't have to be parsed as a
+// single blob downstream.
 func Shards(w io.Writer, shards []types.Shard, f Format) error {
 	switch f {
 	case FormatJSON:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(shards)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, s := range shards {
+			if err := enc.Encode(s); err != nil {
+				return err
+			}
+		}
+		return nil
 	case FormatYAML:
 		enc := yaml.NewEncoder(w)
 		enc.SetIndent(2)
@@ -166,6 +176,113 @@ func HotThreads(w io.Writer, h types.HotThreads, f Format) error {
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
+}
+
+// DiagVerify renders the result of `ops diag verify`. Table format
+// shows a header (manifest hash + cluster + summary) and only the
+// problem rows by default — when everything passes, no per-artifact
+// table is rendered, just the summary line. Wide adds the full
+// per-artifact list including OK rows. JSON/YAML emit the neutral
+// DiagVerifyResult shape directly.
+//
+// The `label` is the operator-facing source name (file path or "<stdin>");
+// surfaced in the header so the table self-documents which bundle was
+// checked.
+func DiagVerify(w io.Writer, label string, r types.DiagVerifyResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return diagVerifyTable(w, label, r, true)
+	case FormatTable, "":
+		return diagVerifyTable(w, label, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func diagVerifyTable(w io.Writer, label string, r types.DiagVerifyResult, wide bool) error {
+	_, _ = fmt.Fprintf(w, "BUNDLE          %s\n", label)
+	_, _ = fmt.Fprintf(w, "MANIFEST_SHA256 %s\n", r.ManifestSHA256)
+	if r.Cluster.Name != "" || r.Cluster.Dialect != "" {
+		_, _ = fmt.Fprintf(w, "CLUSTER         %s (%s %s)\n",
+			dashIfEmpty(r.Cluster.Name), r.Cluster.Dialect, r.Cluster.Version)
+	}
+	if r.CreatedAt != "" {
+		_, _ = fmt.Fprintf(w, "CREATED         %s\n", r.CreatedAt)
+	}
+	_, _ = fmt.Fprintln(w)
+
+	verdict := "PASS"
+	if !r.Pass {
+		verdict = "FAIL"
+	}
+	_, _ = fmt.Fprintf(w,
+		"SUMMARY  %s  %d artifacts  ok=%d  mismatched=%d  missing=%d  no_hash=%d  unknown=%d\n",
+		verdict, r.Summary.Total, r.Summary.OK,
+		r.Summary.Mismatched, r.Summary.Missing,
+		r.Summary.NoHash, r.Summary.Unknown,
+	)
+
+	// In default (non-wide) mode, only show problem rows. A clean run
+	// shouldn't fill the screen with green checkmarks — the SUMMARY
+	// line is the answer. Wide mode shows everything for the operator
+	// who wants the full per-artifact view.
+	rows := r.Artifacts
+	if !wide {
+		filtered := rows[:0:0]
+		for _, a := range r.Artifacts {
+			if a.Status != types.DiagVerifyOK {
+				filtered = append(filtered, a)
+			}
+		}
+		rows = filtered
+	}
+
+	if len(rows) > 0 {
+		_, _ = fmt.Fprintln(w)
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "STATUS\tNAME\tFILE\tEXPECTED\tACTUAL")
+		for _, a := range rows {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+				strings.ToUpper(string(a.Status)),
+				a.Name, a.File,
+				shortHash(a.Expected), shortHash(a.Actual),
+			)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if len(r.UnknownEntries) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "UNKNOWN ENTRIES (in tarball, not listed in manifest)")
+		for _, name := range r.UnknownEntries {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+	return nil
+}
+
+// shortHash clips a hex SHA-256 to its first 12 characters for table
+// rendering — that's enough to spot mismatches by eye while keeping
+// columns narrow. JSON/YAML output preserves the full hash.
+func shortHash(h string) string {
+	if h == "" {
+		return "-"
+	}
+	if len(h) > 12 {
+		return h[:12] + "…"
+	}
+	return h
 }
 
 // Audit renders a SecurityAudit — the full `ops audit` view. JSON/YAML
@@ -329,12 +446,18 @@ func auditTable(w io.Writer, a types.SecurityAudit, wide bool) error {
 
 	// Section 2: cluster-side status. When security is disabled the note
 	// is the load-bearing piece; elevate it so the operator can't miss it.
+	// Per-collection notes (forbidden on api_keys, etc.) follow as a list
+	// — they don't disable the audit but the operator should see what
+	// went unfetched so the absence is explicit, not silent.
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "SECURITY")
 	_, _ = fmt.Fprintf(w, "  dialect:  %s\n", a.Status.Dialect)
 	_, _ = fmt.Fprintf(w, "  enabled:  %t\n", a.Status.Enabled)
 	if a.Status.Note != "" {
 		_, _ = fmt.Fprintf(w, "  note:     %s\n", a.Status.Note)
+	}
+	for _, n := range a.Status.Notes {
+		_, _ = fmt.Fprintf(w, "  note:     %s\n", n)
 	}
 
 	if !a.Status.Enabled {
@@ -390,7 +513,104 @@ func auditTable(w io.Writer, a types.SecurityAudit, wide bool) error {
 				truncate(joinOrDash(r.IndexPatterns), 40))
 		}
 	}
-	return rw.Flush()
+	if err := rw.Flush(); err != nil {
+		return err
+	}
+
+	// Section 5: role mappings (both dialects when present). Surfaces
+	// the link between external identity (LDAP groups, OIDC claims)
+	// and product roles — the bridge an audit reading "who can do X?"
+	// has to cross.
+	if len(a.RoleMappings) > 0 {
+		if err := renderRoleMappings(w, a.RoleMappings, wide); err != nil {
+			return err
+		}
+	}
+
+	// Section 6: ES API keys. Surfaces every active key the auth user
+	// can see, including invalidated ones — an audit specifically wants
+	// "this key was revoked, when, by whom" in the trail.
+	if len(a.APIKeys) > 0 {
+		if err := renderAPIKeys(w, a.APIKeys, wide); err != nil {
+			return err
+		}
+	}
+
+	// Section 7: OS tenants. Multi-tenancy gates which Dashboards
+	// saved-objects each user sees; missing it from an audit would
+	// miss a real lever.
+	if len(a.Tenants) > 0 {
+		if err := renderTenants(w, a.Tenants); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderRoleMappings(w io.Writer, mappings []types.SecurityRoleMapping, wide bool) error {
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "ROLE_MAPPINGS")
+	mw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(mw, "NAME\tRESERVED\tENABLED\tROLES\tBACKEND_ROLES\tUSERS\tHOSTS")
+	} else {
+		_, _ = fmt.Fprintln(mw, "NAME\tRESERVED\tENABLED\tROLES\tBACKEND_ROLES\tUSERS")
+	}
+	for _, m := range mappings {
+		if wide {
+			_, _ = fmt.Fprintf(mw, "%s\t%t\t%t\t%s\t%s\t%s\t%s\n",
+				m.Name, m.Reserved, m.Enabled,
+				joinOrDash(m.Roles), joinOrDash(m.BackendRoles),
+				joinOrDash(m.Users), joinOrDash(m.Hosts))
+		} else {
+			_, _ = fmt.Fprintf(mw, "%s\t%t\t%t\t%s\t%s\t%s\n",
+				m.Name, m.Reserved, m.Enabled,
+				truncate(joinOrDash(m.Roles), 30),
+				truncate(joinOrDash(m.BackendRoles), 30),
+				truncate(joinOrDash(m.Users), 30))
+		}
+	}
+	return mw.Flush()
+}
+
+func renderAPIKeys(w io.Writer, keys []types.SecurityAPIKey, wide bool) error {
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "API_KEYS")
+	kw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(kw, "NAME\tID\tUSERNAME\tREALM\tINVALIDATED\tCREATED\tEXPIRES")
+	} else {
+		_, _ = fmt.Fprintln(kw, "NAME\tUSERNAME\tINVALIDATED\tEXPIRES")
+	}
+	for _, k := range keys {
+		if wide {
+			_, _ = fmt.Fprintf(kw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n",
+				k.Name, k.ID, dashIfEmpty(k.Username),
+				dashIfEmpty(k.Realm), k.Invalidated,
+				dashIfEmpty(k.Creation), dashIfEmpty(k.Expiration))
+		} else {
+			_, _ = fmt.Fprintf(kw, "%s\t%s\t%t\t%s\n",
+				k.Name, dashIfEmpty(k.Username),
+				k.Invalidated, dashIfEmpty(k.Expiration))
+		}
+	}
+	return kw.Flush()
+}
+
+// renderTenants has no wide variant — the OS tenant model is just
+// {name, reserved, description}, so there's no extra column to surface.
+// Kept consistent with the other render* helpers in shape so callers
+// can swap them in without thinking about which dialect is in play.
+func renderTenants(w io.Writer, tenants []types.SecurityTenant) error {
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "TENANTS")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "NAME\tRESERVED\tDESCRIPTION")
+	for _, t := range tenants {
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\n",
+			t.Name, t.Reserved, dashIfEmpty(t.Description))
+	}
+	return tw.Flush()
 }
 
 func joinOrDash(s []string) string {

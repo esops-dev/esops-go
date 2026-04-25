@@ -22,4 +22,16 @@ var (
 	// ErrUnknownProduct — GET / returned something we don't recognise
 	// as either Elasticsearch or OpenSearch.
 	ErrUnknownProduct = errors.New("cluster is neither Elasticsearch nor OpenSearch")
+
+	// ErrDryRunBlocker — a dry-run (or live operation) reported a
+	// blocker the cluster will not execute. The canonical case is
+	// /_cluster/reroute returning acknowledged=false with an
+	// explanations[] block describing why. Exit code 7.
+	ErrDryRunBlocker = errors.New("dry-run reported a blocker")
+
+	// ErrBlastRadius — a destructive operation refused to proceed
+	// because its resolved scope exceeds the safety threshold and the
+	// purpose-built opt-in flag (e.g. --max-indices, --allow-large-prune)
+	// was not set. Exit code 8.
+	ErrBlastRadius = errors.New("blast-radius limit exceeded")
 )

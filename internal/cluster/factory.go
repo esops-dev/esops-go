@@ -30,13 +30,19 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 	addrs := cc.Addresses()
 	switch info.Dialect {
 	case types.DialectElasticsearch:
-		impl, err := esadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport)
+		impl, err := esadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport, esadapter.Options{
+			MaxRetries:          cc.MaxRetries,
+			CompressRequestBody: cc.Compress,
+		})
 		if err != nil {
 			return nil, err
 		}
 		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
 	case types.DialectOpenSearch:
-		impl, err := osadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport)
+		impl, err := osadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport, osadapter.Options{
+			MaxRetries:          cc.MaxRetries,
+			CompressRequestBody: cc.Compress,
+		})
 		if err != nil {
 			return nil, err
 		}

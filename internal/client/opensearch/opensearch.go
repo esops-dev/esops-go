@@ -27,15 +27,35 @@ type Client struct {
 	api *osapi.Client
 }
 
-func New(addrs []string, username, password string, httpTransport http.RoundTripper) (*Client, error) {
-	c, err := osapi.NewClient(osapi.Config{
-		Client: os.Config{
-			Addresses: addrs,
-			Username:  username,
-			Password:  password,
-			Transport: httpTransport,
-		},
-	})
+// Options bundles the transport-shaping knobs the upstream OS client
+// honours but esops exposes via config (max_retries, compress). See
+// the matching elasticsearch.Options for the shape rationale.
+type Options struct {
+	// MaxRetries: 0 = library default (3). Negative disables retries
+	// (DisableRetry on the upstream).
+	MaxRetries int
+
+	// CompressRequestBody gzips outbound bodies.
+	CompressRequestBody bool
+}
+
+func New(addrs []string, username, password string, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+	osCfg := os.Config{
+		Addresses: addrs,
+		Username:  username,
+		Password:  password,
+		Transport: httpTransport,
+	}
+	switch {
+	case opts.MaxRetries < 0:
+		osCfg.DisableRetry = true
+	case opts.MaxRetries > 0:
+		osCfg.MaxRetries = opts.MaxRetries
+	}
+	if opts.CompressRequestBody {
+		osCfg.CompressRequestBody = true
+	}
+	c, err := osapi.NewClient(osapi.Config{Client: osCfg})
 	if err != nil {
 		return nil, fmt.Errorf("opensearch client: %w", err)
 	}
@@ -492,12 +512,21 @@ type osRoleWire struct {
 // plugin. The plugin ships with every production OS build, so unlike ES
 // we don't expect a "security disabled" branch — if the endpoint 404s we
 // still return a disabled status (user removed the plugin) rather than
-// erroring out. 401/403 bubble up for the operator to diagnose.
+// erroring out. 401/403 on internalusers bubble up for the operator to
+// diagnose, since users + roles are the bare minimum for a useful audit.
+//
+// Role mappings and tenants are fetched best-effort: a 403 on either
+// (the auth user lacks `restapi:admin/rolesmapping` or
+// `restapi:admin/tenants`) lands in Status.Notes rather than aborting.
+// Partial visibility beats a dropped run.
 func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report := types.SecurityReport{
 		Status: types.SecurityStatus{Dialect: string(types.DialectOpenSearch)},
 	}
 
+	// Step 1: probe users sequentially. A 404 on internalusers means
+	// the security plugin isn't there, and the whole audit short-
+	// circuits — same reasoning as the ES side.
 	users, disabled, note, err := c.fetchOSUsers(ctx)
 	if err != nil {
 		return report, err
@@ -509,11 +538,46 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.Status.Enabled = true
 	report.Users = users
 
-	roles, err := c.fetchOSRoles(ctx)
+	// Step 2: roles + role_mappings + tenants in parallel — three
+	// independent reads of the security plugin's admin API. Serial
+	// would multiply latency by 3 on every audit; the plugin happily
+	// fields concurrent reads.
+	var (
+		roles    []types.SecurityRole
+		mappings []types.SecurityRoleMapping
+		tenants  []types.SecurityTenant
+		mNote    string
+		tNote    string
+	)
+	err = esopsclient.RunParallel(
+		func() error {
+			r, e := c.fetchOSRoles(ctx)
+			roles = r
+			return e
+		},
+		func() error {
+			m, n, e := c.fetchOSRoleMappings(ctx)
+			mappings, mNote = m, n
+			return e
+		},
+		func() error {
+			t, n, e := c.fetchOSTenants(ctx)
+			tenants, tNote = t, n
+			return e
+		},
+	)
 	if err != nil {
 		return report, err
 	}
 	report.Roles = roles
+	report.RoleMappings = mappings
+	report.Tenants = tenants
+	if mNote != "" {
+		report.Status.Notes = append(report.Status.Notes, mNote)
+	}
+	if tNote != "" {
+		report.Status.Notes = append(report.Status.Notes, tNote)
+	}
 	return report, nil
 }
 
@@ -591,6 +655,106 @@ func (c *Client) fetchOSRoles(ctx context.Context) ([]types.SecurityRole, error)
 		})
 	}
 	return out, nil
+}
+
+// osRoleMappingWire mirrors a single
+// /_plugins/_security/api/rolesmapping entry. Roles is the list of
+// product roles the mapping grants; backend_roles/users/hosts are the
+// external identifiers that satisfy it. Reserved/Hidden flag built-in
+// or system mappings.
+type osRoleMappingWire struct {
+	Reserved     bool     `json:"reserved"`
+	Hidden       bool     `json:"hidden"`
+	BackendRoles []string `json:"backend_roles"`
+	Hosts        []string `json:"hosts"`
+	Users        []string `json:"users"`
+	// The OS plugin does not expose an explicit `enabled` flag on a
+	// mapping — entries either exist or they don't. We surface
+	// Enabled=true for every present mapping so the JSON shape lines
+	// up with the ES side, where the flag is real.
+}
+
+// fetchOSRoleMappings reads /_plugins/_security/api/rolesmapping. A 403
+// (caller lacks restapi:admin/rolesmapping) records a status note and
+// returns no mappings, so the audit continues with what's available.
+func (c *Client) fetchOSRoleMappings(ctx context.Context) ([]types.SecurityRoleMapping, string, error) {
+	body, status, err := c.doSecurityGET(ctx, "/_plugins/_security/api/rolesmapping")
+	if err != nil {
+		return nil, "", err
+	}
+	switch status {
+	case http.StatusForbidden:
+		return nil, "role_mappings: forbidden — needs restapi:admin/rolesmapping permission", nil
+	case http.StatusUnauthorized:
+		return nil, "", esopsclient.ErrAuth
+	case http.StatusNotFound:
+		return nil, "role_mappings: endpoint not available on this cluster", nil
+	}
+	if status >= 400 {
+		return nil, fmt.Sprintf("role_mappings: HTTP %d", status), nil
+	}
+
+	var raw map[string]osRoleMappingWire
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, "", errors.Join(errors.New("decoding OS rolesmapping response"), err)
+	}
+	out := make([]types.SecurityRoleMapping, 0, len(raw))
+	for name, m := range raw {
+		out = append(out, types.SecurityRoleMapping{
+			Name:         name,
+			Reserved:     m.Reserved,
+			Enabled:      true,
+			Roles:        []string{name}, // OS keys mappings by the role name itself
+			BackendRoles: m.BackendRoles,
+			Users:        m.Users,
+			Hosts:        m.Hosts,
+		})
+	}
+	return out, "", nil
+}
+
+// osTenantWire mirrors a single /_plugins/_security/api/tenants entry.
+// Reserved/Hidden flag built-in or system tenants ("global_tenant",
+// "admin_tenant"). Description is operator-supplied, often empty.
+type osTenantWire struct {
+	Reserved    bool   `json:"reserved"`
+	Hidden      bool   `json:"hidden"`
+	Description string `json:"description"`
+}
+
+// fetchOSTenants reads /_plugins/_security/api/tenants. Same partial-
+// failure pattern as role mappings: 403/404 surface as a status note
+// rather than aborting.
+func (c *Client) fetchOSTenants(ctx context.Context) ([]types.SecurityTenant, string, error) {
+	body, status, err := c.doSecurityGET(ctx, "/_plugins/_security/api/tenants")
+	if err != nil {
+		return nil, "", err
+	}
+	switch status {
+	case http.StatusForbidden:
+		return nil, "tenants: forbidden — needs restapi:admin/tenants permission", nil
+	case http.StatusUnauthorized:
+		return nil, "", esopsclient.ErrAuth
+	case http.StatusNotFound:
+		return nil, "tenants: endpoint not available (cluster has multitenancy disabled)", nil
+	}
+	if status >= 400 {
+		return nil, fmt.Sprintf("tenants: HTTP %d", status), nil
+	}
+
+	var raw map[string]osTenantWire
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, "", errors.Join(errors.New("decoding OS tenants response"), err)
+	}
+	out := make([]types.SecurityTenant, 0, len(raw))
+	for name, t := range raw {
+		out = append(out, types.SecurityTenant{
+			Name:        name,
+			Reserved:    t.Reserved,
+			Description: t.Description,
+		})
+	}
+	return out, "", nil
 }
 
 // doSecurityGET drops down to the underlying opensearch-go transport so

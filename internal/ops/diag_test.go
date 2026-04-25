@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,8 +21,14 @@ import (
 // fakeDiagnoser returns canned responses keyed by path. Unknown paths
 // return 404 so the collector's "record and move on" behaviour is
 // exercised without having to stub every endpoint in every test.
+//
+// `mu` guards `calls` because Diag dispatches collectors concurrently
+// (default concurrency 4). Without the lock `go test -race` flags the
+// append. `responses` is read-only after construction so it doesn't
+// need protection.
 type fakeDiagnoser struct {
 	responses map[string]fakeResp
+	mu        sync.Mutex
 	calls     []string
 }
 
@@ -32,11 +39,23 @@ type fakeResp struct {
 }
 
 func (f *fakeDiagnoser) DoGET(_ context.Context, path string) ([]byte, int, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, path)
+	f.mu.Unlock()
 	if r, ok := f.responses[path]; ok {
 		return r.body, r.status, r.err
 	}
 	return []byte(`{"error":"not_found"}`), 404, nil
+}
+
+// callsSnapshot returns a copy of the recorded paths so test assertions
+// iterate without holding the lock during reads.
+func (f *fakeDiagnoser) callsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
 }
 
 func esClient(diag client.ClusterDiagnoser) *client.Client {
@@ -137,13 +156,14 @@ func TestDiag_skipsDialectMismatchedCollectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Diag: %v", err)
 	}
-	for _, p := range fake.calls {
+	calls := fake.callsSnapshot()
+	for _, p := range calls {
 		if strings.HasPrefix(p, "/_ilm/") {
 			t.Errorf("ILM endpoint %q hit on OpenSearch cluster", p)
 		}
 	}
 	var ismHit bool
-	for _, p := range fake.calls {
+	for _, p := range calls {
 		if strings.HasPrefix(p, "/_plugins/_ism/") {
 			ismHit = true
 		}
@@ -234,8 +254,9 @@ func TestDiag_respectsOptionalFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Diag: %v", err)
 	}
+	calls := fake.callsSnapshot()
 	var sawMappings, sawSlowlog, sawIdle bool
-	for _, p := range fake.calls {
+	for _, p := range calls {
 		if strings.HasPrefix(p, "/_all/_mapping") {
 			sawMappings = true
 		}
@@ -247,13 +268,13 @@ func TestDiag_respectsOptionalFlags(t *testing.T) {
 		}
 	}
 	if !sawMappings {
-		t.Errorf("--include-mappings did not trigger /_all/_mapping (calls: %v)", fake.calls)
+		t.Errorf("--include-mappings did not trigger /_all/_mapping (calls: %v)", calls)
 	}
 	if !sawSlowlog {
-		t.Errorf("--include-slowlog did not trigger slowlog settings call (calls: %v)", fake.calls)
+		t.Errorf("--include-slowlog did not trigger slowlog settings call (calls: %v)", calls)
 	}
 	if !sawIdle {
-		t.Errorf("--include-idle-threads did not trigger hot_threads?ignore_idle_threads=false (calls: %v)", fake.calls)
+		t.Errorf("--include-idle-threads did not trigger hot_threads?ignore_idle_threads=false (calls: %v)", calls)
 	}
 }
 
@@ -264,7 +285,7 @@ func TestDiag_optionalsOffByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Diag: %v", err)
 	}
-	for _, p := range fake.calls {
+	for _, p := range fake.callsSnapshot() {
 		if strings.HasPrefix(p, "/_all/_mapping") {
 			t.Errorf("mappings endpoint %q hit without --include-mappings", p)
 		}
