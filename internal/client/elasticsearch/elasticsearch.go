@@ -453,6 +453,178 @@ func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
 	return body, resp.StatusCode, nil
 }
 
+// rerouteResponseWire mirrors the /_cluster/reroute response. The cluster
+// also returns a "state" object (full routing table on older ES, omitted
+// on 9.x with metric=none) — we don't decode it: the operator-facing
+// view is acknowledged + explanations, and dragging the routing table
+// through the adapter would bloat the binary for no surfaced value.
+type rerouteResponseWire struct {
+	Acknowledged bool                         `json:"acknowledged"`
+	Explanations []rerouteExplanationWire     `json:"explanations,omitempty"`
+}
+
+type rerouteExplanationWire struct {
+	Command   string                  `json:"command"`
+	Decisions []rerouteDecisionWire   `json:"decisions,omitempty"`
+}
+
+type rerouteDecisionWire struct {
+	Decider     string `json:"decider"`
+	Decision    string `json:"decision"`
+	Explanation string `json:"explanation,omitempty"`
+}
+
+// Reroute implements client.RerouteExecutor against ES's
+// /_cluster/reroute. Body shape: {"commands":[{"<action>": {<args>}}, ...]}.
+// retry_failed/dry_run/explain are query params; metric=none keeps the
+// response small (we don't surface the routing table).
+//
+// When req.RetryFailed is true and Commands is empty, the body is
+// {"commands":[]} — that's a valid request shape and lets the operator
+// kick the master into retrying max-retried allocations without naming
+// any specific shard.
+func (c *Client) Reroute(ctx context.Context, req types.RerouteRequest) (types.RerouteResult, error) {
+	body, err := buildRerouteBody(req.Commands)
+	if err != nil {
+		return types.RerouteResult{}, err
+	}
+
+	rr := c.api.Cluster.Reroute
+	opts := []func(*esapi.ClusterRerouteRequest){
+		rr.WithContext(ctx),
+		rr.WithBody(bytes.NewReader(body)),
+		// metric=none drops the routing-table dump from the response —
+		// we don't surface it and it can be MB on large clusters.
+		rr.WithMetric("none"),
+	}
+	if req.DryRun {
+		opts = append(opts, rr.WithDryRun(true))
+	}
+	if req.Explain {
+		opts = append(opts, rr.WithExplain(true))
+	}
+	if req.RetryFailed {
+		opts = append(opts, rr.WithRetryFailed(true))
+	}
+
+	resp, err := c.api.Cluster.Reroute(opts...)
+	if err != nil {
+		return types.RerouteResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cluster reroute", resp.StatusCode, resp.Body); err != nil {
+		return types.RerouteResult{}, err
+	}
+
+	var wire rerouteResponseWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.RerouteResult{}, errors.Join(errors.New("decoding cluster reroute response"), err)
+	}
+	return toRerouteResult(req, wire), nil
+}
+
+// buildRerouteBody turns a typed command list into the cluster's
+// {"commands":[{"<action>": {<args>}}, ...]} envelope. An empty command
+// list is allowed — used by the retry_failed-only path — and serialises
+// as {"commands":[]} so ES sees a well-formed request body.
+//
+// Each action's argument set is built explicitly rather than reflecting
+// over RerouteCommand: the cluster validates field names and a stray
+// extra key (e.g. accept_data_loss on a "move") is a 400. Listing the
+// allowed fields per action here is the place to make that contract
+// readable.
+func buildRerouteBody(cmds []types.RerouteCommand) ([]byte, error) {
+	wire := struct {
+		Commands []map[string]any `json:"commands"`
+	}{Commands: make([]map[string]any, 0, len(cmds))}
+
+	for _, cmd := range cmds {
+		args, err := rerouteArgs(cmd)
+		if err != nil {
+			return nil, err
+		}
+		wire.Commands = append(wire.Commands, map[string]any{string(cmd.Action): args})
+	}
+	return json.Marshal(wire)
+}
+
+// rerouteArgs returns the argument map for one reroute command, keyed
+// for the cluster's expected JSON shape. RerouteRetryFailed is a
+// no-command action — the caller should not include it in Commands;
+// it's expressed via the retry_failed=true query param instead.
+func rerouteArgs(cmd types.RerouteCommand) (map[string]any, error) {
+	switch cmd.Action {
+	case types.RerouteMove:
+		return map[string]any{
+			"index":     cmd.Index,
+			"shard":     cmd.Shard,
+			"from_node": cmd.FromNode,
+			"to_node":   cmd.ToNode,
+		}, nil
+	case types.RerouteCancel:
+		args := map[string]any{
+			"index": cmd.Index,
+			"shard": cmd.Shard,
+			"node":  cmd.FromNode,
+		}
+		if cmd.AllowPrimary {
+			args["allow_primary"] = true
+		}
+		return args, nil
+	case types.RerouteAllocateReplica:
+		return map[string]any{
+			"index": cmd.Index,
+			"shard": cmd.Shard,
+			"node":  cmd.ToNode,
+		}, nil
+	case types.RerouteAllocateEmptyPrimary, types.RerouteAllocateStalePrimary:
+		return map[string]any{
+			"index":             cmd.Index,
+			"shard":             cmd.Shard,
+			"node":              cmd.ToNode,
+			"accept_data_loss":  cmd.AcceptDataLoss,
+		}, nil
+	case types.RerouteRetryFailed:
+		// Defensive: shouldn't reach here — the business layer routes
+		// retry_failed through the query param with no command body.
+		return nil, fmt.Errorf("retry_failed has no command body; use RerouteRequest.RetryFailed instead")
+	default:
+		return nil, fmt.Errorf("unsupported reroute action %q", cmd.Action)
+	}
+}
+
+// toRerouteResult merges the cluster's response with the request's own
+// DryRun flag — ES doesn't echo dry_run in the response body, but a
+// reader of the JSON output should see both intent and outcome on one
+// line. Commands are the original request's, normalised by the business
+// layer; the cluster doesn't return them.
+func toRerouteResult(req types.RerouteRequest, wire rerouteResponseWire) types.RerouteResult {
+	out := types.RerouteResult{
+		Acknowledged: wire.Acknowledged,
+		DryRun:       req.DryRun,
+		Commands:     req.Commands,
+	}
+	if len(wire.Explanations) > 0 {
+		out.Explanations = make([]types.RerouteExplanation, 0, len(wire.Explanations))
+		for _, e := range wire.Explanations {
+			ex := types.RerouteExplanation{Command: e.Command}
+			if len(e.Decisions) > 0 {
+				ex.Decisions = make([]types.RerouteDecision, 0, len(e.Decisions))
+				for _, d := range e.Decisions {
+					ex.Decisions = append(ex.Decisions, types.RerouteDecision{
+						Decider:     d.Decider,
+						Decision:    d.Decision,
+						Explanation: d.Explanation,
+					})
+				}
+			}
+			out.Explanations = append(out.Explanations, ex)
+		}
+	}
+	return out
+}
+
 // classifyResponse reads a drained response body only on error so the
 // happy path keeps streaming straight into json.Decoder. Returns nil
 // for 2xx/3xx; ErrAuth/ErrForbidden for 401/403; a wrapped error for

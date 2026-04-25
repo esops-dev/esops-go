@@ -1,11 +1,15 @@
 # ops — day-to-day cluster operations
 
-The `esops ops` command group covers read-only, incident-friendly
-operations against a live cluster: the things you need when a page
-fires at 03:00 and you'd otherwise be reaching for `curl | jq`.
+The `esops ops` command group covers day-to-day cluster operations:
+the things you need when a page fires at 03:00 and you'd otherwise be
+reaching for `curl | jq`.
 
-All `ops` subcommands are safe by design: none of them mutate the
-target cluster. They can be run against production at any time.
+Most `ops` subcommands are read-only and safe to run against production
+at any time. The exception is [`ops rebalance`](#esops-ops-rebalance),
+which submits `/_cluster/reroute` commands and mutates routing state —
+it honours `--dry-run` and the per-context `protection:` tier, and is
+the only command in this group that requires `--i-know-this-is-prod`
+against a prod-protected context.
 
 See [`config.md`](./config.md) for how contexts and the active cluster
 are resolved.
@@ -770,3 +774,204 @@ does not fail the run: a healthy cluster legitimately returns 400 on
 endpoints 404 on the wrong dialect. Scripts that need to gate on these
 should iterate `manifest.artifacts[].status` rather than rely on the
 exit code.
+
+## `esops ops rebalance`
+
+Submits a single `/_cluster/reroute` command — the manual lever for
+shard movement when the cluster's automatic balancer isn't doing what
+you need. The bread-and-butter use cases:
+
+- **Drain a node before a reboot** — `move` a shard to another node.
+- **Cancel a stuck recovery** — `cancel` an in-flight relocation that
+  is making things worse, not better.
+- **Manually allocate a replica** — `allocate-replica` when the
+  balancer keeps refusing to place one (typical "yellow with no
+  obvious reason" case).
+- **Recover after a kicked-the-bucket primary** — `allocate-empty-primary`
+  or `allocate-stale-primary` to restore service when the cluster
+  cannot find a recoverable copy. Both can lose data; both require
+  `--accept-data-loss`.
+- **Retry max-retried allocations** — `retry-failed` after fixing the
+  underlying issue (disk freed, plugin reinstalled, network restored).
+
+```sh
+$ esops --context local-es ops rebalance \
+    --action move --index esops-logs-000001 --shard 0 \
+    --from-node es01 --to-node es02
+ACKNOWLEDGED  DRY_RUN  COMMANDS
+true          false    1
+
+ACTION  INDEX              SHARD  FROM  TO    FLAGS
+move    esops-logs-000001  0      es01  es02  -
+```
+
+`rebalance` is the only `ops` subcommand that mutates cluster state.
+Always pair the first invocation against an unfamiliar cluster with
+`--dry-run`; the cluster simulates the routing change and reports
+exactly what would happen, without applying it.
+
+### Actions
+
+Exactly one `--action` value is required.
+
+| Action | Effect | Required flags |
+| --- | --- | --- |
+| `move` | Move a `STARTED` shard from one node to another. The balancer is allowed to override this later. | `--index`, `--shard`, `--from-node`, `--to-node` |
+| `cancel` | Cancel an in-flight relocation/recovery on a specific node. | `--index`, `--shard`, `--from-node` (the node currently holding the copy). `--allow-primary` to cancel a primary's recovery. |
+| `allocate-replica` | Allocate an unassigned replica on a chosen node. | `--index`, `--shard`, `--to-node` |
+| `allocate-empty-primary` | Force-allocate an **empty** primary on a node. **Loses any data the cluster could have recovered.** | `--index`, `--shard`, `--to-node`, `--accept-data-loss` |
+| `allocate-stale-primary` | Force-allocate a **known-stale** primary copy on a node. **Loses anything written after the stale copy.** | `--index`, `--shard`, `--to-node`, `--accept-data-loss` |
+| `retry-failed` | Re-trigger allocation for shards that have hit `index.allocation.max_retries`. Body-less; targeting flags are rejected. | (none) |
+
+### Flags
+
+| Flag | Purpose |
+| --- | --- |
+| `--action NAME` (required) | One of the actions above. Underscored aliases (`allocate_replica`, `retry_failed`) match the cluster's wire names so a copy-paste from the docs also works. |
+| `--index NAME` | Index to act on. Required for everything except `retry-failed`. |
+| `--shard N` | Shard number. Defaults to `0`; `0` is a valid shard so the existence of `--index` (not `--shard 0`) is the gate. |
+| `--from-node NAME` | Source node. Used by `move` and `cancel` (where it identifies the copy to cancel). |
+| `--to-node NAME` | Destination node. Used by `move` and the three `allocate-*` actions. |
+| `--allow-primary` | `cancel` only. Allow cancelling a primary's recovery; off by default because it's the riskier shape. |
+| `--accept-data-loss` | Required for `allocate-empty-primary` / `allocate-stale-primary`. Verbose by design — grep-for-intent in shell history is a real auditing workflow. |
+| `--explain` | Ask the cluster to attach its per-decider ruling for each command in the response. |
+| `--dry-run` (global) | Submit the command with `dry_run=true`. The cluster simulates the cluster-state update and returns what would happen without applying it. |
+| `--i-know-this-is-prod` (global) | Required when the resolved context has `protection: prod`. Refused with exit code 9 otherwise. |
+
+The business layer rejects flag combinations that the cluster would
+also reject — `move` without `--from-node`/`--to-node`, `move` with the
+same `--from-node` and `--to-node`, `allocate-empty-primary` without
+`--accept-data-loss`, `retry-failed` paired with shard-targeting flags
+— so the round trip to the master is not wasted on shape errors.
+
+### `--explain`
+
+When the cluster refuses a command, `--explain` is the next step.
+Asking the cluster to explain its decision attaches a per-decider
+breakdown:
+
+```sh
+$ esops --context local-es ops rebalance --dry-run --explain \
+    --action allocate-replica --index esops-stuck-replicas --shard 0 --to-node es01
+ACKNOWLEDGED  DRY_RUN  COMMANDS
+true          true     1
+
+ACTION            INDEX                 SHARD  FROM  TO    FLAGS
+allocate_replica  esops-stuck-replicas  0      -     es01  -
+
+EXPLANATIONS
+COMMAND           DECISIONS
+allocate_replica  same_shard=no, throttling=throttle
+```
+
+The default table compresses the deciders list into one cell per
+command (`-o wide` expands it into one row per decider with the full
+explanation prose). Only `NO`/`THROTTLE` rulings are surfaced — `YES`
+rulings are noise unless the operator asked for them.
+
+`--explain` does **not** imply `--dry-run`: a real reroute can still
+be acknowledged, and the explanation block tells you which deciders
+allowed it. Pair the two for the safe-first read-only inspection.
+
+### Output formats
+
+| Flag | Intended for |
+| --- | --- |
+| `-o table` (def) | Human eyes. One header line (`ACKNOWLEDGED DRY_RUN COMMANDS`) plus a per-command table; `EXPLANATIONS` block when the cluster returned one. |
+| `-o wide` | Same layout, but `EXPLANATIONS` expands to one row per decider with the full explanation prose. |
+| `-o json` | Scripts. One top-level object: `acknowledged`, `dry_run`, `commands`, optional `explanations`. Stable schema. |
+| `-o yaml` | Same shape as JSON. |
+
+NDJSON is not supported: `rebalance` emits one structured outcome
+report, not a stream of records.
+
+### Dialect differences worth knowing
+
+The CLI surface is identical on Elasticsearch and OpenSearch — both
+expose `/_cluster/reroute` with the same body shape, the same query
+flags (`dry_run`, `explain`, `retry_failed`), and the same per-action
+keys (`move`, `cancel`, `allocate_replica`, `allocate_empty_primary`,
+`allocate_stale_primary`). The only practical difference is wording in
+the cluster's per-decider explanations — esops surfaces them verbatim
+rather than rephrasing.
+
+`metric=none` is set on every request so the response carries only
+`acknowledged` (and `explanations[]` when asked). The cluster otherwise
+returns the full routing-table dump, which can be many MB on large
+clusters and is data esops doesn't surface.
+
+### Examples
+
+```sh
+# Drain a node before a reboot — confirm with --dry-run, then commit.
+esops ops rebalance --dry-run \
+  --action move --index logs-2026.04 --shard 0 --from-node es03 --to-node es02
+esops ops rebalance \
+  --action move --index logs-2026.04 --shard 0 --from-node es03 --to-node es02
+
+# Stuck unassigned replica — allocate it explicitly.
+esops ops rebalance --explain \
+  --action allocate-replica --index orders --shard 0 --to-node es02
+
+# Cancel a relocation that is making things worse.
+esops ops rebalance \
+  --action cancel --index hot-index --shard 5 --from-node es01
+
+# After freeing disk: retry every shard that hit max_retries.
+esops ops rebalance --action retry-failed
+
+# Last-resort recovery: data is gone on the lost node, accept the loss.
+esops ops rebalance \
+  --action allocate-empty-primary --index orphaned --shard 0 \
+  --to-node es01 --accept-data-loss
+
+# Production cluster: the protection tier requires the verbose opt-in.
+esops --context prod-eu ops rebalance \
+  --action move --index logs --shard 0 --from-node es-prod-01 --to-node es-prod-02 \
+  --i-know-this-is-prod
+
+# Cross-dialect: same command, OpenSearch.
+esops --context local-os ops rebalance --dry-run --action retry-failed
+```
+
+### Exit codes
+
+`rebalance` follows the project-wide exit-code contract:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Cluster acknowledged the command (including a successful `--dry-run`). |
+| 1 | Generic error — most commonly an HTTP 400 from the cluster (e.g. "shard not on that node"). The cluster's own reason string is in the error message. |
+| 2 | Usage error — missing `--action`, conflicting flags. |
+| 3 | Cluster unreachable. |
+| 4 | Authentication failed (HTTP 401). |
+| 5 | Authorization failed (HTTP 403). |
+| 9 | Protected context refused the destructive operation (use `--dry-run` or `--i-know-this-is-prod`). |
+| 130 | Interrupted (SIGINT). |
+
+A cluster that returns `acknowledged: false` (the master rejected the
+command without a 4xx — rare but possible) still exits 0; the JSON
+payload carries the truth. Scripts asserting "the move actually
+applied" should check `.acknowledged` rather than rely on the exit
+code.
+
+### What `ops rebalance` does **not** do
+
+- **No multi-command batches.** The cluster supports submitting
+  multiple commands in one request; `ops rebalance` deliberately sends
+  one at a time. Single commands are easier to reason about in shell
+  history, easier to undo, and easier to attribute when something goes
+  wrong. Bulk operations (drain a whole node, rebalance a hot index
+  across the cluster) are a future helper composed on top of this
+  primitive.
+- **No automatic balancing.** The cluster's allocator is the source of
+  truth for "where should this shard live?". `ops rebalance` is the
+  manual override for cases where the operator knows something the
+  allocator doesn't — pending hardware swap, planned drain, recovery
+  after a partial outage. If you find yourself reaching for it
+  routinely, the underlying allocation rules are probably the wrong
+  shape.
+- **No `--force` escape hatch.** Each potentially destructive action
+  has a purpose-built confirmation flag (`--accept-data-loss`,
+  `--allow-primary`) so grep-for-intent works in shell history. That
+  is a feature.

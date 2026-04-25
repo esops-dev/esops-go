@@ -339,6 +339,90 @@ type HotThreads struct {
 	Text string `json:"text" yaml:"text"`
 }
 
+// RerouteAction names a single _cluster/reroute command kind. The
+// values are the JSON keys the cluster expects ("move", "cancel",
+// "allocate_replica", …) so the adapter doesn't need a translation
+// table — it can build the body straight from the typed value.
+type RerouteAction string
+
+const (
+	RerouteMove                 RerouteAction = "move"
+	RerouteCancel               RerouteAction = "cancel"
+	RerouteAllocateReplica      RerouteAction = "allocate_replica"
+	RerouteAllocateEmptyPrimary RerouteAction = "allocate_empty_primary"
+	RerouteAllocateStalePrimary RerouteAction = "allocate_stale_primary"
+	RerouteRetryFailed          RerouteAction = "retry_failed"
+)
+
+// RerouteCommand is one shard movement instruction submitted to
+// /_cluster/reroute. Not every field is meaningful for every Action —
+// the business layer validates the combinations before the adapter
+// builds the wire body, so the adapter can serialise a known-good
+// command without re-checking shape.
+//
+// The RerouteRetryFailed action carries no command body of its own;
+// the cluster expresses it via the retry_failed=true query param. It
+// stays in this enum so the CLI surface is "pick exactly one action"
+// rather than "pick an action OR set --retry-failed".
+type RerouteCommand struct {
+	Action         RerouteAction `json:"action"                      yaml:"action"`
+	Index          string        `json:"index,omitempty"             yaml:"index,omitempty"`
+	Shard          int           `json:"shard,omitempty"             yaml:"shard,omitempty"`
+	FromNode       string        `json:"from_node,omitempty"         yaml:"from_node,omitempty"`
+	ToNode         string        `json:"to_node,omitempty"           yaml:"to_node,omitempty"`
+	AllowPrimary   bool          `json:"allow_primary,omitempty"     yaml:"allow_primary,omitempty"`
+	AcceptDataLoss bool          `json:"accept_data_loss,omitempty"  yaml:"accept_data_loss,omitempty"`
+}
+
+// RerouteRequest is the input to a RerouteExecutor call. DryRun and
+// Explain are query-string flags on the cluster side; RetryFailed is
+// the standalone "retry shards that hit max-retries" knob — when true,
+// Commands is typically empty (the action is the request itself).
+//
+// The cluster supports multiple commands in one request and applies
+// them as a single cluster-state update; esops keeps the slice shape
+// so a future "drain a node" helper can submit a batch atomically,
+// but `ops rebalance` only sends one command per invocation today —
+// safer in shell history, simpler to undo.
+type RerouteRequest struct {
+	Commands    []RerouteCommand
+	DryRun      bool
+	Explain     bool
+	RetryFailed bool
+}
+
+// RerouteResult is the normalised view of a /_cluster/reroute response.
+// Acknowledged is the cluster's own ack flag (false means the master
+// rejected the request); DryRun mirrors the request's DryRun so a
+// reader of the JSON output sees both intent and outcome on one line.
+//
+// Explanations is populated only when the request set Explain=true.
+// One entry per submitted command, with the per-decider breakdown
+// the cluster evaluated for that command on each candidate node.
+type RerouteResult struct {
+	Acknowledged bool                  `json:"acknowledged"           yaml:"acknowledged"`
+	DryRun       bool                  `json:"dry_run"                yaml:"dry_run"`
+	Commands     []RerouteCommand      `json:"commands"               yaml:"commands"`
+	Explanations []RerouteExplanation  `json:"explanations,omitempty" yaml:"explanations,omitempty"`
+}
+
+// RerouteExplanation is one explanation block from /_cluster/reroute
+// when explain=true. Command is the verb echoed back by the cluster
+// ("move", "allocate_replica", …); Decisions enumerates the deciders
+// the cluster ran and how each ruled.
+type RerouteExplanation struct {
+	Command   string            `json:"command"             yaml:"command"`
+	Decisions []RerouteDecision `json:"decisions,omitempty" yaml:"decisions,omitempty"`
+}
+
+// RerouteDecision is one decider's ruling on a reroute command. Mirrors
+// AllocationDecider in shape — same data, different endpoint.
+type RerouteDecision struct {
+	Decider     string `json:"decider"               yaml:"decider"`
+	Decision    string `json:"decision"              yaml:"decision"`
+	Explanation string `json:"explanation,omitempty" yaml:"explanation,omitempty"`
+}
+
 // DiagRequest carries the knobs `ops diag` exposes: the opt-in
 // collectors that make bundles noticeably bigger (mappings), produce
 // noise by default (idle threads), or are policy-sensitive (slow-log
