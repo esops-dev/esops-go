@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dj-wasabi/esops-go/internal/auth"
 	"github.com/dj-wasabi/esops-go/internal/client"
 	esadapter "github.com/dj-wasabi/esops-go/internal/client/elasticsearch"
 	osadapter "github.com/dj-wasabi/esops-go/internal/client/opensearch"
@@ -22,6 +23,11 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		return nil, err
 	}
 
+	provider, err := auth.From(cc.Auth)
+	if err != nil {
+		return nil, err
+	}
+
 	transport, err := buildTransport(cc)
 	if err != nil {
 		return nil, err
@@ -30,23 +36,23 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 	addrs := cc.Addresses()
 	switch info.Dialect {
 	case types.DialectElasticsearch:
-		impl, err := esadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport, esadapter.Options{
+		impl, err := esadapter.New(addrs, provider, transport, esadapter.Options{
 			MaxRetries:          cc.MaxRetries,
 			CompressRequestBody: cc.Compress,
 		})
 		if err != nil {
 			return nil, err
 		}
-		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, Indices: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
 	case types.DialectOpenSearch:
-		impl, err := osadapter.New(addrs, cc.Auth.Username, cc.Auth.Password, transport, osadapter.Options{
+		impl, err := osadapter.New(addrs, provider, transport, osadapter.Options{
 			MaxRetries:          cc.MaxRetries,
 			CompressRequestBody: cc.Compress,
 		})
 		if err != nil {
 			return nil, err
 		}
-		return &client.Client{Info: info, Health: impl, Shards: impl, Indices: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, Indices: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}
@@ -54,7 +60,10 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 
 // buildTransport returns the http.RoundTripper handed to the upstream
 // clients. It honours TLS config (including an mTLS client keypair
-// carried on cc.Auth) and an overall per-request timeout.
+// carried on cc.Auth) and an overall per-request timeout. Auth
+// wrapping is applied separately by the adapter so dialect-specific
+// rejections (sigv4-on-ES, api_key-on-OS) can fail loudly before the
+// transport is ever exercised.
 func buildTransport(cc config.Context) (http.RoundTripper, error) {
 	tlsConf, err := buildTLSConfig(cc.Auth, cc.TLS)
 	if err != nil {

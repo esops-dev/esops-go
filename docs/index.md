@@ -143,9 +143,6 @@ reports the allocation truthfully, it does not judge it. Alerting on
   rows to the renderer. NDJSON output is one record per line, but the
   network fetch is not streamed yet — acceptable for tens of thousands
   of indices, revisit when a user hits the limit.
-- Only `basic` auth is wired up. `api_key`, `bearer`, `mtls`, and
-  `sigv4` fields in the config are accepted by the parser but rejected
-  at connect time.
 - No `--context` protection gate is enforced on `index list` because it
   is read-only. Mutating subcommands (future) will gate on the
   per-context `protection: prod` tier.

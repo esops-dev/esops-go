@@ -645,3 +645,133 @@ type DiagVerifyResult struct {
 	Summary         DiagVerifySummary    `json:"summary"                    yaml:"summary"`
 	Pass            bool                 `json:"pass"                       yaml:"pass"`
 }
+
+// Node is the neutral view of one cluster node from /_cat/nodes. Roles
+// is the cluster's reported role list ("master", "data", "data_hot",
+// "ingest", "ml", ...) — preserved verbatim because tier-aware roles
+// (data_hot/data_warm/data_cold) carry information the analysis layer
+// may want to surface separately from a single boolean.
+//
+// IsDataNode is the derived "does this node hold primary/replica
+// shards" flag: true when any role equals "data" or starts with
+// "data_". Computed on the adapter side so callers don't have to
+// re-implement the role-string heuristic in every consumer.
+type Node struct {
+	Name       string   `json:"name"                  yaml:"name"`
+	Roles      []string `json:"roles,omitempty"       yaml:"roles,omitempty"`
+	IsDataNode bool     `json:"is_data_node"          yaml:"is_data_node"`
+}
+
+// ShardAnalysisRequest is the input to ops.AnalyzeShards. Threshold
+// fields are bytes; a zero value on any threshold means "use the
+// package default", computed in AnalyzeShards so the active values land
+// in the response's Thresholds block whether the operator overrode
+// them or not.
+//
+// Sections gates which sections the response carries. Empty = all four
+// (nodes, indices, top, unassigned). Values outside the known set are
+// rejected at the CLI layer, not silently ignored.
+//
+// IncludeClosed is intentionally absent in v1: neither the ES nor OS
+// typed cat-shards client exposes expand_wildcards, so closed-index
+// analysis needs a raw-HTTP shim — deferred until an operator asks for it.
+type ShardAnalysisRequest struct {
+	TopN               int
+	MaxShardBytes      int64
+	CriticalShardBytes int64
+	MinShardBytes      int64
+	SkewPercent        int
+	IncludeHidden      bool
+	Sections           []string
+}
+
+// ShardAnalysisThresholds echoes the active threshold values into the
+// response so a saved JSON capture is interpretable on its own — the
+// reader doesn't have to know which CLI flags were passed.
+type ShardAnalysisThresholds struct {
+	OversizedBytes  int64 `json:"oversized_bytes"   yaml:"oversized_bytes"`
+	CriticalBytes   int64 `json:"critical_bytes"    yaml:"critical_bytes"`
+	UndersizedBytes int64 `json:"undersized_bytes"  yaml:"undersized_bytes"`
+	SkewPercent     int   `json:"skew_percent"      yaml:"skew_percent"`
+}
+
+// ShardNodeStat is one row in the per-node distribution section.
+// ShardsDeviationPercent and StoreDeviationPercent are signed deltas
+// from the median across data nodes (rounded to whole percent). Status
+// is "ok", "SKEW", or "n/a" — "n/a" appears only when fewer than three
+// data nodes make the median uninformative.
+type ShardNodeStat struct {
+	Node                   string `json:"node"                       yaml:"node"`
+	Shards                 int    `json:"shards"                     yaml:"shards"`
+	StoreBytes             int64  `json:"store_bytes"                yaml:"store_bytes"`
+	ShardsDeviationPercent int    `json:"shards_deviation_percent"   yaml:"shards_deviation_percent"`
+	StoreDeviationPercent  int    `json:"store_deviation_percent"    yaml:"store_deviation_percent"`
+	Status                 string `json:"status"                     yaml:"status"`
+}
+
+// ShardHotEntry is one row in the top-N largest-shards section. Status
+// is "ok", "OVERSIZED", or "CRITICAL" depending on which threshold the
+// shard's StoreBytes crosses.
+type ShardHotEntry struct {
+	Index      string `json:"index"        yaml:"index"`
+	Shard      int    `json:"shard"        yaml:"shard"`
+	Primary    bool   `json:"primary"      yaml:"primary"`
+	Node       string `json:"node"         yaml:"node"`
+	StoreBytes int64  `json:"store_bytes"  yaml:"store_bytes"`
+	Status     string `json:"status"       yaml:"status"`
+}
+
+// ShardIndexStat is one row in the indices-with-issues section. Only
+// non-ok rows are emitted — the section exists to focus attention, not
+// to repeat the full index list. AvgPrimaryBytes is the mean across
+// primaries (replicas mirror primaries in size and add no information).
+// Note carries a short qualifier ("system index", "closed") when one
+// applies.
+type ShardIndexStat struct {
+	Index           string `json:"index"                       yaml:"index"`
+	Primaries       int    `json:"primaries"                   yaml:"primaries"`
+	AvgPrimaryBytes int64  `json:"avg_primary_bytes"           yaml:"avg_primary_bytes"`
+	MaxPrimaryBytes int64  `json:"max_primary_bytes"           yaml:"max_primary_bytes"`
+	DocsCount       int64  `json:"docs_count"                  yaml:"docs_count"`
+	Hidden          bool   `json:"hidden,omitempty"            yaml:"hidden,omitempty"`
+	Status          string `json:"status"                      yaml:"status"`
+	Note            string `json:"note,omitempty"              yaml:"note,omitempty"`
+}
+
+// ShardUnassignedSummary collapses the unassigned section to "how many
+// shards across how many indices". The full per-shard view stays
+// available via `ops shards --unassigned`; analyze only summarises and
+// points at the next command.
+type ShardUnassignedSummary struct {
+	Total   int      `json:"total"             yaml:"total"`
+	Indices []string `json:"indices,omitempty" yaml:"indices,omitempty"`
+}
+
+// ShardAnalysisSummary is the headline-counters block. SkewSkippedReason
+// is set ("fewer than 3 data nodes") when skew analysis was deliberately
+// not performed; empty otherwise. DataNodes counts what the analysis
+// considered as data nodes (from /_cat/nodes), so a reader can verify
+// the denominator.
+type ShardAnalysisSummary struct {
+	OversizedShards   int    `json:"oversized_shards"             yaml:"oversized_shards"`
+	CriticalShards    int    `json:"critical_shards"              yaml:"critical_shards"`
+	UndersizedIndices int    `json:"undersized_indices"           yaml:"undersized_indices"`
+	SkewedNodes       int    `json:"skewed_nodes"                 yaml:"skewed_nodes"`
+	UnassignedShards  int    `json:"unassigned_shards"            yaml:"unassigned_shards"`
+	DataNodes         int    `json:"data_nodes"                   yaml:"data_nodes"`
+	SkewSkippedReason string `json:"skew_skipped_reason,omitempty" yaml:"skew_skipped_reason,omitempty"`
+}
+
+// ShardAnalysis is the top-level response from ops.AnalyzeShards. Every
+// section is always present in the JSON shape (omitempty would let
+// scripts mistake "no skewed nodes" for "the section was disabled");
+// when the request's Sections list excludes one, its slice is left
+// nil, which still serialises stably.
+type ShardAnalysis struct {
+	Thresholds    ShardAnalysisThresholds `json:"thresholds"      yaml:"thresholds"`
+	Nodes         []ShardNodeStat         `json:"nodes"           yaml:"nodes"`
+	TopShards     []ShardHotEntry         `json:"top_shards"      yaml:"top_shards"`
+	IndicesAtRisk []ShardIndexStat        `json:"indices_at_risk" yaml:"indices_at_risk"`
+	Unassigned    ShardUnassignedSummary  `json:"unassigned"      yaml:"unassigned"`
+	Summary       ShardAnalysisSummary    `json:"summary"         yaml:"summary"`
+}

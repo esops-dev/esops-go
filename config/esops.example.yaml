@@ -71,6 +71,9 @@ contexts:
     protection: none
 
   # ── Staging: API key in OS keyring; warns on destructive ops ────────────
+  # api_key is Elasticsearch-only (OpenSearch has no equivalent — use
+  # bearer, basic, or sigv4 there). The api_key value is the base64-
+  # encoded `encoded` field returned by ES's POST /_security/api_key.
   # staging-eu:
   #   url: https://es-staging-eu.example.com:9200
   #   auth:
@@ -95,14 +98,18 @@ contexts:
   #   timeout: 60s
 
   # ── OpenSearch behind AWS IAM (self-managed on EC2/EKS, IRSA, etc.) ─────
+  # sigv4 is OpenSearch-only — the Elasticsearch adapter rejects it at
+  # connect time. Credentials come from the standard AWS chain only
+  # (env, shared config, IRSA, IMDS); access keys in this file are
+  # deliberately not supported. `service` is `es` for AWS-managed and
+  # most IAM-fronted self-managed setups, `aoss` for OpenSearch
+  # Serverless.
   # prod-aws-os:
   #   url: https://vpc-os-prod.eu-west-1.es.amazonaws.com
   #   auth:
   #     type: sigv4
   #     region: eu-west-1
   #     service: es
-  #     # Credentials sourced from the standard AWS chain
-  #     # (env, shared config, IRSA, IMDS).
   #   protection: prod
 
   # ── Bearer token from a Kubernetes/Docker secret mount ──────────────────

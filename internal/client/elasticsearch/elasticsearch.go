@@ -17,6 +17,7 @@ import (
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
+	"github.com/dj-wasabi/esops-go/internal/auth"
 	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -45,15 +46,25 @@ type Options struct {
 	CompressRequestBody bool
 }
 
-// New builds a client against the given addresses + basic-auth credentials.
-// TLS and transport tweaks come in via httpTransport; opts plumbs through
-// max_retries / compress from config.
-func New(addrs []string, username, password string, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+// New builds a client against the given addresses with auth carried by
+// the provider. TLS and transport tweaks come in via httpTransport;
+// opts plumbs through max_retries / compress from config.
+//
+// SigV4 is rejected here: SigV4 is currently OpenSearch-only. The
+// go-elasticsearch client has no first-class SigV4 helper and adding
+// one means hand-rolling the canonical-request math, which belongs
+// behind a deliberate feature gate rather than as a quiet fallback
+// that 401s every request.
+func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper, opts Options) (*Client, error) {
+	if provider == nil {
+		return nil, errors.New("elasticsearch client: nil auth provider")
+	}
+	if provider.Type() == auth.TypeSigV4 {
+		return nil, errors.New("auth.type=sigv4 is not supported on Elasticsearch; use bearer or basic")
+	}
 	cfg := es.Config{
 		Addresses: addrs,
-		Username:  username,
-		Password:  password,
-		Transport: httpTransport,
+		Transport: auth.WrapTransport(provider, httpTransport),
 	}
 	switch {
 	case opts.MaxRetries < 0:
@@ -1142,4 +1153,84 @@ func securityDisabledNote(body []byte) string {
 		return bare.Error
 	}
 	return "security is disabled on this cluster"
+}
+
+// catNodesRow mirrors a /_cat/nodes?h=name,node.role row. node.role is
+// the comma-separated full-name role list (data, data_hot, ingest,
+// master, …) — distinct from the deprecated abbreviated `role` column
+// which packs the roles into single chars and would force us to maintain
+// a translation table per cluster version.
+type catNodesRow struct {
+	Name string `json:"name"`
+	Role string `json:"node.role"`
+}
+
+// Nodes implements client.NodeInspector via /_cat/nodes. We surface the
+// authoritative node→role map so the analysis layer can identify real
+// data nodes — including ones that hold zero shards, which is precisely
+// the case the analysis exists to catch.
+func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
+	cn := c.api.Cat.Nodes
+	resp, err := c.api.Cat.Nodes(
+		cn.WithContext(ctx),
+		cn.WithFormat("json"),
+		cn.WithH("name", "node.role"),
+	)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cat nodes", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var rows []catNodesRow
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, errors.Join(errors.New("decoding cat nodes response"), err)
+	}
+
+	out := make([]types.Node, 0, len(rows))
+	for _, r := range rows {
+		roles := splitNodeRoles(r.Role)
+		out = append(out, types.Node{
+			Name:       r.Name,
+			Roles:      roles,
+			IsDataNode: hasDataRole(roles),
+		})
+	}
+	return out, nil
+}
+
+// splitNodeRoles parses /_cat/nodes node.role into a clean slice. The
+// cluster format is "data,ingest,master" — empty entries (which can
+// arise from a coordinating-only node returning "") are dropped so
+// hasDataRole's prefix check doesn't accidentally match "".
+func splitNodeRoles(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// hasDataRole returns true when any role is "data" or one of the
+// tier-aware data_* variants (data_hot / data_warm / data_cold /
+// data_content / data_frozen). HasPrefix("data") covers all of them
+// in one check.
+func hasDataRole(roles []string) bool {
+	for _, r := range roles {
+		if strings.HasPrefix(r, "data") {
+			return true
+		}
+	}
+	return false
 }
