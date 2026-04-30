@@ -8,7 +8,6 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -101,10 +100,7 @@ func runStateChange(action types.IndexStateAction) cli.ActionFunc {
 			return err
 		}
 
-		logging.Logger().Info("index.state-change",
-			"context", s.ContextName,
-			"dialect", string(s.Client.Info.Dialect),
-			"version", s.Client.Info.Version,
+		s.Log("index.state-change",
 			"action", string(action),
 			"dry_run", result.DryRun,
 			"acknowledged", result.Acknowledged,

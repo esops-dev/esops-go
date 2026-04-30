@@ -2,7 +2,6 @@ package index
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/dj-wasabi/esops-go/internal/client"
@@ -64,13 +63,13 @@ func Rollover(ctx context.Context, ro client.IndexRollover, opts RolloverOptions
 func validateRolloverOptions(opts RolloverOptions) error {
 	alias := strings.TrimSpace(opts.Alias)
 	if alias == "" {
-		return fmt.Errorf("--alias is required")
+		return client.UsageError("--alias is required")
 	}
 	if opts.Conditions.IsEmpty() && !opts.Force {
-		return fmt.Errorf("rollover with no conditions would always roll over; pass at least one of --max-age / --max-docs / --max-size / --max-primary-size, or --force to acknowledge an unconditional rollover")
+		return client.UsageError("rollover with no conditions would always roll over; pass at least one of --max-age / --max-docs / --max-size / --max-primary-size, or --force to acknowledge an unconditional rollover")
 	}
 	if opts.Conditions.MaxDocs < 0 {
-		return fmt.Errorf("--max-docs must be >= 0 (got %d)", opts.Conditions.MaxDocs)
+		return client.UsageError("--max-docs must be >= 0 (got %d)", opts.Conditions.MaxDocs)
 	}
 	return nil
 }

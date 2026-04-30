@@ -3,9 +3,11 @@ package index_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/index"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -21,6 +23,19 @@ type fakeTemplateInspector struct {
 func (f *fakeTemplateInspector) GetTemplates(_ context.Context, names []string) ([]types.IndexTemplate, error) {
 	f.got = append([]string(nil), names...)
 	return f.rows, f.err
+}
+
+func (f *fakeTemplateInspector) GetTemplate(_ context.Context, name string) (types.IndexTemplate, error) {
+	f.got = append([]string(nil), name)
+	if f.err != nil {
+		return types.IndexTemplate{}, f.err
+	}
+	for _, t := range f.rows {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+	return types.IndexTemplate{}, fmt.Errorf("%w: index template %q", client.ErrNotFound, name)
 }
 
 // fakeTemplateUpdater records every Put/Delete and returns canned

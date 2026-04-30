@@ -8,8 +8,8 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
+	"github.com/dj-wasabi/esops-go/internal/types"
 )
 
 // ismCommand is the parent for `esops index ism <list|get|put|delete|
@@ -74,12 +74,7 @@ func runISMList(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ism.list",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"rows", len(rows),
-	)
+	s.Log("index.ism.list", "rows", len(rows))
 	return output.ISMPolicies(os.Stdout, rows, s.Format)
 }
 
@@ -120,12 +115,7 @@ func runISMGet(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ism.get",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"id", p.ID,
-	)
+	s.Log("index.ism.get", "id", p.ID)
 	return output.ISMPolicy(os.Stdout, p, s.Format)
 }
 
@@ -204,10 +194,7 @@ func runISMPut(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ism.put",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.ism.put",
 		"id", result.ID,
 		"dry_run", result.DryRun,
 		"seq_no", result.SeqNo,
@@ -258,10 +245,7 @@ func runISMDelete(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ism.delete",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.ism.delete",
 		"id", result.ID,
 		"dry_run", result.DryRun,
 		"ok", result.OK,
@@ -281,7 +265,9 @@ compact step_info preview for stuck indices.
 
 --show-policy maps to the plugin's ?show_policy=true and embeds
 the full policy body in each entry — useful for one-shot audits,
-but the response can be megabytes on a large fleet.
+but the response can be megabytes on a large fleet. Pair with a
+larger --timeout (the global default is 30s) if you hit a timeout
+on a multi-thousand-index fleet.
 
 Read-only and safe to run on a prod-protected context. ISM is
 OpenSearch-only.`,
@@ -307,18 +293,36 @@ func runISMExplain(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	rows, err := esopsindex.ExplainISM(ctx, s.Client.ISM, esopsindex.ISMExplainOptions{
+	opts := esopsindex.ISMExplainOptions{
 		Index:      cmd.String("index"),
 		ShowPolicy: cmd.Bool("show-policy"),
-	})
+	}
+
+	if s.Format == output.FormatNDJSON {
+		count := 0
+		err := output.ISMExplainNDJSONStream(os.Stdout, func(yield func(types.ISMExplainEntry) error) error {
+			return esopsindex.ExplainISMStream(ctx, s.Client.ISM, opts, func(e types.ISMExplainEntry) error {
+				count++
+				return yield(e)
+			})
+		})
+		if err != nil {
+			return err
+		}
+		s.Log("index.ism.explain",
+			"index", cmd.String("index"),
+			"rows", count,
+			"stream", true,
+		)
+		return nil
+	}
+
+	rows, err := esopsindex.ExplainISM(ctx, s.Client.ISM, opts)
 	if err != nil {
 		return err
 	}
 
-	logging.Logger().Info("index.ism.explain",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.ism.explain",
 		"index", cmd.String("index"),
 		"rows", len(rows),
 	)

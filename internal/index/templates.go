@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -43,21 +42,12 @@ func ListTemplates(ctx context.Context, ti client.IndexTemplateInspector, opts T
 func GetTemplate(ctx context.Context, ti client.IndexTemplateInspector, name string) (types.IndexTemplate, error) {
 	n := strings.TrimSpace(name)
 	if n == "" {
-		return types.IndexTemplate{}, fmt.Errorf("--name is required")
+		return types.IndexTemplate{}, client.UsageError("--name is required")
 	}
 	if isPatternish(n) {
-		return types.IndexTemplate{}, fmt.Errorf("--name must be a literal template name, not a pattern (got %q); use 'index template list --name %s' instead", n, n)
+		return types.IndexTemplate{}, client.UsageError("--name must be a literal template name, not a pattern (got %q); use 'index template list --name %s' instead", n, n)
 	}
-	rows, err := ti.GetTemplates(ctx, []string{n})
-	if err != nil {
-		return types.IndexTemplate{}, err
-	}
-	for _, t := range rows {
-		if t.Name == n {
-			return t, nil
-		}
-	}
-	return types.IndexTemplate{}, fmt.Errorf("index template %q not found", n)
+	return ti.GetTemplate(ctx, n)
 }
 
 // TemplatePutOptions are the knobs the CLI layer hands to PutTemplate.
@@ -162,24 +152,24 @@ func DeleteTemplate(ctx context.Context, tu client.IndexTemplateUpdater, opts Te
 func validateTemplateName(name string) error {
 	n := strings.TrimSpace(name)
 	if n == "" {
-		return fmt.Errorf("--name is required")
+		return client.UsageError("--name is required")
 	}
 	if isPatternish(n) {
-		return fmt.Errorf("--name must be a literal template name, not a pattern (got %q)", n)
+		return client.UsageError("--name must be a literal template name, not a pattern (got %q)", n)
 	}
 	return nil
 }
 
 func validateTemplateBody(body []byte) error {
 	if len(body) == 0 {
-		return fmt.Errorf("template body is required (use --from-file PATH or --body JSON)")
+		return client.UsageError("template body is required (use --from-file PATH or --body JSON)")
 	}
 	var probe map[string]any
 	if err := json.Unmarshal(body, &probe); err != nil {
-		return fmt.Errorf("template body is not valid JSON: %w", err)
+		return client.UsageError("template body is not valid JSON: %v", err)
 	}
 	if _, ok := probe["index_patterns"]; !ok {
-		return fmt.Errorf("template body must declare 'index_patterns'; without it the template never matches an index")
+		return client.UsageError("template body must declare 'index_patterns'; without it the template never matches an index")
 	}
 	return nil
 }

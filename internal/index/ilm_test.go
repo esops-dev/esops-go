@@ -3,9 +3,11 @@ package index_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/index"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -28,6 +30,19 @@ func (f *fakeILM) ListPolicies(_ context.Context, names []string) ([]types.ILMPo
 	return f.policies, f.err
 }
 
+func (f *fakeILM) GetPolicy(_ context.Context, name string) (types.ILMPolicy, error) {
+	f.gotNames = append([]string(nil), name)
+	if f.err != nil {
+		return types.ILMPolicy{}, f.err
+	}
+	for _, p := range f.policies {
+		if p.Name == name {
+			return p, nil
+		}
+	}
+	return types.ILMPolicy{}, fmt.Errorf("%w: ilm policy %q", client.ErrNotFound, name)
+}
+
 func (f *fakeILM) PutPolicy(_ context.Context, req types.ILMPolicyPutRequest) (types.ILMPolicyPutResult, error) {
 	f.puts = append(f.puts, req)
 	if f.err != nil {
@@ -47,6 +62,19 @@ func (f *fakeILM) DeletePolicy(_ context.Context, req types.ILMPolicyDeleteReque
 func (f *fakeILM) ExplainPolicy(_ context.Context, req types.ILMExplainRequest) ([]types.ILMExplainEntry, error) {
 	f.explainReqs = append(f.explainReqs, req)
 	return f.explainOut, f.err
+}
+
+func (f *fakeILM) ExplainPolicyStream(_ context.Context, req types.ILMExplainRequest, yield func(types.ILMExplainEntry) error) error {
+	f.explainReqs = append(f.explainReqs, req)
+	if f.err != nil {
+		return f.err
+	}
+	for _, e := range f.explainOut {
+		if err := yield(e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sampleILMPolicies() []types.ILMPolicy {

@@ -111,6 +111,17 @@ type Index struct {
 	CreationDateMillis int64  `json:"creation_date_millis,omitempty"  yaml:"creation_date_millis,omitempty"`
 }
 
+// IndexNameStatus is the slim (name, status) pair returned by
+// IndexInspector.IndicesNamesStatus — used by the state-change and
+// optimize pre-flights, which only need the open/closed split. Drops
+// the long tail of /_cat/indices columns (uuid, doc counts, byte
+// sizes) so a 100k-index cluster transfers and parses ~one column
+// instead of twelve.
+type IndexNameStatus struct {
+	Name   string `json:"name"   yaml:"name"`
+	Status string `json:"status" yaml:"status"`
+}
+
 // IndexSort is the sort key applied to IndexFilter results. The cluster
 // response is unordered, so sort is applied business-side regardless of
 // dialect.
@@ -149,10 +160,10 @@ const (
 )
 
 // IndexStateChangeRequest is the input to an IndexStateChanger call.
-// Index is the comma-separated pattern the cluster receives (the same
-// shape /_cat/indices accepts); the business layer resolves it client-
-// side before the call to enforce the blast-radius limit and to render
-// a useful dry-run.
+// Indices is the resolved literal name list (already partitioned by
+// the business layer's pre-flight); the adapter joins them for the URL
+// path. Carrying []string end-to-end avoids the join → split → re-join
+// round trip that used to happen between layers.
 //
 // IgnoreUnavailable maps to ?ignore_unavailable=true — useful when a
 // pattern legitimately matches nothing and the operator wants a no-op
@@ -160,7 +171,7 @@ const (
 // cluster (numeric like "1" or symbolic like "all"); empty leaves the
 // cluster default in place.
 type IndexStateChangeRequest struct {
-	Index               string
+	Indices             []string
 	IgnoreUnavailable   bool
 	WaitForActiveShards string
 }
@@ -212,7 +223,7 @@ type IndexStateChange struct {
 // pattern legitimately matches nothing and the operator wants a no-op
 // rather than a 404.
 type IndexOptimizeRequest struct {
-	Index              string
+	Indices            []string
 	MaxNumSegments     int
 	OnlyExpungeDeletes bool
 	Flush              *bool
@@ -368,20 +379,21 @@ type IndexShrinkResult struct {
 }
 
 // IndexSettings is one index's settings block from
-// GET /<indices>/_settings. Settings is the cluster's reported
-// settings JSON decoded into a map — the structure is hierarchical
-// (`index` → `number_of_shards`, `routing` → `allocation` → ...) and
-// callers walk it the same way they would walk the raw cluster
-// response. For table output the business layer flattens the map to
-// dotted keys; JSON/YAML render the nested shape verbatim.
+// GET /<indices>/_settings. The cluster splits its response into two
+// blocks: `settings` (values the operator configured on this index)
+// and `defaults` (built-in values returned only when
+// ?include_defaults=true is set). They are kept separate here so a
+// consumer can answer "is this knob actually configured, or am I
+// looking at the default?" without having to re-query.
 //
-// The cluster's response also carries a `defaults` block when
-// ?include_defaults=true; both blocks are merged here under Settings
-// so the consumer doesn't have to know whether the value came from the
-// configured set or a built-in default.
+// Settings is always populated; Defaults is nil unless
+// IncludeDefaults was set on the request. Both maps follow the
+// cluster's hierarchical shape (`index` → `number_of_shards`, …);
+// for table output the renderer flattens them to dotted keys.
 type IndexSettings struct {
-	Index    string         `json:"index"    yaml:"index"`
-	Settings map[string]any `json:"settings" yaml:"settings"`
+	Index    string         `json:"index"              yaml:"index"`
+	Settings map[string]any `json:"settings"           yaml:"settings"`
+	Defaults map[string]any `json:"defaults,omitempty" yaml:"defaults,omitempty"`
 }
 
 // IndexSettingsGetRequest narrows GET /<indices>/_settings/<names>.
@@ -398,7 +410,7 @@ type IndexSettings struct {
 // is forwarded so JSON output mirrors the cluster's chosen shape when
 // requested.
 type IndexSettingsGetRequest struct {
-	Index             string
+	Indices           []string
 	Names             []string
 	IncludeDefaults   bool
 	FlatSettings      bool
@@ -419,7 +431,7 @@ type IndexSettingsGetRequest struct {
 // dry-run for /_settings, so dry-run is implemented client-side as
 // "validate + report" and Body is not sent to the cluster.
 type IndexSettingsUpdateRequest struct {
-	Index             string
+	Indices           []string
 	Body              []byte
 	PreserveExisting  bool
 	IgnoreUnavailable bool

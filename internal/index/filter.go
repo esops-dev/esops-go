@@ -1,9 +1,9 @@
 package index
 
 import (
-	"fmt"
 	"strings"
 
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
 
@@ -19,7 +19,7 @@ func ParseSort(s string) (types.IndexSort, error) {
 	case "docs":
 		return types.IndexSortDocs, nil
 	default:
-		return 0, fmt.Errorf("unknown --sort value %q (supported: name, size, docs)", s)
+		return 0, client.UsageError("unknown --sort value %q (supported: name, size, docs)", s)
 	}
 }
 
@@ -31,7 +31,7 @@ func ValidateHealth(s string) error {
 	case "green", "yellow", "red":
 		return nil
 	default:
-		return fmt.Errorf("unknown --health value %q (supported: green, yellow, red)", s)
+		return client.UsageError("unknown --health value %q (supported: green, yellow, red)", s)
 	}
 }
 
@@ -42,6 +42,6 @@ func ValidateStatus(s string) error {
 	case "open", "close":
 		return nil
 	default:
-		return fmt.Errorf("unknown --status value %q (supported: open, close)", s)
+		return client.UsageError("unknown --status value %q (supported: open, close)", s)
 	}
 }

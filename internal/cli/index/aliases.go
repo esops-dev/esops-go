@@ -8,7 +8,6 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -58,20 +57,32 @@ func runAliasesList(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	rows, err := esopsindex.ListAliases(ctx, s.Client.AliasInspect, esopsindex.AliasListOptions{
+	opts := esopsindex.AliasListOptions{
 		Alias: cmd.String("alias"),
 		Index: cmd.String("index"),
-	})
+	}
+
+	if s.Format == output.FormatNDJSON {
+		count := 0
+		err := output.AliasesNDJSONStream(os.Stdout, func(yield func(types.Alias) error) error {
+			return esopsindex.ListAliasesStream(ctx, s.Client.AliasInspect, opts, func(a types.Alias) error {
+				count++
+				return yield(a)
+			})
+		})
+		if err != nil {
+			return err
+		}
+		s.Log("index.aliases.list", "rows", count, "stream", true)
+		return nil
+	}
+
+	rows, err := esopsindex.ListAliases(ctx, s.Client.AliasInspect, opts)
 	if err != nil {
 		return err
 	}
 
-	logging.Logger().Info("index.aliases.list",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"rows", len(rows),
-	)
+	s.Log("index.aliases.list", "rows", len(rows))
 	return output.Aliases(os.Stdout, rows, s.Format)
 }
 
@@ -170,7 +181,7 @@ func runAliasesAdd(ctx context.Context, cmd *cli.Command) error {
 		opts.IsWriteIndex = &v
 	}
 
-	return runAliasesUpdate(ctx, cmd, s, types.AliasActionAdd, opts)
+	return runAliasesUpdate(ctx, s, types.AliasActionAdd, opts)
 }
 
 func runAliasesRemove(ctx context.Context, cmd *cli.Command) error {
@@ -187,13 +198,13 @@ func runAliasesRemove(ctx context.Context, cmd *cli.Command) error {
 		Index:  cmd.String("index"),
 		DryRun: cmd.Bool("dry-run"),
 	}
-	return runAliasesUpdate(ctx, cmd, s, types.AliasActionRemove, opts)
+	return runAliasesUpdate(ctx, s, types.AliasActionRemove, opts)
 }
 
 // runAliasesUpdate is the shared dispatcher behind add and remove. The
 // per-action call site stays small and the logging shape stays
 // consistent across both subcommands.
-func runAliasesUpdate(ctx context.Context, _ *cli.Command, s cmdsetup.Setup, action types.AliasAction, opts esopsindex.AliasUpdateOptions) error {
+func runAliasesUpdate(ctx context.Context, s cmdsetup.Setup, action types.AliasAction, opts esopsindex.AliasUpdateOptions) error {
 	var (
 		result types.AliasUpdateResult
 		err    error
@@ -208,10 +219,7 @@ func runAliasesUpdate(ctx context.Context, _ *cli.Command, s cmdsetup.Setup, act
 		return err
 	}
 
-	logging.Logger().Info("index.aliases."+string(action),
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.aliases."+string(action),
 		"alias", opts.Alias,
 		"index", opts.Index,
 		"dry_run", result.DryRun,

@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -43,21 +42,12 @@ func ListILMPolicies(ctx context.Context, m client.ILMManager, opts ILMListOptio
 func GetILMPolicy(ctx context.Context, m client.ILMManager, name string) (types.ILMPolicy, error) {
 	n := strings.TrimSpace(name)
 	if n == "" {
-		return types.ILMPolicy{}, fmt.Errorf("--name is required")
+		return types.ILMPolicy{}, client.UsageError("--name is required")
 	}
 	if isPatternish(n) {
-		return types.ILMPolicy{}, fmt.Errorf("--name must be a literal policy name, not a pattern (got %q); use 'index ilm list --name %s' instead", n, n)
+		return types.ILMPolicy{}, client.UsageError("--name must be a literal policy name, not a pattern (got %q); use 'index ilm list --name %s' instead", n, n)
 	}
-	rows, err := m.ListPolicies(ctx, []string{n})
-	if err != nil {
-		return types.ILMPolicy{}, err
-	}
-	for _, p := range rows {
-		if p.Name == n {
-			return p, nil
-		}
-	}
-	return types.ILMPolicy{}, fmt.Errorf("ilm policy %q not found", n)
+	return m.GetPolicy(ctx, n)
 }
 
 // ILMPutOptions are the knobs the CLI layer hands to PutILMPolicy. Name
@@ -187,27 +177,40 @@ func ExplainILM(ctx context.Context, m client.ILMManager, opts ILMExplainOptions
 	return rows, nil
 }
 
+// ExplainILMStream is the streaming companion to ExplainILM. No
+// client-side sort applies — streaming and sort are mutually
+// exclusive. Operators wanting a sorted view use ExplainILM (table /
+// json / yaml) which buffers; NDJSON is for the cluster-response-
+// order stream.
+func ExplainILMStream(ctx context.Context, m client.ILMManager, opts ILMExplainOptions, yield func(types.ILMExplainEntry) error) error {
+	return m.ExplainPolicyStream(ctx, types.ILMExplainRequest{
+		Index:       strings.TrimSpace(opts.Index),
+		OnlyErrors:  opts.OnlyErrors,
+		OnlyManaged: opts.OnlyManaged,
+	}, yield)
+}
+
 func validateILMName(name string) error {
 	n := strings.TrimSpace(name)
 	if n == "" {
-		return fmt.Errorf("--name is required")
+		return client.UsageError("--name is required")
 	}
 	if isPatternish(n) {
-		return fmt.Errorf("--name must be a literal policy name, not a pattern (got %q)", n)
+		return client.UsageError("--name must be a literal policy name, not a pattern (got %q)", n)
 	}
 	return nil
 }
 
 func validateILMBody(body []byte) error {
 	if len(body) == 0 {
-		return fmt.Errorf("policy body is required (use --from-file PATH or --body JSON)")
+		return client.UsageError("policy body is required (use --from-file PATH or --body JSON)")
 	}
 	var probe map[string]any
 	if err := json.Unmarshal(body, &probe); err != nil {
-		return fmt.Errorf("policy body is not valid JSON: %w", err)
+		return client.UsageError("policy body is not valid JSON: %v", err)
 	}
 	if _, ok := probe["policy"]; !ok {
-		return fmt.Errorf("policy body must declare a 'policy' object (cluster expects {\"policy\":{\"phases\":{…}}})")
+		return client.UsageError("policy body must declare a 'policy' object (cluster expects {\"policy\":{\"phases\":{…}}})")
 	}
 	return nil
 }

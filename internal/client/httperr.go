@@ -26,6 +26,8 @@ func ClassifyStatus(op string, statusCode int, body []byte) error {
 		return ErrAuth
 	case http.StatusForbidden:
 		return ErrForbidden
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: %s returned HTTP 404: %s", ErrNotFound, op, formatClusterError(body))
 	}
 	if statusCode >= 400 {
 		return fmt.Errorf("%s returned HTTP %d: %s", op, statusCode, formatClusterError(body))

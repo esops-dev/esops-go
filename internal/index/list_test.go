@@ -23,6 +23,31 @@ func (f *fakeIndexInspector) Indices(_ context.Context, filter types.IndexFilter
 	return f.indices, f.err
 }
 
+func (f *fakeIndexInspector) IndicesNamesStatus(_ context.Context, filter types.IndexFilter) ([]types.IndexNameStatus, error) {
+	f.got = filter
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]types.IndexNameStatus, 0, len(f.indices))
+	for _, ix := range f.indices {
+		out = append(out, types.IndexNameStatus{Name: ix.Name, Status: ix.Status})
+	}
+	return out, nil
+}
+
+func (f *fakeIndexInspector) IndicesStream(_ context.Context, filter types.IndexFilter, yield func(types.Index) error) error {
+	f.got = filter
+	if f.err != nil {
+		return f.err
+	}
+	for _, ix := range f.indices {
+		if err := yield(ix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func sampleIndices() []types.Index {
 	return []types.Index{
 		// A user-visible index, green and open.
@@ -33,6 +58,39 @@ func sampleIndices() []types.Index {
 		{Name: ".kibana_1", Health: "green", Status: "open", Primaries: 1, Replicas: 0, DocsCount: 7, StoreBytes: 256},
 		// A closed index — reported by cat/indices but with limited fields.
 		{Name: "archive-2024", Health: "", Status: "close", Primaries: 1, Replicas: 1},
+	}
+}
+
+func TestListStream_appliesHiddenAndHealthFilters(t *testing.T) {
+	fake := &fakeIndexInspector{indices: sampleIndices()}
+	var got []string
+	err := index.ListStream(context.Background(), fake, types.IndexFilter{Health: "green"}, func(ix types.Index) error {
+		got = append(got, ix.Name)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ListStream: %v", err)
+	}
+	// Default view drops the dot-prefixed .kibana_1 even though it's
+	// green; only "users" survives the green-health filter.
+	if len(got) != 1 || got[0] != "users" {
+		t.Errorf("got %v, want [users]", got)
+	}
+}
+
+func TestListStream_yieldErrorStopsIteration(t *testing.T) {
+	fake := &fakeIndexInspector{indices: sampleIndices()}
+	stop := errors.New("stop")
+	count := 0
+	err := index.ListStream(context.Background(), fake, types.IndexFilter{Hidden: true}, func(types.Index) error {
+		count++
+		return stop
+	})
+	if !errors.Is(err, stop) {
+		t.Errorf("err = %v, want stop sentinel", err)
+	}
+	if count != 1 {
+		t.Errorf("yield invoked %d times, want 1 (sentinel should stop iteration)", count)
 	}
 }
 

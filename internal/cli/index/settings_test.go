@@ -42,6 +42,11 @@ func TestParseKeyValuePairs(t *testing.T) {
 			in:      []string{"=value"},
 			wantErr: "key=value",
 		},
+		{
+			name:    "duplicate raw key rejected",
+			in:      []string{"a=1", "a=2"},
+			wantErr: "given twice",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

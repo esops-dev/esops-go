@@ -133,9 +133,9 @@ func TestChangeState_close_partitionsOpenVsClosed(t *testing.T) {
 		t.Fatalf("expected 1 close call, got %d", len(chg.closeCalls))
 	}
 	// Cluster receives the resolved name list, not the raw pattern.
-	wantPath := "logs-2022,logs-2024"
-	if chg.closeCalls[0].Index != wantPath {
-		t.Errorf("close request Index = %q, want %q", chg.closeCalls[0].Index, wantPath)
+	wantIndices := []string{"logs-2022", "logs-2024"}
+	if !equalSlices(chg.closeCalls[0].Indices, wantIndices) {
+		t.Errorf("close request Indices = %v, want %v", chg.closeCalls[0].Indices, wantIndices)
 	}
 }
 

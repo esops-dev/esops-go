@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -160,13 +161,17 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 // drop the long tail of per-operation counters upstream exposes. bytes=b
 // forces raw-bytes store sizes regardless of OS version.
 func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error) {
+	// expand_wildcards reflects the caller's --hidden flag so the cluster
+	// filters dot-prefixed system indices server-side. The business layer
+	// no longer has to drop them after the fact.
+	expand := "open,closed"
+	if filter.Hidden {
+		expand = "open,closed,hidden"
+	}
 	req := &osapi.CatIndicesReq{
 		Params: osapi.CatIndicesParams{
-			Bytes: "b",
-			// OS expand_wildcards accepts a comma-separated list via a single
-			// string; we pass "open,closed,hidden" to mirror the ES adapter
-			// so hidden/closed filtering stays a business-layer concern.
-			ExpandWildcards: "open,closed,hidden",
+			Bytes:           "b",
+			ExpandWildcards: expand,
 			H: []string{
 				"health", "status", "index", "uuid",
 				"pri", "rep",
@@ -208,12 +213,138 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 	return out, nil
 }
 
+// catIndicesRowOS mirrors a single /_cat/indices?format=json row on
+// OpenSearch. Identical wire shape to the ES adapter's catIndicesRow
+// (the cat API is byte-compatible across dialects); kept per-package
+// so a future divergence in column tags is a per-package change.
+type catIndicesRowOS struct {
+	Health       string  `json:"health"`
+	Status       string  `json:"status"`
+	Index        string  `json:"index"`
+	UUID         string  `json:"uuid"`
+	Pri          *string `json:"pri"`
+	Rep          *string `json:"rep"`
+	DocsCount    *string `json:"docs.count"`
+	DocsDeleted  *string `json:"docs.deleted"`
+	StoreSize    *string `json:"store.size"`
+	PriStoreSize *string `json:"pri.store.size"`
+	CreationDate *string `json:"creation.date"`
+}
+
+// IndicesStream implements client.IndexInspector against OpenSearch
+// via raw HTTP — the v4 typed CatIndicesReq decodes the full response
+// into a struct before returning, which would defeat the streaming
+// contract. We hand-build /_cat/indices?... and stream-decode with a
+// json.Decoder per array element so a 20k-index cluster's first row
+// reaches stdout before the cluster has finished sending the last one.
+func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yield func(types.Index) error) error {
+	expand := "open,closed"
+	if filter.Hidden {
+		expand = "open,closed,hidden"
+	}
+	q := url.Values{}
+	q.Set("format", "json")
+	q.Set("bytes", "b")
+	q.Set("h", strings.Join([]string{
+		"health", "status", "index", "uuid",
+		"pri", "rep",
+		"docs.count", "docs.deleted",
+		"store.size", "pri.store.size",
+		"creation.date",
+	}, ","))
+	q.Set("expand_wildcards", expand)
+
+	path := "/_cat/indices"
+	if filter.Index != "" {
+		path += "/" + strings.Join(esopsclient.SplitCSV(filter.Index), ",")
+	}
+	path += "?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.api.Client.Perform(req)
+	if err != nil {
+		return esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "cat indices (stream) error"))
+		return esopsclient.ClassifyStatus("cat indices (stream)", resp.StatusCode, body)
+	}
+
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat indices (stream)")
+	dec := json.NewDecoder(body)
+	if tok, err := dec.Token(); err != nil {
+		return errors.Join(errors.New("decoding cat indices (stream) response"), err)
+	} else if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return fmt.Errorf("cat indices (stream): expected JSON array, got %v", tok)
+	}
+	for dec.More() {
+		var r catIndicesRowOS
+		if err := dec.Decode(&r); err != nil {
+			return errors.Join(errors.New("decoding cat indices (stream) row"), err)
+		}
+		ix := types.Index{
+			Name:               r.Index,
+			UUID:               r.UUID,
+			Health:             r.Health,
+			Status:             r.Status,
+			Primaries:          esopsclient.AtoiOrZero(esopsclient.DerefString(r.Pri)),
+			Replicas:           esopsclient.AtoiOrZero(esopsclient.DerefString(r.Rep)),
+			DocsCount:          esopsclient.Atoi64Ptr(r.DocsCount),
+			DocsDeleted:        esopsclient.Atoi64Ptr(r.DocsDeleted),
+			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PriStoreSize),
+			CreationDateMillis: esopsclient.Atoi64Ptr(r.CreationDate),
+		}
+		if err := yield(ix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IndicesNamesStatus implements client.IndexInspector. Slim companion
+// to Indices: only asks for (index, status) columns. See the ES
+// adapter docstring for the rationale.
+func (c *Client) IndicesNamesStatus(ctx context.Context, filter types.IndexFilter) ([]types.IndexNameStatus, error) {
+	expand := "open,closed"
+	if filter.Hidden {
+		expand = "open,closed,hidden"
+	}
+	req := &osapi.CatIndicesReq{
+		Params: osapi.CatIndicesParams{
+			ExpandWildcards: expand,
+			H:               []string{"index", "status"},
+		},
+	}
+	if filter.Index != "" {
+		req.Indices = esopsclient.SplitCSV(filter.Index)
+	}
+	resp, err := c.api.Cat.Indices(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
+	}
+	out := make([]types.IndexNameStatus, 0, len(resp.Indices))
+	for _, r := range resp.Indices {
+		out = append(out, types.IndexNameStatus{Name: r.Index, Status: r.Status})
+	}
+	return out, nil
+}
+
 // OpenIndex implements client.IndexStateChanger via /{index}/_open.
 // IndicesOpenReq.Index expects a single comma-separated string, not a
 // slice — the OS typed wrapper joins for the URL path.
 func (c *Client) OpenIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
 	osReq := osapi.IndicesOpenReq{
-		Index:  req.Index,
+		Index:  strings.Join(req.Indices, ","),
 		Params: osapi.IndicesOpenParams{},
 	}
 	if req.IgnoreUnavailable {
@@ -242,7 +373,7 @@ func (c *Client) OpenIndex(ctx context.Context, req types.IndexStateChangeReques
 // CloseIndex implements client.IndexStateChanger via /{index}/_close.
 func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
 	osReq := osapi.IndicesCloseReq{
-		Index:  req.Index,
+		Index:  strings.Join(req.Indices, ","),
 		Params: osapi.IndicesCloseParams{},
 	}
 	if req.IgnoreUnavailable {
@@ -277,7 +408,7 @@ func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeReque
 // layer covers that client-side with the IndexInspector pattern resolve.
 func (c *Client) ForceMerge(ctx context.Context, req types.IndexOptimizeRequest) (types.IndexOptimizeResult, error) {
 	osReq := &osapi.IndicesForcemergeReq{
-		Indices: esopsclient.SplitCSV(req.Index),
+		Indices: req.Indices,
 		Params:  osapi.IndicesForcemergeParams{},
 	}
 	if req.MaxNumSegments > 0 {
@@ -1275,6 +1406,10 @@ func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types
 				"alias", "index", "filter",
 				"routing.index", "routing.search", "is_write_index",
 			},
+			// Server-side sort matches the ES adapter so a captured
+			// stdout is stable across dialects without a client-side
+			// pass.
+			Sort: []string{"alias", "index"},
 		},
 	}
 	if filter.Alias != "" {
@@ -1315,6 +1450,91 @@ func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types
 		})
 	}
 	return out, nil
+}
+
+// catAliasesRowOS mirrors a /_cat/aliases?format=json row on
+// OpenSearch — same wire shape as the ES adapter's catAliasesRow.
+type catAliasesRowOS struct {
+	Alias         string `json:"alias"`
+	Index         string `json:"index"`
+	Filter        string `json:"filter"`
+	RoutingIndex  string `json:"routing.index"`
+	RoutingSearch string `json:"routing.search"`
+	IsWriteIndex  string `json:"is_write_index"`
+}
+
+// AliasesStream implements client.AliasInspector against OpenSearch
+// via raw HTTP — same rationale as IndicesStream: the v4 typed
+// CatAliasesReq buffers the response, defeating the streaming
+// contract. Per-index filtering is row-by-row so the streaming path
+// matches the buffered Aliases call.
+func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yield func(types.Alias) error) error {
+	q := url.Values{}
+	q.Set("format", "json")
+	q.Set("h", strings.Join([]string{
+		"alias", "index", "filter",
+		"routing.index", "routing.search", "is_write_index",
+	}, ","))
+	q.Set("s", "alias,index")
+
+	path := "/_cat/aliases"
+	if filter.Alias != "" {
+		path += "/" + strings.Join(esopsclient.SplitCSV(filter.Alias), ",")
+	}
+	path += "?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.api.Client.Perform(req)
+	if err != nil {
+		return esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "cat aliases (stream) error"))
+		return esopsclient.ClassifyStatus("cat aliases (stream)", resp.StatusCode, body)
+	}
+
+	wanted := map[string]struct{}{}
+	for _, n := range esopsclient.SplitCSV(filter.Index) {
+		if t := strings.TrimSpace(n); t != "" {
+			wanted[t] = struct{}{}
+		}
+	}
+
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat aliases (stream)")
+	dec := json.NewDecoder(body)
+	if tok, err := dec.Token(); err != nil {
+		return errors.Join(errors.New("decoding cat aliases (stream) response"), err)
+	} else if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return fmt.Errorf("cat aliases (stream): expected JSON array, got %v", tok)
+	}
+	for dec.More() {
+		var r catAliasesRowOS
+		if err := dec.Decode(&r); err != nil {
+			return errors.Join(errors.New("decoding cat aliases (stream) row"), err)
+		}
+		if len(wanted) > 0 {
+			if _, ok := wanted[r.Index]; !ok {
+				continue
+			}
+		}
+		a := types.Alias{
+			Alias:         r.Alias,
+			Index:         r.Index,
+			Filter:        emptyOnDash(r.Filter),
+			RoutingIndex:  emptyOnDash(r.RoutingIndex),
+			RoutingSearch: emptyOnDash(r.RoutingSearch),
+			IsWriteIndex:  parseClusterBool(r.IsWriteIndex),
+		}
+		if err := yield(a); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // emptyOnDash maps the cluster's "-" sentinel to "" so JSON omitempty
@@ -1426,13 +1646,12 @@ type settingsGetEntryWire struct {
 // envelope ourselves so the include_defaults code path can merge
 // defaults+settings the same way the ES adapter does.
 func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequest) ([]types.IndexSettings, error) {
-	indices := esopsclient.SplitCSV(req.Index)
 	names := req.Names
 
 	var path strings.Builder
-	if len(indices) > 0 {
+	if len(req.Indices) > 0 {
 		path.WriteString("/")
-		path.WriteString(strings.Join(indices, ","))
+		path.WriteString(strings.Join(req.Indices, ","))
 	}
 	path.WriteString("/_settings")
 	if len(names) > 0 {
@@ -1465,7 +1684,7 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_settings"))
 	if err != nil {
 		return nil, errors.Join(errors.New("reading indices get_settings response"), err)
 	}
@@ -1486,41 +1705,102 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 
 	out := make([]types.IndexSettings, 0, len(wire))
 	for name, entry := range wire {
-		merged := mergeSettings(entry.Defaults, entry.Settings)
 		out = append(out, types.IndexSettings{
 			Index:    name,
-			Settings: merged,
+			Settings: entry.Settings,
+			Defaults: entry.Defaults,
 		})
 	}
 	return out, nil
 }
 
-// mergeSettings layers configured settings over defaults. Mirrors the
-// ES adapter byte-for-byte; kept per-package so a future divergence
-// (OS-specific block we want to keep separate) is a per-package change
-// rather than shared-helper churn.
-func mergeSettings(defaults, settings map[string]any) map[string]any {
-	if len(defaults) == 0 && len(settings) == 0 {
-		return nil
+// GetSettingsStream implements client.IndexSettingsInspector via raw
+// HTTP. Streams the cluster's top-level {"index1": {...}, ...}
+// envelope one entry at a time so a `settings get -o ndjson
+// --include-defaults` against a multi-thousand-index fleet doesn't
+// have to buffer the full nested-defaults payload into memory.
+func (c *Client) GetSettingsStream(ctx context.Context, req types.IndexSettingsGetRequest, yield func(types.IndexSettings) error) error {
+	names := req.Names
+
+	var path strings.Builder
+	if len(req.Indices) > 0 {
+		path.WriteString("/")
+		path.WriteString(strings.Join(req.Indices, ","))
 	}
-	out := make(map[string]any, len(defaults)+len(settings))
-	for k, v := range defaults {
-		out[k] = v
+	path.WriteString("/_settings")
+	if len(names) > 0 {
+		path.WriteString("/")
+		path.WriteString(strings.Join(names, ","))
 	}
-	for k, v := range settings {
-		out[k] = v
+
+	q := path.String()
+	params := []string{}
+	if req.IncludeDefaults {
+		params = append(params, "include_defaults=true")
 	}
-	return out
+	if req.FlatSettings {
+		params = append(params, "flat_settings=true")
+	}
+	if req.IgnoreUnavailable {
+		params = append(params, "ignore_unavailable=true")
+	}
+	if len(params) > 0 {
+		q += "?" + strings.Join(params, "&")
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, q, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "indices get_settings (stream) error"))
+		return esopsclient.ClassifyStatus("indices get_settings (stream)", resp.StatusCode, errBody)
+	}
+
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_settings (stream)")
+	dec := json.NewDecoder(body)
+	if tok, err := dec.Token(); err != nil {
+		return errors.Join(errors.New("decoding indices get_settings (stream) response"), err)
+	} else if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("indices get_settings (stream): expected JSON object, got %v", tok)
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return errors.Join(errors.New("decoding indices get_settings (stream) key"), err)
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("indices get_settings (stream): expected string key, got %v", keyTok)
+		}
+		var entry settingsGetEntryWire
+		if err := dec.Decode(&entry); err != nil {
+			return errors.Join(errors.New("decoding indices get_settings (stream) value"), err)
+		}
+		row := types.IndexSettings{
+			Index:    name,
+			Settings: entry.Settings,
+			Defaults: entry.Defaults,
+		}
+		if err := yield(row); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PutSettings implements client.IndexSettingsUpdater via
 // PUT /<indices>/_settings. The OS typed wrapper takes Indices as a
 // []string and a Body io.Reader; the cluster validates field names.
 func (c *Client) PutSettings(ctx context.Context, req types.IndexSettingsUpdateRequest) (types.IndexSettingsUpdateResult, error) {
-	indices := esopsclient.SplitCSV(req.Index)
-
 	osReq := osapi.SettingsPutReq{
-		Indices: indices,
+		Indices: req.Indices,
 		Body:    bytes.NewReader(req.Body),
 		Params:  osapi.SettingsPutParams{},
 	}
@@ -1543,7 +1823,7 @@ func (c *Client) PutSettings(ctx context.Context, req types.IndexSettingsUpdateR
 	}
 	return types.IndexSettingsUpdateResult{
 		Action:       "settings-update",
-		Indices:      indices,
+		Indices:      req.Indices,
 		Acknowledged: resp.Acknowledged,
 	}, nil
 }
@@ -1591,7 +1871,7 @@ func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.Inde
 	if raw == nil || raw.Body == nil {
 		return nil, errors.New("opensearch get_index_template: empty response body")
 	}
-	body, err := io.ReadAll(raw.Body)
+	body, err := io.ReadAll(esopsclient.NewBoundedReader(raw.Body, esopsclient.DefaultMaxResponseBytes, "get_index_template"))
 	if err != nil {
 		return nil, errors.Join(errors.New("reading get_index_template response"), err)
 	}
@@ -1614,6 +1894,22 @@ func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.Inde
 		})
 	}
 	return out, nil
+}
+
+// GetTemplate implements client.IndexTemplateInspector for the
+// single-name lookup. Returns ErrNotFound (wrapped) when the cluster
+// 404s.
+func (c *Client) GetTemplate(ctx context.Context, name string) (types.IndexTemplate, error) {
+	rows, err := c.GetTemplates(ctx, []string{name})
+	if err != nil {
+		return types.IndexTemplate{}, err
+	}
+	for _, t := range rows {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+	return types.IndexTemplate{}, fmt.Errorf("%w: index template %q", esopsclient.ErrNotFound, name)
 }
 
 // PutTemplate implements client.IndexTemplateUpdater via

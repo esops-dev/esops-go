@@ -35,16 +35,16 @@ type SettingsGetOptions struct {
 // ticket, or diffed across runs) is stable across invocations.
 func GetSettings(ctx context.Context, gi client.IndexSettingsInspector, opts SettingsGetOptions) ([]types.IndexSettings, error) {
 	if strings.TrimSpace(opts.Index) == "" {
-		return nil, fmt.Errorf("--index is required (use a literal name or pattern; '*' to fetch every index is intentionally not supported)")
+		return nil, client.UsageError("--index is required (use a literal name or pattern; '*' to fetch every index is intentionally not supported)")
 	}
 	for _, n := range opts.Names {
 		if strings.TrimSpace(n) == "" {
-			return nil, fmt.Errorf("--name entries must be non-empty")
+			return nil, client.UsageError("--name entries must be non-empty")
 		}
 	}
 
 	rows, err := gi.GetSettings(ctx, types.IndexSettingsGetRequest{
-		Index:             opts.Index,
+		Indices:           client.SplitCSV(opts.Index),
 		Names:             opts.Names,
 		IncludeDefaults:   opts.IncludeDefaults,
 		FlatSettings:      opts.FlatSettings,
@@ -57,6 +57,28 @@ func GetSettings(ctx context.Context, gi client.IndexSettingsInspector, opts Set
 		return rows[i].Index < rows[j].Index
 	})
 	return rows, nil
+}
+
+// GetSettingsStream is the streaming companion to GetSettings: invokes
+// yield per (index, settings, defaults) triple as the cluster's
+// top-level object envelope is decoded. No client-side sort happens —
+// streaming and sort are mutually exclusive.
+func GetSettingsStream(ctx context.Context, gi client.IndexSettingsInspector, opts SettingsGetOptions, yield func(types.IndexSettings) error) error {
+	if strings.TrimSpace(opts.Index) == "" {
+		return client.UsageError("--index is required (use a literal name or pattern; '*' to fetch every index is intentionally not supported)")
+	}
+	for _, n := range opts.Names {
+		if strings.TrimSpace(n) == "" {
+			return client.UsageError("--name entries must be non-empty")
+		}
+	}
+	return gi.GetSettingsStream(ctx, types.IndexSettingsGetRequest{
+		Indices:           client.SplitCSV(opts.Index),
+		Names:             opts.Names,
+		IncludeDefaults:   opts.IncludeDefaults,
+		FlatSettings:      opts.FlatSettings,
+		IgnoreUnavailable: opts.IgnoreUnavailable,
+	}, yield)
 }
 
 // SettingsUpdateOptions are the knobs the CLI layer hands to
@@ -92,14 +114,14 @@ type SettingsUpdateOptions struct {
 // sees the request.
 func UpdateSettings(ctx context.Context, su client.IndexSettingsUpdater, opts SettingsUpdateOptions) (types.IndexSettingsUpdateResult, error) {
 	if strings.TrimSpace(opts.Index) == "" {
-		return types.IndexSettingsUpdateResult{}, fmt.Errorf("--index is required")
+		return types.IndexSettingsUpdateResult{}, client.UsageError("--index is required")
 	}
 	if isPatternish(opts.Index) && !strings.ContainsAny(opts.Index, "?,") {
 		// '*' alone is the all-indices form — refused outright. A
 		// pattern with a glob (e.g. "logs-*") is allowed since that's
 		// the standard rotation use case.
 		if strings.TrimSpace(opts.Index) == "*" || strings.TrimSpace(opts.Index) == "_all" {
-			return types.IndexSettingsUpdateResult{}, fmt.Errorf("--index '%s' is too broad; name a pattern that matches the indices you intend to mutate", opts.Index)
+			return types.IndexSettingsUpdateResult{}, client.UsageError("--index '%s' is too broad; name a pattern that matches the indices you intend to mutate", opts.Index)
 		}
 	}
 
@@ -108,7 +130,7 @@ func UpdateSettings(ctx context.Context, su client.IndexSettingsUpdater, opts Se
 		return types.IndexSettingsUpdateResult{}, err
 	}
 
-	indices := splitAndTrim(opts.Index)
+	indices := client.SplitCSV(opts.Index)
 	if opts.DryRun {
 		return types.IndexSettingsUpdateResult{
 			Action:       "settings-update",
@@ -120,7 +142,7 @@ func UpdateSettings(ctx context.Context, su client.IndexSettingsUpdater, opts Se
 	}
 
 	res, err := su.PutSettings(ctx, types.IndexSettingsUpdateRequest{
-		Index:             opts.Index,
+		Indices:           indices,
 		Body:              body,
 		PreserveExisting:  opts.PreserveExisting,
 		IgnoreUnavailable: opts.IgnoreUnavailable,
@@ -157,44 +179,82 @@ func buildSettingsBody(raw []byte, kv map[string]string) ([]byte, error) {
 	hasKV := len(kv) > 0
 	switch {
 	case hasBody && hasKV:
-		return nil, fmt.Errorf("--body / --from-file and --set are mutually exclusive (pick one)")
+		return nil, client.UsageError("--body / --from-file and --set are mutually exclusive (pick one)")
 	case !hasBody && !hasKV:
-		return nil, fmt.Errorf("provide settings via --set key=value, --body JSON, or --from-file PATH")
+		return nil, client.UsageError("provide settings via --set key=value, --body JSON, or --from-file PATH")
 	case hasBody:
 		var probe any
 		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, fmt.Errorf("settings body is not valid JSON: %w", err)
+			return nil, client.UsageError("settings body is not valid JSON: %v", err)
 		}
 		if _, ok := probe.(map[string]any); !ok {
-			return nil, fmt.Errorf("settings body must be a JSON object, not a %T", probe)
+			return nil, client.UsageError("settings body must be a JSON object, not a %T", probe)
 		}
 		return raw, nil
 	default:
-		index := make(map[string]any)
+		// The cluster's settings body is hierarchical
+		// (`index` → `lifecycle` → `name`), so a user-typed
+		// --set index.lifecycle.name=foo must expand into a three-level
+		// nested object — emitting {"index":{"lifecycle.name":"foo"}}
+		// would only work under ?flat_settings=true and silently no-op
+		// otherwise.
+		//
+		// Bare keys (no "index." prefix) are auto-prefixed first so
+		// --set number_of_replicas=2 still produces the standard
+		// {"index":{"number_of_replicas":"2"}} shape.
+		root := make(map[string]any)
+		seen := make(map[string]string, len(kv))
 		for k, v := range kv {
 			key := strings.TrimSpace(k)
 			if key == "" {
-				return nil, fmt.Errorf("--set key is empty")
+				return nil, client.UsageError("--set key is empty")
 			}
-			key = strings.TrimPrefix(key, "index.")
-			index[key] = v
+			if key != "index" && !strings.HasPrefix(key, "index.") {
+				key = "index." + key
+			}
+			if prev, dup := seen[key]; dup {
+				return nil, client.UsageError("--set %q resolves to the same effective key as a prior pair (values %q and %q); pass each key once", k, prev, v)
+			}
+			seen[key] = v
+			if err := setNestedString(root, strings.Split(key, "."), v); err != nil {
+				return nil, err
+			}
 		}
-		return json.Marshal(map[string]any{"index": index})
+		return json.Marshal(root)
 	}
 }
 
-// splitAndTrim parses a comma-separated index list, trims each entry,
-// and drops empties. Used on the dry-run path so the echoed Indices
-// slice mirrors what the cluster would have seen on a live call.
-func splitAndTrim(s string) []string {
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
+// setNestedString walks (and creates) a nested map[string]any path and
+// stores v at the leaf. Returns an error when a path segment collides
+// with a previously-set scalar — e.g. --set index.x=1 followed by
+// --set index.x.y=2 is contradictory and would otherwise silently
+// overwrite the scalar with a fresh sub-object.
+func setNestedString(root map[string]any, path []string, v string) error {
+	if len(path) == 0 {
+		return fmt.Errorf("internal: empty key path")
+	}
+	cur := root
+	for i, seg := range path[:len(path)-1] {
+		next, ok := cur[seg]
+		if !ok {
+			m := make(map[string]any)
+			cur[seg] = m
+			cur = m
 			continue
 		}
-		out = append(out, p)
+		m, isMap := next.(map[string]any)
+		if !isMap {
+			return client.UsageError("--set key collision: %q is set as both a scalar and a sub-object", strings.Join(path[:i+1], "."))
+		}
+		cur = m
 	}
-	return out
+	leaf := path[len(path)-1]
+	if existing, ok := cur[leaf]; ok {
+		if _, isMap := existing.(map[string]any); isMap {
+			return client.UsageError("--set key collision: %q already has nested keys; cannot overwrite with a scalar", strings.Join(path, "."))
+		}
+	}
+	cur[leaf] = v
+	return nil
 }
+

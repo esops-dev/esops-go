@@ -53,7 +53,8 @@ func (c *Client) ListPolicies(ctx context.Context, names []string) ([]types.ILMP
 	}
 
 	var wire map[string]ilmPolicyEntryWire
-	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ilm get_lifecycle")
+	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding ilm get_lifecycle response"), err)
 	}
 
@@ -72,6 +73,22 @@ func (c *Client) ListPolicies(ctx context.Context, names []string) ([]types.ILMP
 		})
 	}
 	return out, nil
+}
+
+// GetPolicy implements client.ILMManager for the single-name lookup.
+// Returns ErrNotFound (wrapped) when the cluster 404s, so the business
+// layer can produce a precise message.
+func (c *Client) GetPolicy(ctx context.Context, name string) (types.ILMPolicy, error) {
+	rows, err := c.ListPolicies(ctx, []string{name})
+	if err != nil {
+		return types.ILMPolicy{}, err
+	}
+	for _, p := range rows {
+		if p.Name == name {
+			return p, nil
+		}
+	}
+	return types.ILMPolicy{}, fmt.Errorf("%w: ilm policy %q", esopsclient.ErrNotFound, name)
 }
 
 // PutPolicy implements client.ILMManager via PUT /_ilm/policy/<name>.
@@ -183,7 +200,8 @@ func (c *Client) ExplainPolicy(ctx context.Context, req types.ILMExplainRequest)
 	var wire struct {
 		Indices map[string]ilmExplainEntryWire `json:"indices"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ilm explain_lifecycle")
+	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding ilm explain_lifecycle response"), err)
 	}
 
@@ -206,6 +224,115 @@ func (c *Client) ExplainPolicy(ctx context.Context, req types.ILMExplainRequest)
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+// ExplainPolicyStream implements client.ILMManager. Streams the
+// /<index>/_ilm/explain envelope: {"indices": {"name1": {...}, ...}}.
+// Reads the outer object, positions inside `indices`, then decodes
+// each per-index entry one at a time. Cluster-wide explain on a busy
+// cluster is the canonical case — buffering the full response into
+// memory before printing the first line is wasted heap on a 20k-index
+// fleet.
+func (c *Client) ExplainPolicyStream(ctx context.Context, req types.ILMExplainRequest, yield func(types.ILMExplainEntry) error) error {
+	index := req.Index
+	if index == "" {
+		index = "*"
+	}
+	el := c.api.ILM.ExplainLifecycle
+	opts := []func(*esapi.ILMExplainLifecycleRequest){el.WithContext(ctx)}
+	if req.OnlyErrors {
+		opts = append(opts, el.WithOnlyErrors(true))
+	}
+	if req.OnlyManaged {
+		opts = append(opts, el.WithOnlyManaged(true))
+	}
+	resp, err := c.api.ILM.ExplainLifecycle(index, opts...)
+	if err != nil {
+		return esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if err := classifyResponse("ilm explain_lifecycle (stream)", resp.StatusCode, resp.Body); err != nil {
+		return err
+	}
+
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ilm explain_lifecycle (stream)")
+	dec := json.NewDecoder(body)
+	if err := streamObjectKey(dec, "indices", "ilm explain_lifecycle (stream)"); err != nil {
+		return err
+	}
+	// Consume the inner '{'.
+	if tok, err := dec.Token(); err != nil {
+		return errors.Join(errors.New("decoding ilm explain_lifecycle (stream) indices"), err)
+	} else if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("ilm explain_lifecycle (stream): expected indices object, got %v", tok)
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return errors.Join(errors.New("decoding ilm explain_lifecycle (stream) key"), err)
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("ilm explain_lifecycle (stream): expected string key, got %v", keyTok)
+		}
+		var e ilmExplainEntryWire
+		if err := dec.Decode(&e); err != nil {
+			return errors.Join(errors.New("decoding ilm explain_lifecycle (stream) value"), err)
+		}
+		entry := types.ILMExplainEntry{
+			Index:         name,
+			Managed:       e.Managed,
+			Policy:        e.Policy,
+			LifecycleDate: formatEpochMillis(e.LifecycleDateMS),
+			Phase:         e.Phase,
+			Action:        e.Action,
+			Step:          e.Step,
+			FailedStep:    e.FailedStep,
+			StepInfo:      e.StepInfo,
+		}
+		if e.LifecycleDateMS > 0 {
+			entry.Age = ageSince(e.LifecycleDateMS)
+		}
+		if err := yield(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// streamObjectKey advances dec past the opening '{' of an object and
+// then through tokens until the named key is consumed — leaving the
+// decoder ready to read the value of that key. Used by both ILM and
+// ISM streaming explain to position inside `{"indices": {...}}` /
+// similar wrappers without buffering the whole response. Returns an
+// error if the structure is unexpected or the key is absent.
+func streamObjectKey(dec *json.Decoder, key, op string) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errors.Join(fmt.Errorf("decoding %s response", op), err)
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("%s: expected JSON object, got %v", op, tok)
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return errors.Join(fmt.Errorf("decoding %s key", op), err)
+		}
+		k, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("%s: expected string key, got %v", op, keyTok)
+		}
+		if k == key {
+			return nil
+		}
+		// Skip past this value to reach the next key.
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return errors.Join(fmt.Errorf("skipping %s value", op), err)
+		}
+	}
+	return fmt.Errorf("%s: expected key %q in response, not found", op, key)
 }
 
 // ageSince renders an age in a compact "12d5h" / "3h" / "45m" form so a

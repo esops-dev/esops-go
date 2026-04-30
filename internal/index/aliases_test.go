@@ -23,6 +23,19 @@ func (f *fakeAliasInspector) Aliases(_ context.Context, filter types.AliasFilter
 	return f.aliases, f.err
 }
 
+func (f *fakeAliasInspector) AliasesStream(_ context.Context, filter types.AliasFilter, yield func(types.Alias) error) error {
+	f.got = filter
+	if f.err != nil {
+		return f.err
+	}
+	for _, a := range f.aliases {
+		if err := yield(a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // fakeAliasUpdater records every UpdateAliases request and returns a
 // canned response. Mirrors the other fake-* shapes in this package.
 type fakeAliasUpdater struct {

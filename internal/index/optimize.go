@@ -57,7 +57,7 @@ func Optimize(ctx context.Context, inspector client.IndexInspector, opt client.I
 		return types.IndexOptimizeResult{}, err
 	}
 
-	indices, err := inspector.Indices(ctx, types.IndexFilter{
+	rows, err := inspector.IndicesNamesStatus(ctx, types.IndexFilter{
 		Index:  opts.Pattern,
 		Hidden: true,
 	})
@@ -65,7 +65,7 @@ func Optimize(ctx context.Context, inspector client.IndexInspector, opt client.I
 		return types.IndexOptimizeResult{}, err
 	}
 
-	target, skipped := partitionByOpenStatus(indices)
+	target, skipped := partitionByOpenStatus(rows)
 	limit := opts.MaxIndices
 	if limit <= 0 {
 		limit = DefaultMaxIndices
@@ -96,7 +96,7 @@ func Optimize(ctx context.Context, inspector client.IndexInspector, opt client.I
 	}
 
 	cReq := types.IndexOptimizeRequest{
-		Index:              strings.Join(target, ","),
+		Indices:            target,
 		MaxNumSegments:     opts.MaxNumSegments,
 		OnlyExpungeDeletes: opts.OnlyExpungeDeletes,
 		Flush:              opts.Flush,
@@ -121,14 +121,14 @@ func Optimize(ctx context.Context, inspector client.IndexInspector, opt client.I
 func validateOptimizeOptions(opts OptimizeOptions) error {
 	pattern := strings.TrimSpace(opts.Pattern)
 	if pattern == "" {
-		return fmt.Errorf("--index is required (a comma-separated list or pattern)")
+		return client.UsageError("--index is required (a comma-separated list or pattern)")
 	}
 	switch pattern {
 	case "*", "_all":
 		return fmt.Errorf("%w: refusing pattern %q — it would match every index; name a narrower pattern", client.ErrBlastRadius, pattern)
 	}
 	if opts.MaxNumSegments < 0 {
-		return fmt.Errorf("--max-num-segments must be >= 0 (got %d)", opts.MaxNumSegments)
+		return client.UsageError("--max-num-segments must be >= 0 (got %d)", opts.MaxNumSegments)
 	}
 	return nil
 }
@@ -140,12 +140,14 @@ func validateOptimizeOptions(opts OptimizeOptions) error {
 //     the request fail mid-flight)
 //
 // Both lists are sorted alphabetically so rendered output is stable.
-func partitionByOpenStatus(indices []types.Index) (target, skipped []string) {
-	for _, ix := range indices {
-		if strings.EqualFold(ix.Status, "open") {
-			target = append(target, ix.Name)
+func partitionByOpenStatus(rows []types.IndexNameStatus) (target, skipped []string) {
+	target = make([]string, 0, len(rows))
+	skipped = make([]string, 0, len(rows))
+	for _, r := range rows {
+		if strings.EqualFold(r.Status, "open") {
+			target = append(target, r.Name)
 		} else {
-			skipped = append(skipped, ix.Name)
+			skipped = append(skipped, r.Name)
 		}
 	}
 	sort.Strings(target)

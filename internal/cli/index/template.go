@@ -8,7 +8,6 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
 )
 
@@ -68,12 +67,7 @@ func runTemplateList(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.template.list",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"rows", len(rows),
-	)
+	s.Log("index.template.list", "rows", len(rows))
 	return output.IndexTemplates(os.Stdout, rows, s.Format)
 }
 
@@ -116,12 +110,7 @@ func runTemplateGet(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.template.get",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"name", tpl.Name,
-	)
+	s.Log("index.template.get", "name", tpl.Name)
 	return output.IndexTemplate(os.Stdout, tpl, s.Format)
 }
 
@@ -194,10 +183,7 @@ func runTemplatePut(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.template.put",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.template.put",
 		"name", result.Name,
 		"create", opts.Create,
 		"dry_run", result.DryRun,
@@ -248,10 +234,7 @@ func runTemplateDelete(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.template.delete",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.template.delete",
 		"name", result.Name,
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,

@@ -8,9 +8,10 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
+	"github.com/dj-wasabi/esops-go/internal/client"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
+	"github.com/dj-wasabi/esops-go/internal/types"
 )
 
 // settingsCommand is the parent for `esops index settings <get|set>`.
@@ -79,23 +80,35 @@ func runSettingsGet(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	rows, err := esopsindex.GetSettings(ctx, s.Client.IndexSettings, esopsindex.SettingsGetOptions{
+	opts := esopsindex.SettingsGetOptions{
 		Index:             cmd.String("index"),
 		Names:             cmd.StringSlice("name"),
 		IncludeDefaults:   cmd.Bool("include-defaults"),
 		FlatSettings:      cmd.Bool("flat-settings"),
 		IgnoreUnavailable: cmd.Bool("ignore-unavailable"),
-	})
+	}
+
+	if s.Format == output.FormatNDJSON {
+		count := 0
+		err := output.IndexSettingsNDJSONStream(os.Stdout, func(yield func(types.IndexSettings) error) error {
+			return esopsindex.GetSettingsStream(ctx, s.Client.IndexSettings, opts, func(r types.IndexSettings) error {
+				count++
+				return yield(r)
+			})
+		})
+		if err != nil {
+			return err
+		}
+		s.Log("index.settings.get", "rows", count, "stream", true)
+		return nil
+	}
+
+	rows, err := esopsindex.GetSettings(ctx, s.Client.IndexSettings, opts)
 	if err != nil {
 		return err
 	}
 
-	logging.Logger().Info("index.settings.get",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"rows", len(rows),
-	)
+	s.Log("index.settings.get", "rows", len(rows))
 	return output.IndexSettings(os.Stdout, rows, s.Format)
 }
 
@@ -188,10 +201,7 @@ func runSettingsSet(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.settings.set",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.settings.set",
 		"index", opts.Index,
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,
@@ -205,7 +215,7 @@ func runSettingsSet(ctx context.Context, cmd *cli.Command) error {
 // arrives before the cluster is contacted.
 func resolveBody(body, fromFile string) ([]byte, error) {
 	if body != "" && fromFile != "" {
-		return nil, fmt.Errorf("--body and --from-file are mutually exclusive")
+		return nil, client.UsageError("--body and --from-file are mutually exclusive")
 	}
 	if fromFile != "" {
 		buf, err := os.ReadFile(fromFile) // #nosec G304 -- path is the operator-supplied --from-file flag
@@ -223,7 +233,8 @@ func resolveBody(body, fromFile string) ([]byte, error) {
 // parseKeyValuePairs splits each "k=v" string into a key/value entry.
 // Empty input returns nil so callers can compare against an empty map
 // without nil-checking. Values may contain '='; only the first one
-// separates key from value.
+// separates key from value. Duplicate keys are rejected outright —
+// silent last-write-wins on the command line is a footgun.
 func parseKeyValuePairs(in []string) (map[string]string, error) {
 	if len(in) == 0 {
 		return nil, nil
@@ -238,10 +249,13 @@ func parseKeyValuePairs(in []string) (map[string]string, error) {
 			}
 		}
 		if eq <= 0 {
-			return nil, fmt.Errorf("--set entries must be key=value (got %q)", raw)
+			return nil, client.UsageError("--set entries must be key=value (got %q)", raw)
 		}
 		key := raw[:eq]
 		val := raw[eq+1:]
+		if prev, dup := out[key]; dup {
+			return nil, client.UsageError("--set %q given twice (values %q and %q); pass each key once", key, prev, val)
+		}
 		out[key] = val
 	}
 	return out, nil
