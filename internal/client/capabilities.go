@@ -117,6 +117,63 @@ type IndexShrinker interface {
 	Shrink(ctx context.Context, req types.IndexShrinkRequest) (types.IndexShrinkResult, error)
 }
 
+// IndexSettingsInspector wraps GET /<indices>/_settings — the read-only
+// settings surface. Both dialects expose the same response envelope
+// ({"<index>":{"settings":{…}}}) so one capability covers ES and OS.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a missing index when IgnoreUnavailable is
+//     false)
+type IndexSettingsInspector interface {
+	GetSettings(ctx context.Context, req types.IndexSettingsGetRequest) ([]types.IndexSettings, error)
+}
+
+// IndexSettingsUpdater wraps PUT /<indices>/_settings — the destructive
+// half of the settings surface. The cluster's body shape
+// ({"index":{"<key>":<value>, ...}}) is identical on both dialects.
+//
+// The cluster has no native dry-run for /_settings; the business layer
+// implements --dry-run client-side as "validate + report" so the
+// adapter only executes live calls.
+//
+// Errors mirror IndexSettingsInspector; a 400 from the cluster usually
+// carries a precise reason (immutable setting, unknown key) which is
+// surfaced verbatim.
+type IndexSettingsUpdater interface {
+	PutSettings(ctx context.Context, req types.IndexSettingsUpdateRequest) (types.IndexSettingsUpdateResult, error)
+}
+
+// IndexTemplateInspector wraps GET /_index_template/<names> — the
+// read-only listing/get surface for v2 (composable) index templates.
+// Both ES and OS expose the same response envelope
+// ({"index_templates":[{"name":"…","index_template":{…}}, ...]}). An
+// empty Names list lists every template.
+//
+// Legacy /_template entries are deliberately out of scope; both
+// products consider them deprecated and surfacing both sets would
+// muddy the CLI story.
+type IndexTemplateInspector interface {
+	GetTemplates(ctx context.Context, names []string) ([]types.IndexTemplate, error)
+}
+
+// IndexTemplateUpdater wraps PUT /_index_template/<name> and
+// DELETE /_index_template/<name> — the destructive surface. Templates
+// are updated one at a time; bulk operations are out of scope and the
+// cluster's raw API is the right place for them.
+//
+// Neither endpoint has a native dry-run; --dry-run is implemented
+// client-side as "validate + report" so the adapter only executes live
+// calls. PutTemplate honours request.Create (which maps to
+// ?create=true) — a 400 from the cluster on Create=true means the
+// template already exists, surfaced verbatim.
+type IndexTemplateUpdater interface {
+	PutTemplate(ctx context.Context, req types.IndexTemplatePutRequest) (types.IndexTemplatePutResult, error)
+	DeleteTemplate(ctx context.Context, req types.IndexTemplateDeleteRequest) (types.IndexTemplateDeleteResult, error)
+}
+
 // AliasInspector wraps /_cat/aliases — the read-only listing surface
 // for alias→index bindings. ES and OS both expose the same column
 // layout; the AliasFilter's Alias/Index fields are forwarded to the
@@ -221,6 +278,10 @@ type Client struct {
 	IndexOptimize     IndexOptimizer
 	IndexRollover     IndexRollover
 	IndexShrink       IndexShrinker
+	IndexSettings     IndexSettingsInspector
+	IndexSettingsSet  IndexSettingsUpdater
+	IndexTemplateGet  IndexTemplateInspector
+	IndexTemplateSet  IndexTemplateUpdater
 	AliasInspect      AliasInspector
 	AliasUpdate       AliasUpdater
 	AllocationExplain AllocationExplainer

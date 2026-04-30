@@ -20,6 +20,8 @@ func Command() *cli.Command {
 			rolloverCommand(),
 			shrinkCommand(),
 			aliasesCommand(),
+			settingsCommand(),
+			templateCommand(),
 		},
 	}
 }

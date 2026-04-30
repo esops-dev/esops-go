@@ -1,8 +1,8 @@
 # index — inspect and manage indices
 
-`esops index` gives you `kubectl`-style commands for day-to-day index operations: listing, opening and closing, force-merging (optimize), shrinking, rolling aliases over, and managing alias→index bindings.
+`esops index` gives you `kubectl`-style commands for day-to-day index operations: listing, opening and closing, force-merging (optimize), shrinking, rolling aliases over, managing alias→index bindings, reading and updating settings, and managing v2 (composable) index templates.
 
-`esops index list` and `esops index aliases list` are read-only and safe to run on production at any time. `esops index open`, `esops index close`, `esops index optimize`, `esops index rollover`, `esops index shrink`, and `esops index aliases add` / `esops index aliases remove` mutate cluster state — see the safety notes per command.
+The read-only commands — `esops index list`, `esops index aliases list`, `esops index settings get`, `esops index template list`, and `esops index template get` — are safe to run on production at any time. `esops index open`, `esops index close`, `esops index optimize`, `esops index rollover`, `esops index shrink`, `esops index aliases add` / `esops index aliases remove`, `esops index settings set`, `esops index template put`, and `esops index template delete` mutate cluster state — see the safety notes per command.
 
 See [config.md](./config.md) for context resolution and authentication.
 
@@ -489,3 +489,251 @@ To remove every binding for an alias, run remove once per index (or script over 
 ```
 
 `actions` echoes the request's actions list back so a captured JSON record is interpretable on its own.
+
+---
+
+## esops index settings
+
+`esops index settings` is the index-settings surface: `get` reads `GET /<indices>/_settings`; `set` issues `PUT /<indices>/_settings`.
+
+Works identically on Elasticsearch and OpenSearch.
+
+### esops index settings get
+
+Reads the current settings for one or more indices. The default table shows one row per `(index, dotted-key, value)` triple, so a deeply-nested cluster setting (`index.routing.allocation.require._name`) lines up with the simple ones in a single grep-friendly view.
+
+```sh
+$ esops index settings get --index esops-logs-2024-12 --name index.number_of_replicas --name index.refresh_interval
+INDEX                  KEY                                 VALUE
+esops-logs-2024-12     index.number_of_replicas            1
+esops-logs-2024-12     index.refresh_interval              30s
+```
+
+`--index` is required — the cluster's "no-index" form returns every index, which on a busy prod cluster is a multi-megabyte payload that is almost never what an operator asked for.
+
+**Flags**
+
+| Flag                  | Purpose                                                                                  |
+|-----------------------|------------------------------------------------------------------------------------------|
+| `--index` (required)  | Comma-separated index names or patterns                                                  |
+| `--name`              | Limit to specific dotted setting key prefix(es); repeatable                              |
+| `--include-defaults`  | Merge in the cluster's built-in defaults so configured-vs-inherited values both surface  |
+| `--flat-settings`     | Forward as `?flat_settings=true` (cluster returns dotted keys instead of nested objects) |
+| `--ignore-unavailable`| Treat missing indices as a no-op                                                         |
+
+**Output formats**
+
+- `-o table` (default) — one row per (index, key, value) triple
+- `-o wide` — same shape, no value truncation
+- `-o json` / `-o yaml` — the neutral [`IndexSettings`](../internal/types/types.go) shape (one record per index, full nested settings map)
+- `-o ndjson` — one record per line (large clusters)
+
+**Common use cases**
+
+- `esops index settings get --index esops-logs-2024-12` — full settings dump for one index
+- `esops index settings get --index 'esops-logs-*' --name index.number_of_replicas` — replica counts across a rotation
+- `esops index settings get --index esops-logs --include-defaults -o json | jq '.[].settings'` — full effective view for an audit
+- `esops index settings get --index esops-logs-2024-* --name index.lifecycle -o json` — ILM/ISM policy attachment in JSON
+
+### esops index settings set
+
+Updates one or more index settings. Three input forms — pick exactly one:
+
+```sh
+# 1. --set key=value (repeatable). Bare keys are auto-prefixed with "index.".
+$ esops index settings set --index 'esops-logs-2024-*' --set number_of_replicas=2 --dry-run
+ACTION            DRY_RUN  ACKNOWLEDGED  INDICES
+settings-update   true     true          1
+
+INDICES
+  esops-logs-2024-*
+
+# 2. --body JSON literal (full envelope including the "index" wrapper).
+$ esops index settings set --index esops-logs-2024-12 \
+    --body '{"index":{"number_of_replicas":"2","refresh_interval":"30s"}}'
+
+# 3. --from-file PATH for CI-rendered JSON.
+$ esops index settings set --index esops-logs --from-file /etc/esops/seal-archive.json
+```
+
+The cluster has **no native dry-run** for `_settings`, so `--dry-run` is a client-side "validate + report" path that echoes the body that would have been sent. Use `-o wide` to see the body block in table mode.
+
+**Safety**
+
+| Behaviour                      | Detail                                                                                                |
+|--------------------------------|-------------------------------------------------------------------------------------------------------|
+| Match-everything refusal       | `--index *` and `--index _all` are refused outright — name a pattern that matches the indices you intend to mutate. |
+| Mutually exclusive inputs      | `--set` and `--body`/`--from-file` cannot be combined; pick one.                                     |
+| JSON shape validation          | `--body`/`--from-file` content must be a JSON object. Arrays/strings/null are refused.                |
+| Protected contexts             | Against `protection: prod`, `--i-know-this-is-prod` is required. Exit code 9 otherwise.               |
+
+**Flags**
+
+| Flag                       | Purpose                                                                                       |
+|----------------------------|-----------------------------------------------------------------------------------------------|
+| `--index` (required)       | Comma-separated index names or patterns                                                       |
+| `--set key=value`          | Repeatable; bare keys are auto-prefixed with `index.`                                         |
+| `--body`                   | Raw JSON object (literal)                                                                     |
+| `--from-file PATH`         | Read the JSON object from a file                                                              |
+| `--preserve-existing`      | Forward as `?preserve_existing=true` (cluster keeps current value where the body would overwrite) |
+| `--ignore-unavailable`     | Treat missing indices as a no-op                                                              |
+| `--dry-run` (global)       | Validate and report the body that would be sent — do not contact the cluster                  |
+
+**Common use cases**
+
+- `esops index settings set --index 'esops-logs-2024-*' --set number_of_replicas=2 --dry-run` — preview a replica bump
+- `esops index settings set --index esops-archive-2024 --set blocks.write=true --i-know-this-is-prod` — flip an index read-only before shrink
+- `esops index settings set --index esops-logs-2024-12 --set refresh_interval=-1 --i-know-this-is-prod` — disable refresh during a bulk reindex
+- `esops index settings set --index esops-logs --from-file /etc/esops/seal-archive.json --preserve-existing` — apply a CI-rendered profile without overwriting drift-corrected values
+
+**Output (`-o json`)**
+
+```json
+{
+  "action": "settings-update",
+  "dry_run": true,
+  "indices": ["esops-logs-2024-*"],
+  "acknowledged": true,
+  "body": "{\"index\":{\"number_of_replicas\":\"2\"}}"
+}
+```
+
+`body` is included only on dry-run (so the operator can verify what would have been sent); a live call drops it from the output.
+
+---
+
+## esops index template
+
+`esops index template` is the v2 (composable) index-template surface: `list`, `get`, `put`, and `delete` against `/_index_template`. The legacy `/_template` API is deliberately out of scope; both Elasticsearch and OpenSearch consider it deprecated.
+
+Works identically on Elasticsearch and OpenSearch.
+
+### esops index template list
+
+Lists the cluster's index templates. The default view shows the columns operators reach for first (name, priority, version, the index_patterns the template matches); `-o wide` adds the `composed_of` chain and a `data_stream` flag.
+
+```sh
+$ esops index template list
+NAME                  PRIORITY  VERSION  INDEX_PATTERNS
+esops-events          100       -        events-*,metrics-*
+esops-logs-v2         200       3        esops-logs-*
+```
+
+Read-only and safe to run against a prod-protected context at any time.
+
+**Flags**
+
+| Flag       | Purpose                                                                  |
+|------------|--------------------------------------------------------------------------|
+| `--name`   | Limit to specific template name(s) or pattern(s); repeatable             |
+
+**Output formats**
+
+- `-o table` (default) — human readable
+- `-o wide` — adds `composed_of` and a data-stream flag
+- `-o json` / `-o yaml` — the neutral [`IndexTemplate`](../internal/types/types.go) shape
+- `-o ndjson` — one record per line (large clusters)
+
+### esops index template get
+
+Get a single template by literal name. The default table renders a one-line header and the index_patterns the template matches; `-o wide` appends the full `template` body (settings/mappings/aliases) as indented JSON, ready to paste into a ticket or feed back into `template put --from-file`.
+
+```sh
+$ esops index template get --name esops-logs-v2 -o wide
+NAME           PRIORITY  VERSION  INDEX_PATTERNS  COMPOSED_OF
+esops-logs-v2  200       3        esops-logs-*    esops-logs-mappings,esops-logs-settings
+
+TEMPLATE
+  {
+    "settings": {
+      "number_of_shards": "1",
+      "number_of_replicas": "1"
+    }
+  }
+```
+
+For wildcard matching, use `template list --name`.
+
+**Flags**
+
+| Flag                   | Purpose                                |
+|------------------------|----------------------------------------|
+| `--name` (required)    | Template name (literal, no patterns)   |
+
+### esops index template put
+
+Create or update a v2 index template. Body input is exactly one of `--body` (literal JSON) or `--from-file` (path to a JSON file).
+
+```sh
+$ cat /etc/esops/templates/logs-v2.json
+{
+  "index_patterns": ["esops-logs-*"],
+  "priority": 200,
+  "version": 3,
+  "template": {
+    "settings": {
+      "number_of_shards": "1",
+      "number_of_replicas": "1"
+    }
+  }
+}
+
+$ esops index template put --name esops-logs-v2 --from-file /etc/esops/templates/logs-v2.json --dry-run
+ACTION        DRY_RUN  NAME           ACKNOWLEDGED
+template-put  true     esops-logs-v2  true
+```
+
+**Safety**
+
+| Behaviour                  | Detail                                                                                                  |
+|----------------------------|---------------------------------------------------------------------------------------------------------|
+| `index_patterns` required  | A v2 template without `index_patterns` never matches an index — esops refuses up-front. Exit code 7.    |
+| Literal name only          | `--name` rejects patterns; templates are managed one at a time.                                         |
+| `--create` opt-in          | When set, the cluster refuses with a 400 if the template already exists. Safe default for first-time installs in CI. |
+| Protected contexts         | Against `protection: prod`, `--i-know-this-is-prod` is required. Exit code 9 otherwise.                 |
+
+**Flags**
+
+| Flag                       | Purpose                                                                                       |
+|----------------------------|-----------------------------------------------------------------------------------------------|
+| `--name` (required)        | Template name (literal)                                                                       |
+| `--body`                   | Raw JSON template definition                                                                  |
+| `--from-file PATH`         | Read the JSON template body from a file                                                       |
+| `--create`                 | Forward as `?create=true` (refuse if a template with this name already exists)                |
+| `--dry-run` (global)       | Validate and report — do not contact the cluster                                              |
+
+**Common use cases**
+
+- `esops index template put --name esops-logs-v2 --from-file logs-v2.json --create --dry-run` — preview the install of a fresh template
+- `esops index template put --name esops-logs-v2 --from-file logs-v2.json --i-know-this-is-prod` — apply an updated template version in prod
+- `esops index template list -o json | jq '.[] | select(.priority > 100)'` — inventory of high-priority templates
+
+### esops index template delete
+
+Removes a single template by literal name. The cluster's own 404 surfaces a missing template with a useful message — esops does not pre-check existence.
+
+```sh
+$ esops index template delete --name esops-logs-v1 --dry-run
+ACTION           DRY_RUN  NAME           ACKNOWLEDGED
+template-delete  true     esops-logs-v1  true
+```
+
+**Flags**
+
+| Flag                   | Purpose                                       |
+|------------------------|-----------------------------------------------|
+| `--name` (required)    | Template name (literal, no patterns)          |
+| `--dry-run` (global)   | Validate and report — do not contact the cluster |
+
+**Output (`-o json`)**
+
+```json
+{
+  "action": "template-delete",
+  "dry_run": false,
+  "name": "esops-logs-v1",
+  "acknowledged": true
+}
+```
+
+`name` is echoed so a captured JSON record is self-describing.
