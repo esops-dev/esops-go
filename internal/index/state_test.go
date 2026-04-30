@@ -51,20 +51,23 @@ func ackResponse() types.IndexStateChange {
 }
 
 func TestParseStateAction_knownValues(t *testing.T) {
-	cases := map[string]types.IndexStateAction{
-		"open":  types.IndexStateOpen,
-		"OPEN":  types.IndexStateOpen,
-		"close": types.IndexStateClose,
-		" Close ": types.IndexStateClose,
+	cases := []struct {
+		in   string
+		want types.IndexStateAction
+	}{
+		{"open", types.IndexStateOpen},
+		{"OPEN", types.IndexStateOpen},
+		{"close", types.IndexStateClose},
+		{" Close ", types.IndexStateClose},
 	}
-	for in, want := range cases {
-		got, err := index.ParseStateAction(in)
+	for _, c := range cases {
+		got, err := index.ParseStateAction(c.in)
 		if err != nil {
-			t.Errorf("ParseStateAction(%q) error: %v", in, err)
+			t.Errorf("ParseStateAction(%q) error: %v", c.in, err)
 			continue
 		}
-		if got != want {
-			t.Errorf("ParseStateAction(%q) = %q, want %q", in, got, want)
+		if got != c.want {
+			t.Errorf("ParseStateAction(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
