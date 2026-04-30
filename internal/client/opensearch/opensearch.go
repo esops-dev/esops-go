@@ -1193,3 +1193,220 @@ func hasDataRole(roles []string) bool {
 	}
 	return false
 }
+
+// Shrink implements client.IndexShrinker via /<source>/_shrink/<target>.
+// Body shape is identical to ES — {settings: {…}} — built by the
+// shared helper in this package.
+//
+// The cluster has no native dry-run; the business layer simulates one
+// client-side. WaitForActiveShards is forwarded as the cluster's own
+// query param.
+func (c *Client) Shrink(ctx context.Context, req types.IndexShrinkRequest) (types.IndexShrinkResult, error) {
+	body, err := buildShrinkBody(req)
+	if err != nil {
+		return types.IndexShrinkResult{}, err
+	}
+
+	osReq := osapi.IndicesShrinkReq{
+		Index:  req.Source,
+		Target: req.Target,
+		Body:   bytes.NewReader(body),
+		Params: osapi.IndicesShrinkParams{},
+	}
+	if req.WaitForActiveShards != "" {
+		osReq.Params.WaitForActiveShards = req.WaitForActiveShards
+	}
+	if req.CopySettings != nil {
+		v := *req.CopySettings
+		osReq.Params.CopySettings = &v
+	}
+
+	resp, err := c.api.Indices.Shrink(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.IndexShrinkResult{}, classifyResponseErr(err, status)
+	}
+	return types.IndexShrinkResult{
+		Action:             "shrink",
+		Source:             req.Source,
+		Target:             req.Target,
+		Acknowledged:       resp.Acknowledged,
+		ShardsAcknowledged: resp.ShardsAcknowledged,
+		TargetShards:       req.TargetShards,
+	}, nil
+}
+
+// buildShrinkBody renders the JSON body the cluster expects on a
+// shrink call. Mirrors the ES adapter — same wire shape on both
+// dialects, kept per-package because a future divergence
+// (ES-specific `aliases` block, OS-specific tunables) would be a
+// per-package change rather than churn in a shared helper.
+func buildShrinkBody(req types.IndexShrinkRequest) ([]byte, error) {
+	settings := make(map[string]any)
+	if req.TargetShards > 0 {
+		settings["index.number_of_shards"] = req.TargetShards
+	}
+	if req.TargetReplicas != nil {
+		settings["index.number_of_replicas"] = *req.TargetReplicas
+	}
+	body := map[string]any{}
+	if len(settings) > 0 {
+		body["settings"] = settings
+	}
+	return json.Marshal(body)
+}
+
+// Aliases implements client.AliasInspector via /_cat/aliases. The OS
+// v4 typed client returns CatAliasResp rows whose IsWriteIndex is a
+// raw "true"/"false"/"-" string, matching the ES adapter — one parser
+// for both.
+//
+// AliasFilter.Index is applied client-side: /_cat/aliases takes a
+// name path segment for alias filtering but no index segment, so the
+// adapter filters by index name in memory to match the AliasFilter
+// contract.
+func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types.Alias, error) {
+	req := &osapi.CatAliasesReq{
+		Params: osapi.CatAliasesParams{
+			H: []string{
+				"alias", "index", "filter",
+				"routing.index", "routing.search", "is_write_index",
+			},
+		},
+	}
+	if filter.Alias != "" {
+		req.Aliases = esopsclient.SplitCSV(filter.Alias)
+	}
+
+	resp, err := c.api.Cat.Aliases(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
+	}
+
+	wantedSet := map[string]struct{}{}
+	for _, name := range esopsclient.SplitCSV(filter.Index) {
+		n := strings.TrimSpace(name)
+		if n != "" {
+			wantedSet[n] = struct{}{}
+		}
+	}
+
+	out := make([]types.Alias, 0, len(resp.Aliases))
+	for _, r := range resp.Aliases {
+		if len(wantedSet) > 0 {
+			if _, ok := wantedSet[r.Index]; !ok {
+				continue
+			}
+		}
+		out = append(out, types.Alias{
+			Alias:         r.Alias,
+			Index:         r.Index,
+			Filter:        emptyOnDash(r.Filter),
+			RoutingIndex:  emptyOnDash(r.RoutingIndex),
+			RoutingSearch: emptyOnDash(r.RoutingSearch),
+			IsWriteIndex:  parseClusterBool(r.IsWriteIndex),
+		})
+	}
+	return out, nil
+}
+
+// emptyOnDash maps the cluster's "-" sentinel to "" so JSON omitempty
+// renders cleanly. Other values pass through unchanged.
+func emptyOnDash(s string) string {
+	if s == "-" {
+		return ""
+	}
+	return s
+}
+
+// parseClusterBool maps the cluster's tri-state "true"/"false"/"-"
+// (or "") into a Go bool. Anything other than a literal "true" maps
+// to false — same semantics as the ES adapter.
+func parseClusterBool(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), "true")
+}
+
+// UpdateAliases implements client.AliasUpdater via POST /_aliases.
+// Body shape is identical to ES (actions array of {add|remove}
+// envelopes); the OS typed client wraps it as AliasesReq with a Body
+// reader and surfaces only the acknowledged flag in AliasesResp.
+func (c *Client) UpdateAliases(ctx context.Context, req types.AliasUpdateRequest) (types.AliasUpdateResult, error) {
+	body, err := buildUpdateAliasesBody(req.Actions)
+	if err != nil {
+		return types.AliasUpdateResult{}, err
+	}
+
+	osReq := osapi.AliasesReq{
+		Body: bytes.NewReader(body),
+	}
+	resp, err := c.api.Aliases(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.AliasUpdateResult{}, classifyResponseErr(err, status)
+	}
+	return types.AliasUpdateResult{
+		Action:       "alias-update",
+		Acknowledged: resp.Acknowledged,
+		Actions:      req.Actions,
+	}, nil
+}
+
+// buildUpdateAliasesBody renders the body shape POST /_aliases expects.
+// Mirrors the ES adapter byte-for-byte; kept in this package so a
+// future per-dialect divergence is a per-package change rather than
+// shared-helper churn.
+func buildUpdateAliasesBody(actions []types.AliasUpdateAction) ([]byte, error) {
+	wire := struct {
+		Actions []map[string]any `json:"actions"`
+	}{Actions: make([]map[string]any, 0, len(actions))}
+
+	for _, a := range actions {
+		args, err := aliasActionArgs(a)
+		if err != nil {
+			return nil, err
+		}
+		wire.Actions = append(wire.Actions, map[string]any{string(a.Action): args})
+	}
+	return json.Marshal(wire)
+}
+
+func aliasActionArgs(a types.AliasUpdateAction) (map[string]any, error) {
+	switch a.Action {
+	case types.AliasActionAdd:
+		args := map[string]any{
+			"index": a.Index,
+			"alias": a.Alias,
+		}
+		if a.Filter != "" {
+			var f any
+			if err := json.Unmarshal([]byte(a.Filter), &f); err != nil {
+				return nil, fmt.Errorf("invalid alias filter JSON: %w", err)
+			}
+			args["filter"] = f
+		}
+		if a.Routing != "" {
+			args["routing"] = a.Routing
+		}
+		if a.IsWriteIndex != nil {
+			args["is_write_index"] = *a.IsWriteIndex
+		}
+		return args, nil
+	case types.AliasActionRemove:
+		return map[string]any{
+			"index": a.Index,
+			"alias": a.Alias,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported alias action %q (expected: add, remove)", a.Action)
+	}
+}

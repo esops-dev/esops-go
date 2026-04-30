@@ -94,6 +94,52 @@ type IndexRollover interface {
 	Rollover(ctx context.Context, req types.IndexRolloverRequest) (types.IndexRolloverResult, error)
 }
 
+// IndexShrinker wraps /<source>/_shrink/<target> — the cluster
+// endpoint that hard-links a source index's segments into a new index
+// with fewer primary shards. The shape (POST a JSON body of
+// {settings, aliases}, plus copy_settings/wait_for_active_shards query
+// flags) is identical on ES and OS, so one capability covers both.
+//
+// Implementations execute the live shrink only; the cluster has no
+// native dry-run for this endpoint and the business layer simulates
+// one client-side ("validate + report"). They must surface the
+// cluster's own pre-flight refusals verbatim — the source-not-read-
+// only error and shard-co-location errors are common operator-facing
+// cases and rephrasing them would lose signal.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: source not blocked-for-writes, or
+//     primaries spread across multiple nodes)
+type IndexShrinker interface {
+	Shrink(ctx context.Context, req types.IndexShrinkRequest) (types.IndexShrinkResult, error)
+}
+
+// AliasInspector wraps /_cat/aliases — the read-only listing surface
+// for alias→index bindings. ES and OS both expose the same column
+// layout; the AliasFilter's Alias/Index fields are forwarded to the
+// cluster as path segments. Behaviour is identical across dialects.
+type AliasInspector interface {
+	Aliases(ctx context.Context, filter types.AliasFilter) ([]types.Alias, error)
+}
+
+// AliasUpdater wraps POST /_aliases — the bulk add/remove endpoint.
+// Both ES and OS apply the actions as a single cluster-state update
+// (atomic from the cluster's perspective), so callers get
+// "everything happened or nothing did" semantics for free.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a missing index named in an action, or
+//     a malformed filter expression)
+type AliasUpdater interface {
+	UpdateAliases(ctx context.Context, req types.AliasUpdateRequest) (types.AliasUpdateResult, error)
+}
+
 // AllocationExplainer exposes /_cluster/allocation/explain. An empty
 // request.Index lets the cluster pick any unassigned shard it finds —
 // matching the raw endpoint's default behaviour — so on-call operators
@@ -174,6 +220,9 @@ type Client struct {
 	IndexState        IndexStateChanger
 	IndexOptimize     IndexOptimizer
 	IndexRollover     IndexRollover
+	IndexShrink       IndexShrinker
+	AliasInspect      AliasInspector
+	AliasUpdate       AliasUpdater
 	AllocationExplain AllocationExplainer
 	Security          SecurityAuditor
 	Diag              ClusterDiagnoser

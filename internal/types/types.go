@@ -311,6 +311,151 @@ type IndexRolloverResult struct {
 	ConditionsMet      map[string]bool `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 }
 
+// IndexShrinkRequest is the input to an IndexShrinker.Shrink call. The
+// cluster's shrink endpoint is /<source>/_shrink/<target> with a JSON
+// body of {settings, aliases}. Shrink halves (or quarters, etc.) a
+// source index's primary shard count by hard-linking segments into a
+// new target index — much cheaper than a reindex when the operator
+// just needs to reduce primaries.
+//
+// The cluster requires the source to be read-only and have all
+// primaries co-located on a single node before shrink will succeed.
+// esops does not flip those settings automatically — they are policy
+// decisions an operator should make before invoking shrink. The
+// command surfaces the requirement in --help and we let the cluster
+// produce the canonical error if the source isn't ready.
+//
+// TargetShards is the requested primary count on the new index. Must
+// be a factor of the source's primary count (4→2, 4→1, 8→4 …) — the
+// cluster validates this. When 0, the cluster default applies (a
+// single primary). TargetReplicas is the replica count on the target;
+// 0 is a valid value distinct from "leave the cluster default" because
+// the typical post-shrink follow-up is to flip replicas back up.
+//
+// CopySettings mirrors ?copy_settings=true — when set, the source
+// index's settings (other than allocation requirements that wouldn't
+// make sense on the target) are copied across. A *bool so the operator
+// can set it explicitly to false.
+//
+// WaitForActiveShards forwards as ?wait_for_active_shards=<value>;
+// numeric like "1" or symbolic like "all". Empty leaves the cluster
+// default in place.
+type IndexShrinkRequest struct {
+	Source              string
+	Target              string
+	TargetShards        int
+	TargetReplicas      *int
+	CopySettings        *bool
+	WaitForActiveShards string
+}
+
+// IndexShrinkResult is the normalised view of a /<source>/_shrink/<target>
+// response. Both ES and OS return acknowledged + shards_acknowledged +
+// the new index name. DryRun mirrors the request flag (the cluster has
+// no native dry-run for shrink, so dry-run is implemented client-side
+// as "validate + report").
+//
+// Source/Target echo the request so a captured JSON record stays
+// interpretable on its own.
+type IndexShrinkResult struct {
+	Action             string `json:"action"                yaml:"action"`
+	DryRun             bool   `json:"dry_run"               yaml:"dry_run"`
+	Source             string `json:"source"                yaml:"source"`
+	Target             string `json:"target"                yaml:"target"`
+	Acknowledged       bool   `json:"acknowledged"          yaml:"acknowledged"`
+	ShardsAcknowledged bool   `json:"shards_acknowledged"   yaml:"shards_acknowledged"`
+	TargetShards       int    `json:"target_shards,omitempty" yaml:"target_shards,omitempty"`
+}
+
+// Alias is the neutral view of one alias→index binding from
+// /_cat/aliases on both dialects. The shape mirrors the cat output
+// flat-row form: one alias name + one index name per record. An alias
+// fronting N indices materialises as N records (one per index), which
+// is what scripts grepping the JSON expect.
+//
+// Filter carries the raw JSON filter string the alias was created with
+// (or "-" / "" when no filter is set). Routing fields are the same
+// shape — the cluster reports them as bare strings and we preserve the
+// rendering. IsWriteIndex is the boolean view of the cluster's
+// "is_write_index" column, which the cat APIs return as "true"/"false"
+// (or "-" when unset on a regular alias).
+type Alias struct {
+	Alias         string `json:"alias"                       yaml:"alias"`
+	Index         string `json:"index"                       yaml:"index"`
+	Filter        string `json:"filter,omitempty"            yaml:"filter,omitempty"`
+	RoutingIndex  string `json:"routing_index,omitempty"     yaml:"routing_index,omitempty"`
+	RoutingSearch string `json:"routing_search,omitempty"    yaml:"routing_search,omitempty"`
+	IsWriteIndex  bool   `json:"is_write_index,omitempty"    yaml:"is_write_index,omitempty"`
+}
+
+// AliasFilter narrows an AliasInspector.Aliases call. Both fields are
+// passed to the cluster as path parameters; the cluster honours its
+// own glob semantics. Zero value = "all aliases".
+type AliasFilter struct {
+	Alias string // comma-separated alias names or patterns; "" = all
+	Index string // comma-separated index names; "" = all
+}
+
+// AliasAction names a single /_aliases body action. The values are the
+// JSON keys the cluster expects ("add" / "remove") so the adapter
+// doesn't need a translation table — it can build the body straight
+// from the typed value.
+type AliasAction string
+
+const (
+	AliasActionAdd    AliasAction = "add"
+	AliasActionRemove AliasAction = "remove"
+)
+
+// AliasUpdateAction is one entry in the /_aliases bulk-actions body.
+// Index is the concrete index the alias points at — patterns are
+// supported by the cluster but esops requires a literal name on the
+// add/remove path, so a typo doesn't bind an alias to a hundred
+// indices in one call. Use the cluster's own raw API for that case.
+//
+// Filter is a raw JSON object string ('{"term":{"tenant":"x"}}'); we
+// pass it verbatim and let the cluster validate. Routing/IsWriteIndex
+// mirror the cluster's optional knobs on add — IsWriteIndex is a
+// pointer so the operator can set it to false explicitly (rare, but
+// "demote this alias from being the write index" is a real flow).
+//
+// On a remove action, only Alias and Index are meaningful; the other
+// fields are ignored.
+type AliasUpdateAction struct {
+	Action       AliasAction `json:"action"                  yaml:"action"`
+	Alias        string      `json:"alias"                   yaml:"alias"`
+	Index        string      `json:"index"                   yaml:"index"`
+	Filter       string      `json:"filter,omitempty"        yaml:"filter,omitempty"`
+	Routing      string      `json:"routing,omitempty"       yaml:"routing,omitempty"`
+	IsWriteIndex *bool       `json:"is_write_index,omitempty" yaml:"is_write_index,omitempty"`
+}
+
+// AliasUpdateRequest is the input to an AliasUpdater call. Actions are
+// applied as a single cluster-state update — atomic from the cluster's
+// perspective. The business layer constructs the slice for one action
+// per command invocation today (`index aliases add` / `... remove`),
+// but the wire shape supports a future bulk-action `index aliases
+// apply --from FILE` without an API change.
+type AliasUpdateRequest struct {
+	Actions []AliasUpdateAction
+}
+
+// AliasUpdateResult is the normalised view of a POST /_aliases
+// response. Both dialects return a single acknowledged flag; the body
+// otherwise echoes nothing useful, so we surface the actions list from
+// the request side (rounded-tripped through the result) for a
+// captured-JSON reader.
+//
+// DryRun mirrors the request's --dry-run flag — the cluster has no
+// native dry-run for /_aliases, so dry-run is implemented client-side
+// as "validate + report".
+type AliasUpdateResult struct {
+	Action       string              `json:"action"                yaml:"action"`
+	DryRun       bool                `json:"dry_run"               yaml:"dry_run"`
+	Acknowledged bool                `json:"acknowledged"          yaml:"acknowledged"`
+	Actions      []AliasUpdateAction `json:"actions"               yaml:"actions"`
+}
+
 // AllocationExplainRequest narrows an AllocationExplainer.Explain call.
 // Zero value (Index == "") asks the cluster to pick any unassigned shard
 // it finds — this mirrors how operators usually invoke the endpoint when
