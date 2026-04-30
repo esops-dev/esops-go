@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -165,6 +166,125 @@ func IndexStateChange(w io.Writer, r types.IndexStateChange, f Format) error {
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
+}
+
+// IndexOptimize renders the outcome of `esops index optimize`. Table
+// format is a header line (action, dry-run, indices, shard counts)
+// followed by a list of the targeted index names. Any failures (closed-
+// index skips or per-shard merge errors) are printed in a FAILURES
+// block. JSON/YAML emit the neutral IndexOptimizeResult shape directly.
+func IndexOptimize(w io.Writer, r types.IndexOptimizeResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return indexOptimizeTable(w, r, true)
+	case FormatTable, "":
+		return indexOptimizeTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexOptimizeTable(w io.Writer, r types.IndexOptimizeResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tINDICES\tMAX_SEGMENTS\tSHARDS_OK\tSHARDS_FAILED")
+	maxSeg := "-"
+	if r.MaxNumSegments > 0 {
+		maxSeg = fmt.Sprintf("%d", r.MaxNumSegments)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%t\t%d\t%s\t%d\t%d\n",
+		r.Action, r.DryRun, len(r.Indices), maxSeg,
+		r.ShardsSuccess, r.ShardsFailed,
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	if len(r.Indices) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "INDICES")
+		for _, name := range r.Indices {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+
+	if len(r.Failures) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "FAILURES")
+		for _, msg := range r.Failures {
+			_, _ = fmt.Fprintf(w, "  %s\n", msg)
+		}
+	}
+	_ = wide
+	return nil
+}
+
+// IndexRollover renders the outcome of `esops index rollover`. Table
+// format is a one-line header (alias, rolled_over, dry_run, old/new
+// index) followed by a per-condition table when the cluster reported
+// any. JSON/YAML emit the neutral IndexRolloverResult shape directly.
+func IndexRollover(w io.Writer, r types.IndexRolloverResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return indexRolloverTable(w, r, true)
+	case FormatTable, "":
+		return indexRolloverTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexRolloverTable(w io.Writer, r types.IndexRolloverResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ALIAS\tROLLED_OVER\tDRY_RUN\tACKNOWLEDGED\tOLD_INDEX\tNEW_INDEX")
+	_, _ = fmt.Fprintf(hw, "%s\t%t\t%t\t%t\t%s\t%s\n",
+		r.Alias, r.RolledOver, r.DryRun, r.Acknowledged,
+		dashIfEmpty(r.OldIndex), dashIfEmpty(r.NewIndex),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	if len(r.ConditionsMet) > 0 {
+		// Stable order — map iteration is randomised, and a captured
+		// stdout (saved to a ticket) is more useful when the rows line
+		// up across runs.
+		keys := make([]string, 0, len(r.ConditionsMet))
+		for k := range r.ConditionsMet {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "CONDITIONS")
+		cw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(cw, "CONDITION\tMET")
+		for _, k := range keys {
+			_, _ = fmt.Fprintf(cw, "%s\t%t\n", k, r.ConditionsMet[k])
+		}
+		if err := cw.Flush(); err != nil {
+			return err
+		}
+	}
+	_ = wide
+	return nil
 }
 
 func indexStateChangeTable(w io.Writer, r types.IndexStateChange, wide bool) error {

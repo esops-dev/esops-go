@@ -16,6 +16,8 @@ func Command() *cli.Command {
 			listCommand(),
 			openCommand(),
 			closeCommand(),
+			optimizeCommand(),
+			rolloverCommand(),
 		},
 	}
 }

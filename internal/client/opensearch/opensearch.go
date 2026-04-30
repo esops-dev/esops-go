@@ -268,6 +268,123 @@ func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeReque
 	}, nil
 }
 
+// ForceMerge implements client.IndexOptimizer via /{index}/_forcemerge.
+// The OS v4 typed client materialises a {_shards:{...}} response with
+// failures[] carrying per-shard reasons; we reshape it into the neutral
+// IndexOptimizeResult so output rendering stays dialect-agnostic.
+//
+// The cluster has no native dry-run for this endpoint — the business
+// layer covers that client-side with the IndexInspector pattern resolve.
+func (c *Client) ForceMerge(ctx context.Context, req types.IndexOptimizeRequest) (types.IndexOptimizeResult, error) {
+	osReq := &osapi.IndicesForcemergeReq{
+		Indices: esopsclient.SplitCSV(req.Index),
+		Params:  osapi.IndicesForcemergeParams{},
+	}
+	if req.MaxNumSegments > 0 {
+		v := req.MaxNumSegments
+		osReq.Params.MaxNumSegments = &v
+	}
+	if req.OnlyExpungeDeletes {
+		t := true
+		osReq.Params.OnlyExpungeDeletes = &t
+	}
+	if req.Flush != nil {
+		v := *req.Flush
+		osReq.Params.Flush = &v
+	}
+	if req.IgnoreUnavailable {
+		t := true
+		osReq.Params.IgnoreUnavailable = &t
+	}
+
+	resp, err := c.api.Indices.Forcemerge(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.IndexOptimizeResult{}, classifyResponseErr(err, status)
+	}
+
+	out := types.IndexOptimizeResult{
+		Action:        "optimize",
+		ShardsTotal:   resp.Shards.Total,
+		ShardsSuccess: resp.Shards.Successful,
+		ShardsFailed:  resp.Shards.Failed,
+	}
+	for _, f := range resp.Shards.Failures {
+		out.Failures = append(out.Failures,
+			fmt.Sprintf("%s[%d] %s: %s: %s", f.Index, f.Shard, f.Status, f.Reason.Type, f.Reason.Reason))
+	}
+	return out, nil
+}
+
+// Rollover implements client.IndexRollover via /<alias>/_rollover.
+// The OS typed client returns a fully-decoded IndicesRolloverResp; we
+// reshape into the neutral type so consumers don't depend on upstream
+// types. Body shape (conditions) is built by the shared helper below.
+func (c *Client) Rollover(ctx context.Context, req types.IndexRolloverRequest) (types.IndexRolloverResult, error) {
+	body, err := buildRolloverBody(req.Conditions)
+	if err != nil {
+		return types.IndexRolloverResult{}, err
+	}
+
+	osReq := osapi.IndicesRolloverReq{
+		Alias:  req.Alias,
+		Index:  req.NewIndex,
+		Body:   bytes.NewReader(body),
+		Params: osapi.IndicesRolloverParams{},
+	}
+	if req.DryRun {
+		t := true
+		osReq.Params.DryRun = &t
+	}
+	if req.WaitForActiveShards != "" {
+		osReq.Params.WaitForActiveShards = req.WaitForActiveShards
+	}
+
+	resp, err := c.api.Indices.Rollover(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.IndexRolloverResult{}, classifyResponseErr(err, status)
+	}
+	return types.IndexRolloverResult{
+		Alias:              req.Alias,
+		OldIndex:           resp.OldIndex,
+		NewIndex:           resp.NewIndex,
+		RolledOver:         resp.RolledOver,
+		DryRun:             resp.DryRun || req.DryRun,
+		Acknowledged:       resp.Acknowledged,
+		ShardsAcknowledged: resp.ShardsAcknowledged,
+		ConditionsMet:      resp.Conditions,
+	}, nil
+}
+
+// buildRolloverBody serialises a conditions block into the cluster's
+// {"conditions":{...}} wire shape. An empty conditions struct yields
+// {"conditions":{}} which the cluster treats as the unconditional
+// form; the business layer guards that case so an absent-mindedly-
+// typed `index rollover --alias logs` doesn't roll a fresh index.
+func buildRolloverBody(c types.IndexRolloverConditions) ([]byte, error) {
+	conditions := make(map[string]any)
+	if c.MaxAge != "" {
+		conditions["max_age"] = c.MaxAge
+	}
+	if c.MaxDocs > 0 {
+		conditions["max_docs"] = c.MaxDocs
+	}
+	if c.MaxSize != "" {
+		conditions["max_size"] = c.MaxSize
+	}
+	if c.MaxPrimarySize != "" {
+		conditions["max_primary_shard_size"] = c.MaxPrimarySize
+	}
+	return json.Marshal(map[string]any{"conditions": conditions})
+}
+
 // AllocationExplain implements client.AllocationExplainer.
 //
 // When req.Index is empty we pass nil — the cluster picks any unassigned

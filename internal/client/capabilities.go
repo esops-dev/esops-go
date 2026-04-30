@@ -59,6 +59,41 @@ type IndexStateChanger interface {
 	CloseIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error)
 }
 
+// IndexOptimizer wraps /{index}/_forcemerge — the segment-merge
+// endpoint both dialects expose with identical query params and
+// response shape. The operator-facing verb is "optimize" because
+// "force_merge" is the cluster's spelling of an operation that the
+// real-world ops vocabulary calls "compact this index". Same name on
+// both dialects keeps the CLI surface neutral.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a missing index when IgnoreUnavailable
+//     is false, or a 400 from an invalid max_num_segments).
+type IndexOptimizer interface {
+	ForceMerge(ctx context.Context, req types.IndexOptimizeRequest) (types.IndexOptimizeResult, error)
+}
+
+// IndexRollover wraps /<alias>/_rollover — the data-stream/alias
+// rollover endpoint. The cluster evaluates the submitted conditions
+// against the alias's current write index and either creates the next
+// generation (rolling the alias forward) or refuses with the per-
+// condition outcome.
+//
+// The endpoint shape is identical on both dialects (POST a JSON body
+// of {conditions:{…}}, plus dry_run/wait_for_active_shards query
+// params and an optional new-index path segment), so one capability
+// covers ES and OS.
+//
+// Errors mirror IndexOptimizer; a 404 on the alias means the operator
+// pointed at something that doesn't exist, surfaced verbatim so the
+// table cell lines up with what they typed.
+type IndexRollover interface {
+	Rollover(ctx context.Context, req types.IndexRolloverRequest) (types.IndexRolloverResult, error)
+}
+
 // AllocationExplainer exposes /_cluster/allocation/explain. An empty
 // request.Index lets the cluster pick any unassigned shard it finds —
 // matching the raw endpoint's default behaviour — so on-call operators
@@ -137,6 +172,8 @@ type Client struct {
 	Nodes             NodeInspector
 	Indices           IndexInspector
 	IndexState        IndexStateChanger
+	IndexOptimize     IndexOptimizer
+	IndexRollover     IndexRollover
 	AllocationExplain AllocationExplainer
 	Security          SecurityAuditor
 	Diag              ClusterDiagnoser
