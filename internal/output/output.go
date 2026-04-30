@@ -141,6 +141,61 @@ func Indices(w io.Writer, indices []types.Index, f Format) error {
 	}
 }
 
+// IndexStateChange renders the outcome of `esops index open` or
+// `esops index close`. Table format is a two-section layout: a one-line
+// header (action, dry-run, ack flags, counts) followed by a list of the
+// transitioned index names. Skipped (already-in-state) indices are
+// shown only in wide mode — the default focuses on what changed. JSON/
+// YAML emit the neutral IndexStateChange shape directly.
+func IndexStateChange(w io.Writer, r types.IndexStateChange, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return indexStateChangeTable(w, r, true)
+	case FormatTable, "":
+		return indexStateChangeTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexStateChangeTable(w io.Writer, r types.IndexStateChange, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tACKNOWLEDGED\tSHARDS_ACK\tCHANGED\tSKIPPED")
+	_, _ = fmt.Fprintf(hw, "%s\t%t\t%t\t%t\t%d\t%d\n",
+		r.Action, r.DryRun, r.Acknowledged, r.ShardsAcknowledged,
+		len(r.Indices), len(r.Skipped),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	if len(r.Indices) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "INDICES")
+		for _, name := range r.Indices {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+
+	if wide && len(r.Skipped) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "SKIPPED (already in target state)")
+		for _, name := range r.Skipped {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+	return nil
+}
+
 // HotThreads renders a /_nodes/hot_threads response. The cluster returns
 // a free-form text block (per-node "::: {node}..." headers followed by
 // stack samples) that is the canonical diagnostic format — operators

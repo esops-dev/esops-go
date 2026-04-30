@@ -36,6 +36,29 @@ type IndexInspector interface {
 	Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error)
 }
 
+// IndexStateChanger exposes /{index}/_open and /{index}/_close. Both
+// endpoints share the same request shape (a comma-separated index
+// pattern plus a small set of query params) and the same response
+// envelope (acknowledged + shards_acknowledged) on both dialects, so
+// one capability covers the pair.
+//
+// The cluster has no dry_run query flag for these endpoints; the
+// business layer implements --dry-run client-side by resolving the
+// pattern via IndexInspector and reporting the would-be transition
+// without firing the call. Implementations therefore only need to
+// execute the live transition.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (the typical case is a missing index when
+//     IgnoreUnavailable is false)
+type IndexStateChanger interface {
+	OpenIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error)
+	CloseIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error)
+}
+
 // AllocationExplainer exposes /_cluster/allocation/explain. An empty
 // request.Index lets the cluster pick any unassigned shard it finds —
 // matching the raw endpoint's default behaviour — so on-call operators
@@ -113,6 +136,7 @@ type Client struct {
 	Shards            ShardInspector
 	Nodes             NodeInspector
 	Indices           IndexInspector
+	IndexState        IndexStateChanger
 	AllocationExplain AllocationExplainer
 	Security          SecurityAuditor
 	Diag              ClusterDiagnoser

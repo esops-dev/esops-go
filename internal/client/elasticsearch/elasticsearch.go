@@ -261,6 +261,83 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 	return out, nil
 }
 
+// indexStateChangeWire mirrors a /_open or /_close response. ES and OS
+// both return acknowledged + shards_acknowledged at the envelope level;
+// /_close additionally carries an indices map ("logs-2024":{"closed":true,...})
+// which we don't surface — the resolved per-index list comes from the
+// pre-flight cat-indices read in the business layer, and is identical
+// for both dialects.
+type indexStateChangeWire struct {
+	Acknowledged       bool `json:"acknowledged"`
+	ShardsAcknowledged bool `json:"shards_acknowledged"`
+}
+
+// OpenIndex implements client.IndexStateChanger via /{index}/_open.
+func (c *Client) OpenIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
+	o := c.api.Indices.Open
+	indices := esopsclient.SplitCSV(req.Index)
+	opts := []func(*esapi.IndicesOpenRequest){o.WithContext(ctx)}
+	if req.IgnoreUnavailable {
+		opts = append(opts, o.WithIgnoreUnavailable(true))
+	}
+	if req.WaitForActiveShards != "" {
+		opts = append(opts, o.WithWaitForActiveShards(req.WaitForActiveShards))
+	}
+
+	resp, err := c.api.Indices.Open(indices, opts...)
+	if err != nil {
+		return types.IndexStateChange{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices open", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexStateChange{}, err
+	}
+
+	var wire indexStateChangeWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexStateChange{}, errors.Join(errors.New("decoding indices open response"), err)
+	}
+	return types.IndexStateChange{
+		Action:             types.IndexStateOpen,
+		Acknowledged:       wire.Acknowledged,
+		ShardsAcknowledged: wire.ShardsAcknowledged,
+	}, nil
+}
+
+// CloseIndex implements client.IndexStateChanger via /{index}/_close.
+func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
+	cl := c.api.Indices.Close
+	indices := esopsclient.SplitCSV(req.Index)
+	opts := []func(*esapi.IndicesCloseRequest){cl.WithContext(ctx)}
+	if req.IgnoreUnavailable {
+		opts = append(opts, cl.WithIgnoreUnavailable(true))
+	}
+	if req.WaitForActiveShards != "" {
+		opts = append(opts, cl.WithWaitForActiveShards(req.WaitForActiveShards))
+	}
+
+	resp, err := c.api.Indices.Close(indices, opts...)
+	if err != nil {
+		return types.IndexStateChange{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices close", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexStateChange{}, err
+	}
+
+	var wire indexStateChangeWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexStateChange{}, errors.Join(errors.New("decoding indices close response"), err)
+	}
+	return types.IndexStateChange{
+		Action:             types.IndexStateClose,
+		Acknowledged:       wire.Acknowledged,
+		ShardsAcknowledged: wire.ShardsAcknowledged,
+	}, nil
+}
+
 // allocationExplainWire mirrors the /_cluster/allocation/explain payload.
 // ES 9's typedapi exposes a fully-typed Response, but its types.Duration
 // values are custom and awkward to consume outside the package; decoding

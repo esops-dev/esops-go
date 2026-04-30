@@ -208,6 +208,66 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 	return out, nil
 }
 
+// OpenIndex implements client.IndexStateChanger via /{index}/_open.
+// IndicesOpenReq.Index expects a single comma-separated string, not a
+// slice — the OS typed wrapper joins for the URL path.
+func (c *Client) OpenIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
+	osReq := osapi.IndicesOpenReq{
+		Index:  req.Index,
+		Params: osapi.IndicesOpenParams{},
+	}
+	if req.IgnoreUnavailable {
+		t := true
+		osReq.Params.IgnoreUnavailable = &t
+	}
+	if req.WaitForActiveShards != "" {
+		osReq.Params.WaitForActiveShards = req.WaitForActiveShards
+	}
+
+	resp, err := c.api.Indices.Open(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.IndexStateChange{}, classifyResponseErr(err, status)
+	}
+	return types.IndexStateChange{
+		Action:             types.IndexStateOpen,
+		Acknowledged:       resp.Acknowledged,
+		ShardsAcknowledged: resp.ShardsAcknowledged,
+	}, nil
+}
+
+// CloseIndex implements client.IndexStateChanger via /{index}/_close.
+func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
+	osReq := osapi.IndicesCloseReq{
+		Index:  req.Index,
+		Params: osapi.IndicesCloseParams{},
+	}
+	if req.IgnoreUnavailable {
+		t := true
+		osReq.Params.IgnoreUnavailable = &t
+	}
+	if req.WaitForActiveShards != "" {
+		osReq.Params.WaitForActiveShards = req.WaitForActiveShards
+	}
+
+	resp, err := c.api.Indices.Close(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.IndexStateChange{}, classifyResponseErr(err, status)
+	}
+	return types.IndexStateChange{
+		Action:             types.IndexStateClose,
+		Acknowledged:       resp.Acknowledged,
+		ShardsAcknowledged: resp.ShardsAcknowledged,
+	}, nil
+}
+
 // AllocationExplain implements client.AllocationExplainer.
 //
 // When req.Index is empty we pass nil — the cluster picks any unassigned
