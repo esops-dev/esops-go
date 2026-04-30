@@ -1759,3 +1759,250 @@ func aliasActionArgs(a types.AliasUpdateAction) (map[string]any, error) {
 		return nil, fmt.Errorf("unsupported alias action %q (expected: add, remove)", a.Action)
 	}
 }
+
+// settingsGetWire mirrors the GET /<indices>/_settings response. Both
+// dialects return the same envelope: {"<index>":{"settings":{…},
+// "defaults":{…}}}. Defaults is present only when ?include_defaults=true.
+type settingsGetWire map[string]struct {
+	Settings map[string]any `json:"settings"`
+	Defaults map[string]any `json:"defaults"`
+}
+
+// GetSettings implements client.IndexSettingsInspector via
+// GET /<indices>/_settings/<names>. The cluster's Settings and (when
+// requested) Defaults blocks are merged into the neutral
+// IndexSettings.Settings — operators reading "what's the effective
+// value?" get one map without having to know which side of the merge
+// the value came from. Configured values win over defaults on key
+// collision so the report mirrors what the cluster actually applies.
+func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequest) ([]types.IndexSettings, error) {
+	gs := c.api.Indices.GetSettings
+	indices := esopsclient.SplitCSV(req.Index)
+	opts := []func(*esapi.IndicesGetSettingsRequest){gs.WithContext(ctx)}
+	if len(indices) > 0 {
+		opts = append(opts, gs.WithIndex(indices...))
+	}
+	if len(req.Names) > 0 {
+		opts = append(opts, gs.WithName(req.Names...))
+	}
+	if req.IncludeDefaults {
+		opts = append(opts, gs.WithIncludeDefaults(true))
+	}
+	if req.FlatSettings {
+		opts = append(opts, gs.WithFlatSettings(true))
+	}
+	if req.IgnoreUnavailable {
+		opts = append(opts, gs.WithIgnoreUnavailable(true))
+	}
+
+	resp, err := c.api.Indices.GetSettings(opts...)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices get_settings", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var wire settingsGetWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return nil, errors.Join(errors.New("decoding indices get_settings response"), err)
+	}
+
+	out := make([]types.IndexSettings, 0, len(wire))
+	for name, entry := range wire {
+		merged := mergeSettings(entry.Defaults, entry.Settings)
+		out = append(out, types.IndexSettings{
+			Index:    name,
+			Settings: merged,
+		})
+	}
+	return out, nil
+}
+
+// mergeSettings layers configured settings on top of defaults so the
+// returned map reflects the cluster's effective view. Either side may
+// be nil; both nil yields nil so JSON omitempty stays clean.
+func mergeSettings(defaults, settings map[string]any) map[string]any {
+	if len(defaults) == 0 && len(settings) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(defaults)+len(settings))
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for k, v := range settings {
+		out[k] = v
+	}
+	return out
+}
+
+// settingsPutWire mirrors the PUT /<indices>/_settings response. Both
+// dialects return only the acknowledged flag.
+type settingsPutWire struct {
+	Acknowledged bool `json:"acknowledged"`
+}
+
+// PutSettings implements client.IndexSettingsUpdater via
+// PUT /<indices>/_settings. Body is forwarded verbatim — the cluster
+// validates field names and the business layer only constrains the
+// outer shape ({"index":{...}}).
+func (c *Client) PutSettings(ctx context.Context, req types.IndexSettingsUpdateRequest) (types.IndexSettingsUpdateResult, error) {
+	ps := c.api.Indices.PutSettings
+	indices := esopsclient.SplitCSV(req.Index)
+	opts := []func(*esapi.IndicesPutSettingsRequest){ps.WithContext(ctx)}
+	if len(indices) > 0 {
+		opts = append(opts, ps.WithIndex(indices...))
+	}
+	if req.PreserveExisting {
+		opts = append(opts, ps.WithPreserveExisting(true))
+	}
+	if req.IgnoreUnavailable {
+		opts = append(opts, ps.WithIgnoreUnavailable(true))
+	}
+
+	resp, err := c.api.Indices.PutSettings(bytes.NewReader(req.Body), opts...)
+	if err != nil {
+		return types.IndexSettingsUpdateResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices put_settings", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexSettingsUpdateResult{}, err
+	}
+
+	var wire settingsPutWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexSettingsUpdateResult{}, errors.Join(errors.New("decoding indices put_settings response"), err)
+	}
+	return types.IndexSettingsUpdateResult{
+		Action:       "settings-update",
+		Indices:      indices,
+		Acknowledged: wire.Acknowledged,
+	}, nil
+}
+
+// indexTemplateGetWire mirrors the GET /_index_template[/<name>]
+// response. Both dialects return the same envelope.
+type indexTemplateGetWire struct {
+	IndexTemplates []struct {
+		Name          string `json:"name"`
+		IndexTemplate struct {
+			IndexPatterns []string       `json:"index_patterns"`
+			Template      map[string]any `json:"template"`
+			ComposedOf    []string       `json:"composed_of"`
+			Priority      int            `json:"priority"`
+			Version       int            `json:"version"`
+			DataStream    map[string]any `json:"data_stream"`
+		} `json:"index_template"`
+	} `json:"index_templates"`
+}
+
+// GetTemplates implements client.IndexTemplateInspector via
+// GET /_index_template/<names>. An empty names slice asks the cluster
+// for every template; a non-empty slice is joined with commas, which
+// the cluster honours as a multi-name lookup.
+func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.IndexTemplate, error) {
+	gt := c.api.Indices.GetIndexTemplate
+	opts := []func(*esapi.IndicesGetIndexTemplateRequest){gt.WithContext(ctx)}
+	if len(names) > 0 {
+		opts = append(opts, gt.WithName(strings.Join(names, ",")))
+	}
+
+	resp, err := c.api.Indices.GetIndexTemplate(opts...)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices get_index_template", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var wire indexTemplateGetWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return nil, errors.Join(errors.New("decoding indices get_index_template response"), err)
+	}
+
+	out := make([]types.IndexTemplate, 0, len(wire.IndexTemplates))
+	for _, t := range wire.IndexTemplates {
+		out = append(out, types.IndexTemplate{
+			Name:          t.Name,
+			IndexPatterns: t.IndexTemplate.IndexPatterns,
+			Priority:      t.IndexTemplate.Priority,
+			Version:       t.IndexTemplate.Version,
+			ComposedOf:    t.IndexTemplate.ComposedOf,
+			Template:      t.IndexTemplate.Template,
+			DataStream:    t.IndexTemplate.DataStream,
+		})
+	}
+	return out, nil
+}
+
+// templateAcknowledgedWire mirrors the response shape both PUT and
+// DELETE /_index_template return: a single acknowledged flag.
+type templateAcknowledgedWire struct {
+	Acknowledged bool `json:"acknowledged"`
+}
+
+// PutTemplate implements client.IndexTemplateUpdater via
+// PUT /_index_template/<name>. Body is forwarded verbatim — the
+// cluster validates the schema (settings/mappings/aliases nesting,
+// allowed fields). Create=true maps to ?create=true so the cluster
+// refuses on an existing name.
+func (c *Client) PutTemplate(ctx context.Context, req types.IndexTemplatePutRequest) (types.IndexTemplatePutResult, error) {
+	pt := c.api.Indices.PutIndexTemplate
+	opts := []func(*esapi.IndicesPutIndexTemplateRequest){pt.WithContext(ctx)}
+	if req.Create {
+		opts = append(opts, pt.WithCreate(true))
+	}
+
+	resp, err := c.api.Indices.PutIndexTemplate(req.Name, bytes.NewReader(req.Body), opts...)
+	if err != nil {
+		return types.IndexTemplatePutResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices put_index_template", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexTemplatePutResult{}, err
+	}
+
+	var wire templateAcknowledgedWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexTemplatePutResult{}, errors.Join(errors.New("decoding indices put_index_template response"), err)
+	}
+	return types.IndexTemplatePutResult{
+		Action:       "template-put",
+		Name:         req.Name,
+		Acknowledged: wire.Acknowledged,
+	}, nil
+}
+
+// DeleteTemplate implements client.IndexTemplateUpdater via
+// DELETE /_index_template/<name>. The ES typed client takes a slice;
+// we always pass a single-element slice — bulk deletes are deliberately
+// not supported, callers run the command once per name to keep shell
+// history greppable.
+func (c *Client) DeleteTemplate(ctx context.Context, req types.IndexTemplateDeleteRequest) (types.IndexTemplateDeleteResult, error) {
+	dt := c.api.Indices.DeleteIndexTemplate
+	resp, err := c.api.Indices.DeleteIndexTemplate([]string{req.Name}, dt.WithContext(ctx))
+	if err != nil {
+		return types.IndexTemplateDeleteResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices delete_index_template", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexTemplateDeleteResult{}, err
+	}
+
+	var wire templateAcknowledgedWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexTemplateDeleteResult{}, errors.Join(errors.New("decoding indices delete_index_template response"), err)
+	}
+	return types.IndexTemplateDeleteResult{
+		Action:       "template-delete",
+		Name:         req.Name,
+		Acknowledged: wire.Acknowledged,
+	}, nil
+}

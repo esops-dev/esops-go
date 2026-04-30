@@ -367,6 +367,140 @@ type IndexShrinkResult struct {
 	TargetShards       int    `json:"target_shards,omitempty" yaml:"target_shards,omitempty"`
 }
 
+// IndexSettings is one index's settings block from
+// GET /<indices>/_settings. Settings is the cluster's reported
+// settings JSON decoded into a map — the structure is hierarchical
+// (`index` → `number_of_shards`, `routing` → `allocation` → ...) and
+// callers walk it the same way they would walk the raw cluster
+// response. For table output the business layer flattens the map to
+// dotted keys; JSON/YAML render the nested shape verbatim.
+//
+// The cluster's response also carries a `defaults` block when
+// ?include_defaults=true; both blocks are merged here under Settings
+// so the consumer doesn't have to know whether the value came from the
+// configured set or a built-in default.
+type IndexSettings struct {
+	Index    string         `json:"index"    yaml:"index"`
+	Settings map[string]any `json:"settings" yaml:"settings"`
+}
+
+// IndexSettingsGetRequest narrows GET /<indices>/_settings/<names>.
+// Index is the comma-separated pattern the cluster receives. Names is
+// an optional list of setting key prefixes the cluster filters on
+// (e.g. "index.number_of_replicas"); empty returns the full settings
+// block.
+//
+// IncludeDefaults asks the cluster to add the built-in default values
+// the index inherits but doesn't override; useful for "is this knob
+// actually set, or am I looking at the default?". FlatSettings asks
+// the cluster to return dotted keys instead of nested objects — esops
+// flattens client-side regardless when rendering a table, but the flag
+// is forwarded so JSON output mirrors the cluster's chosen shape when
+// requested.
+type IndexSettingsGetRequest struct {
+	Index             string
+	Names             []string
+	IncludeDefaults   bool
+	FlatSettings      bool
+	IgnoreUnavailable bool
+}
+
+// IndexSettingsUpdateRequest is the input to a settings update via
+// PUT /<indices>/_settings. Index is the comma-separated pattern the
+// cluster receives; Body is the raw JSON the operator handed in (or
+// the business layer constructed from --set key=value pairs). The body
+// shape the cluster expects is {"index":{"<key>":<value>, ...}}.
+//
+// PreserveExisting maps to ?preserve_existing=true — when true, the
+// cluster keeps the current value for any key where Body would have
+// overwritten it. IgnoreUnavailable maps to ?ignore_unavailable=true.
+//
+// DryRun mirrors the global --dry-run flag — the cluster has no native
+// dry-run for /_settings, so dry-run is implemented client-side as
+// "validate + report" and Body is not sent to the cluster.
+type IndexSettingsUpdateRequest struct {
+	Index             string
+	Body              []byte
+	PreserveExisting  bool
+	IgnoreUnavailable bool
+}
+
+// IndexSettingsUpdateResult is the normalised view of a
+// PUT /<indices>/_settings response. The cluster only returns an
+// acknowledged flag; we surface the operator's resolved Index list so
+// a captured JSON record stays interpretable on its own.
+type IndexSettingsUpdateResult struct {
+	Action       string   `json:"action"        yaml:"action"`
+	DryRun       bool     `json:"dry_run"       yaml:"dry_run"`
+	Indices      []string `json:"indices"       yaml:"indices"`
+	Acknowledged bool     `json:"acknowledged"  yaml:"acknowledged"`
+	Body         string   `json:"body,omitempty" yaml:"body,omitempty"`
+}
+
+// IndexTemplate is the neutral view of one index template from
+// GET /_index_template/<name>. The shape mirrors what both ES and OS
+// expose under the v2 (composable) template API — legacy
+// /_template entries are out of scope; both products consider them
+// deprecated, and surfacing one set of templates keeps the CLI story
+// straight.
+//
+// Template carries the inner {settings, mappings, aliases} block as a
+// decoded map so callers can render it as nested JSON/YAML without
+// re-parsing. ComposedOf names the component templates this template
+// merges in. DataStream is set only when the template targets a data
+// stream.
+type IndexTemplate struct {
+	Name          string         `json:"name"                     yaml:"name"`
+	IndexPatterns []string       `json:"index_patterns,omitempty" yaml:"index_patterns,omitempty"`
+	Priority      int            `json:"priority,omitempty"       yaml:"priority,omitempty"`
+	Version       int            `json:"version,omitempty"        yaml:"version,omitempty"`
+	ComposedOf    []string       `json:"composed_of,omitempty"    yaml:"composed_of,omitempty"`
+	Template      map[string]any `json:"template,omitempty"       yaml:"template,omitempty"`
+	DataStream    map[string]any `json:"data_stream,omitempty"    yaml:"data_stream,omitempty"`
+}
+
+// IndexTemplatePutRequest is the input to a PUT /_index_template/<name>
+// call. Name is the literal template name (no patterns — templates are
+// updated one at a time). Body is the raw JSON template definition the
+// operator handed in. Create maps to ?create=true, which makes the
+// cluster refuse the call when a template with the same name already
+// exists — the safe-by-default flow for first-time installs in shell
+// pipelines.
+type IndexTemplatePutRequest struct {
+	Name   string
+	Body   []byte
+	Create bool
+}
+
+// IndexTemplatePutResult is the normalised view of a
+// PUT /_index_template/<name> response. The cluster only returns an
+// acknowledged flag; Name is echoed so a captured JSON record is
+// self-describing.
+type IndexTemplatePutResult struct {
+	Action       string `json:"action"             yaml:"action"`
+	DryRun       bool   `json:"dry_run"            yaml:"dry_run"`
+	Name         string `json:"name"               yaml:"name"`
+	Acknowledged bool   `json:"acknowledged"       yaml:"acknowledged"`
+}
+
+// IndexTemplateDeleteRequest is the input to a
+// DELETE /_index_template/<name> call. Name is the literal template
+// name; patterns are not supported — like PUT, deletes are per-template
+// to keep the destructive surface narrow.
+type IndexTemplateDeleteRequest struct {
+	Name string
+}
+
+// IndexTemplateDeleteResult is the normalised view of a
+// DELETE /_index_template/<name> response. Mirrors the put-result
+// shape for symmetry.
+type IndexTemplateDeleteResult struct {
+	Action       string `json:"action"             yaml:"action"`
+	DryRun       bool   `json:"dry_run"            yaml:"dry_run"`
+	Name         string `json:"name"               yaml:"name"`
+	Acknowledged bool   `json:"acknowledged"       yaml:"acknowledged"`
+}
+
 // Alias is the neutral view of one alias→index binding from
 // /_cat/aliases on both dialects. The shape mirrors the cat output
 // flat-row form: one alias name + one index name per record. An alias

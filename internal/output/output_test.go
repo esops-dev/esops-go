@@ -1002,3 +1002,246 @@ func TestAliasUpdate_tableShowsActionList(t *testing.T) {
 		}
 	}
 }
+
+func sampleIndexSettings() []types.IndexSettings {
+	return []types.IndexSettings{
+		{
+			Index: "logs-2024-12",
+			Settings: map[string]any{
+				"index": map[string]any{
+					"number_of_shards":   "1",
+					"number_of_replicas": "2",
+					"refresh_interval":   "30s",
+				},
+			},
+		},
+		{
+			Index: "logs-2024-11",
+			Settings: map[string]any{
+				"index": map[string]any{
+					"number_of_shards": "1",
+				},
+			},
+		},
+	}
+}
+
+func TestIndexSettings_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexSettings(&buf, sampleIndexSettings(), output.FormatJSON); err != nil {
+		t.Fatalf("IndexSettings: %v", err)
+	}
+	var rows []types.IndexSettings
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Errorf("len = %d, want 2", len(rows))
+	}
+}
+
+func TestIndexSettings_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexSettings(&buf, sampleIndexSettings(), output.FormatNDJSON); err != nil {
+		t.Fatalf("IndexSettings(ndjson): %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("ndjson lines = %d, want 2:\n%s", len(lines), buf.String())
+	}
+}
+
+func TestIndexSettings_tableFlattensKeys(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexSettings(&buf, sampleIndexSettings(), output.FormatTable); err != nil {
+		t.Fatalf("IndexSettings(table): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"INDEX", "KEY", "VALUE",
+		"index.number_of_shards",
+		"index.number_of_replicas",
+		"logs-2024-12",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexSettings_emptyShowsDash(t *testing.T) {
+	rows := []types.IndexSettings{{Index: "empty"}}
+	var buf bytes.Buffer
+	if err := output.IndexSettings(&buf, rows, output.FormatTable); err != nil {
+		t.Fatalf("IndexSettings: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "empty") || !strings.Contains(out, "-") {
+		t.Errorf("expected dash for empty settings:\n%s", out)
+	}
+}
+
+func TestIndexSettingsUpdate_table(t *testing.T) {
+	r := types.IndexSettingsUpdateResult{
+		Action:       "settings-update",
+		Indices:      []string{"logs-2024-12", "logs-2024-11"},
+		Acknowledged: true,
+	}
+	var buf bytes.Buffer
+	if err := output.IndexSettingsUpdate(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("IndexSettingsUpdate: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "INDICES", "logs-2024-12"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexSettingsUpdate_jsonContainsBody(t *testing.T) {
+	r := types.IndexSettingsUpdateResult{
+		Action:       "settings-update",
+		DryRun:       true,
+		Indices:      []string{"logs-*"},
+		Acknowledged: true,
+		Body:         `{"index":{"number_of_replicas":"2"}}`,
+	}
+	var buf bytes.Buffer
+	if err := output.IndexSettingsUpdate(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("IndexSettingsUpdate: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if got["body"] != r.Body {
+		t.Errorf("body = %v, want %v", got["body"], r.Body)
+	}
+}
+
+func sampleIndexTemplates() []types.IndexTemplate {
+	return []types.IndexTemplate{
+		{
+			Name:          "logs-v2",
+			IndexPatterns: []string{"logs-*"},
+			Priority:      100,
+			Version:       3,
+			ComposedOf:    []string{"logs-mappings", "logs-settings"},
+			Template: map[string]any{
+				"settings": map[string]any{
+					"number_of_shards": "1",
+				},
+			},
+		},
+		{
+			Name:          "events",
+			IndexPatterns: []string{"events-*", "metrics-*"},
+		},
+	}
+}
+
+func TestIndexTemplates_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexTemplates(&buf, sampleIndexTemplates(), output.FormatJSON); err != nil {
+		t.Fatalf("IndexTemplates: %v", err)
+	}
+	var got []types.IndexTemplate
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2", len(got))
+	}
+}
+
+func TestIndexTemplates_table(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexTemplates(&buf, sampleIndexTemplates(), output.FormatTable); err != nil {
+		t.Fatalf("IndexTemplates(table): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "PRIORITY", "logs-v2", "events"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexTemplates_wideAddsComposedOf(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexTemplates(&buf, sampleIndexTemplates(), output.FormatWide); err != nil {
+		t.Fatalf("IndexTemplates(wide): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"COMPOSED_OF", "logs-mappings", "DATA_STREAM"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexTemplate_singleDetail(t *testing.T) {
+	tpl := sampleIndexTemplates()[0]
+	var buf bytes.Buffer
+	if err := output.IndexTemplate(&buf, tpl, output.FormatTable); err != nil {
+		t.Fatalf("IndexTemplate: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "PRIORITY", "logs-v2", "logs-*"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("detail missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexTemplate_wideShowsBody(t *testing.T) {
+	tpl := sampleIndexTemplates()[0]
+	var buf bytes.Buffer
+	if err := output.IndexTemplate(&buf, tpl, output.FormatWide); err != nil {
+		t.Fatalf("IndexTemplate: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"TEMPLATE", "number_of_shards"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide-detail missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexTemplatePut_table(t *testing.T) {
+	r := types.IndexTemplatePutResult{
+		Action:       "template-put",
+		Name:         "logs-v2",
+		Acknowledged: true,
+	}
+	var buf bytes.Buffer
+	if err := output.IndexTemplatePut(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("IndexTemplatePut: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "NAME", "logs-v2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexTemplateDelete_jsonRoundTrips(t *testing.T) {
+	r := types.IndexTemplateDeleteResult{
+		Action:       "template-delete",
+		Name:         "logs-v2",
+		Acknowledged: true,
+	}
+	var buf bytes.Buffer
+	if err := output.IndexTemplateDelete(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("IndexTemplateDelete: %v", err)
+	}
+	var got types.IndexTemplateDeleteResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if got.Name != "logs-v2" {
+		t.Errorf("name = %q", got.Name)
+	}
+}

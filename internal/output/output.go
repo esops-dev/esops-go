@@ -392,6 +392,361 @@ func aliasUpdateTable(w io.Writer, r types.AliasUpdateResult, wide bool) error {
 	return aw.Flush()
 }
 
+// IndexSettings renders the read-only settings view from `esops index
+// settings get`. Table output flattens each index's nested settings
+// map to dotted keys (so the columns line up regardless of how deep a
+// setting nests) and emits one row per (index, key, value) triple.
+// JSON/YAML emit the neutral []IndexSettings shape directly. NDJSON
+// streams one IndexSettings record per line so a cluster with tens of
+// thousands of indices doesn't have to be parsed as a single blob.
+func IndexSettings(w io.Writer, rows []types.IndexSettings, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return indexSettingsTable(w, rows, true)
+	case FormatTable, "":
+		return indexSettingsTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexSettingsTable(w io.Writer, rows []types.IndexSettings, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "INDEX\tKEY\tVALUE")
+	for _, r := range rows {
+		flat := flattenSettings(r.Settings)
+		if len(flat) == 0 {
+			_, _ = fmt.Fprintf(tw, "%s\t-\t-\n", r.Index)
+			continue
+		}
+		keys := make([]string, 0, len(flat))
+		for k := range flat {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := settingValueString(flat[k])
+			if !wide {
+				v = truncate(v, 60)
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Index, k, v)
+		}
+	}
+	return tw.Flush()
+}
+
+// flattenSettings walks a nested settings map and produces a flat map
+// of dotted keys. Cluster responses commonly nest "index" → "routing"
+// → "allocation" → "require" → "_name"; the table flattening makes
+// "index.routing.allocation.require._name" greppable in one line.
+//
+// Leaves are returned as their decoded JSON value (string / number /
+// bool / nil / slice). Arrays are kept as slices so settingValueString
+// can render them compactly without losing the round-trip shape in
+// JSON output.
+func flattenSettings(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]any)
+	flattenInto(out, "", m)
+	return out
+}
+
+func flattenInto(out map[string]any, prefix string, v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		if len(t) == 0 {
+			out[prefix] = "{}"
+			return
+		}
+		for k, vv := range t {
+			next := k
+			if prefix != "" {
+				next = prefix + "." + k
+			}
+			flattenInto(out, next, vv)
+		}
+	default:
+		out[prefix] = v
+	}
+}
+
+// settingValueString renders a setting value the way scripts and
+// operators expect to see it: strings unquoted, numbers as their
+// canonical decoded form, slices joined by commas. Anything we don't
+// recognise falls through to fmt.Sprint.
+func settingValueString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return "-"
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			parts = append(parts, settingValueString(e))
+		}
+		return strings.Join(parts, ",")
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// IndexSettingsUpdate renders the outcome of `esops index settings
+// set`. Table format is a one-line header (action, dry-run, ack,
+// indices count) followed by the resolved index list. JSON/YAML emit
+// the neutral IndexSettingsUpdateResult shape directly.
+func IndexSettingsUpdate(w io.Writer, r types.IndexSettingsUpdateResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return indexSettingsUpdateTable(w, r, true)
+	case FormatTable, "":
+		return indexSettingsUpdateTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexSettingsUpdateTable(w io.Writer, r types.IndexSettingsUpdateResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tACKNOWLEDGED\tINDICES")
+	_, _ = fmt.Fprintf(hw, "%s\t%t\t%t\t%d\n",
+		r.Action, r.DryRun, r.Acknowledged, len(r.Indices),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if len(r.Indices) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "INDICES")
+		for _, name := range r.Indices {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+	if wide && r.Body != "" {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "BODY")
+		_, _ = fmt.Fprintf(w, "  %s\n", r.Body)
+	}
+	return nil
+}
+
+// IndexTemplates renders the cluster-side template list for
+// `esops index template list`. Table format is one row per template,
+// showing the columns operators reach for first (name, priority,
+// version, the count and first three index patterns). Wide adds the
+// composed_of list and the full pattern set. JSON/YAML emit the neutral
+// []IndexTemplate shape directly. NDJSON streams one record per line.
+func IndexTemplates(w io.Writer, rows []types.IndexTemplate, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return indexTemplatesTable(w, rows, true)
+	case FormatTable, "":
+		return indexTemplatesTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexTemplatesTable(w io.Writer, rows []types.IndexTemplate, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tPRIORITY\tVERSION\tINDEX_PATTERNS\tCOMPOSED_OF\tDATA_STREAM")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tPRIORITY\tVERSION\tINDEX_PATTERNS")
+	}
+	for _, r := range rows {
+		priority := "-"
+		if r.Priority > 0 {
+			priority = fmt.Sprintf("%d", r.Priority)
+		}
+		version := "-"
+		if r.Version > 0 {
+			version = fmt.Sprintf("%d", r.Version)
+		}
+		patterns := joinOrDash(r.IndexPatterns)
+		if !wide {
+			patterns = truncate(patterns, 50)
+		}
+		if wide {
+			ds := "no"
+			if len(r.DataStream) > 0 {
+				ds = "yes"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				r.Name, priority, version, patterns, joinOrDash(r.ComposedOf), ds)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				r.Name, priority, version, patterns)
+		}
+	}
+	return tw.Flush()
+}
+
+// IndexTemplate renders a single template — `esops index template get`.
+// JSON/YAML emit the neutral IndexTemplate shape directly. Table format
+// is a multi-section human view: a one-line header (name, priority,
+// version) followed by the index_patterns / composed_of lists and a
+// pretty-printed template body block. The body is rendered as
+// indented JSON so an operator pasting it into a ticket sees the same
+// shape they would feed back into `template put --from-file`.
+func IndexTemplate(w io.Writer, t types.IndexTemplate, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(t)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(t)
+	case FormatWide:
+		return indexTemplateDetail(w, t, true)
+	case FormatTable, "":
+		return indexTemplateDetail(w, t, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexTemplateDetail(w io.Writer, t types.IndexTemplate, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "NAME\tPRIORITY\tVERSION\tINDEX_PATTERNS\tCOMPOSED_OF")
+	priority := "-"
+	if t.Priority > 0 {
+		priority = fmt.Sprintf("%d", t.Priority)
+	}
+	version := "-"
+	if t.Version > 0 {
+		version = fmt.Sprintf("%d", t.Version)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%s\t%s\t%s\t%s\n",
+		t.Name, priority, version, joinOrDash(t.IndexPatterns), joinOrDash(t.ComposedOf))
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if !wide {
+		return nil
+	}
+	if len(t.Template) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "TEMPLATE")
+		buf, err := json.MarshalIndent(t.Template, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	if len(t.DataStream) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "DATA_STREAM")
+		buf, err := json.MarshalIndent(t.DataStream, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	return nil
+}
+
+// IndexTemplatePut renders the outcome of `esops index template put`.
+// One-line header (action, dry-run, name, ack). JSON/YAML emit the
+// neutral IndexTemplatePutResult shape directly.
+func IndexTemplatePut(w io.Writer, r types.IndexTemplatePutResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatTable, FormatWide, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tNAME\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Name), r.Acknowledged)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// IndexTemplateDelete mirrors IndexTemplatePut for the delete path.
+func IndexTemplateDelete(w io.Writer, r types.IndexTemplateDeleteResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatTable, FormatWide, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tNAME\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Name), r.Acknowledged)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
 // IndexRollover renders the outcome of `esops index rollover`. Table
 // format is a one-line header (alias, rolled_over, dry_run, old/new
 // index) followed by a per-condition table when the cluster reported
