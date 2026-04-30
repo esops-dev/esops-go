@@ -137,6 +137,59 @@ type IndexFilter struct {
 	Sort   IndexSort // ordering applied after filtering
 }
 
+// IndexStateAction names a single index lifecycle transition. The
+// values are the cluster's wire path segments ("_open", "_close") with
+// the underscore stripped — the rendered/logged form an operator types
+// at the CLI.
+type IndexStateAction string
+
+const (
+	IndexStateOpen  IndexStateAction = "open"
+	IndexStateClose IndexStateAction = "close"
+)
+
+// IndexStateChangeRequest is the input to an IndexStateChanger call.
+// Index is the comma-separated pattern the cluster receives (the same
+// shape /_cat/indices accepts); the business layer resolves it client-
+// side before the call to enforce the blast-radius limit and to render
+// a useful dry-run.
+//
+// IgnoreUnavailable maps to ?ignore_unavailable=true — useful when a
+// pattern legitimately matches nothing and the operator wants a no-op
+// rather than a 404. WaitForActiveShards is forwarded as-is to the
+// cluster (numeric like "1" or symbolic like "all"); empty leaves the
+// cluster default in place.
+type IndexStateChangeRequest struct {
+	Index               string
+	IgnoreUnavailable   bool
+	WaitForActiveShards string
+}
+
+// IndexStateChange is the normalised view of a /_open or /_close
+// response. Acknowledged is the cluster's own ack; ShardsAcknowledged
+// is populated by both ES and OS for these calls.
+//
+// Action is the verb the request submitted ("open" or "close") so a
+// captured JSON record is interpretable on its own. DryRun mirrors the
+// request's --dry-run flag — the cluster has no native dry-run for
+// these endpoints, so dry-run is implemented client-side as
+// "resolve + report"; a reader of the JSON shouldn't have to guess
+// which mode produced the record.
+//
+// Indices is the resolved list of index names the request would
+// transition (currently in the *opposite* state). Skipped is the list
+// the cluster would consider a no-op (already in the target state) —
+// surfaced so an operator running `index close --index logs-*` against
+// a mixed open/closed pattern sees what was actually changed.
+type IndexStateChange struct {
+	Action             IndexStateAction `json:"action"                yaml:"action"`
+	DryRun             bool             `json:"dry_run"               yaml:"dry_run"`
+	Acknowledged       bool             `json:"acknowledged"          yaml:"acknowledged"`
+	ShardsAcknowledged bool             `json:"shards_acknowledged"   yaml:"shards_acknowledged"`
+	Indices            []string         `json:"indices"               yaml:"indices"`
+	Skipped            []string         `json:"skipped,omitempty"     yaml:"skipped,omitempty"`
+}
+
 // AllocationExplainRequest narrows an AllocationExplainer.Explain call.
 // Zero value (Index == "") asks the cluster to pick any unassigned shard
 // it finds — this mirrors how operators usually invoke the endpoint when

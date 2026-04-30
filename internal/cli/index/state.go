@@ -1,0 +1,116 @@
+package index
+
+import (
+	"context"
+	"os"
+
+	"github.com/urfave/cli/v3"
+
+	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
+	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
+	"github.com/dj-wasabi/esops-go/internal/logging"
+	"github.com/dj-wasabi/esops-go/internal/output"
+	"github.com/dj-wasabi/esops-go/internal/types"
+)
+
+func openCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "open",
+		Usage: "Open one or more closed indices",
+		Description: `Transition closed indices back to the open state via /{index}/_open.
+Indices already open are skipped (reported under "skipped" in the
+result), so re-running the command is a safe no-op.
+
+Mutates cluster state. Use --dry-run first; against a prod-protected
+context, --i-know-this-is-prod is required.`,
+		Flags:  stateChangeFlags(),
+		Action: runStateChange(types.IndexStateOpen),
+	}
+}
+
+func closeCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "close",
+		Usage: "Close one or more open indices",
+		Description: `Transition open indices to the closed state via /{index}/_close.
+Closed indices stop accepting reads and writes and free their shard-
+level resources, while staying recoverable on disk.
+
+Mutates cluster state. The resolved pattern is capped at 20 indices
+by default — pass --max-indices N for larger sweeps. Use --dry-run
+first; against a prod-protected context, --i-know-this-is-prod is
+required.`,
+		Flags:  stateChangeFlags(),
+		Action: runStateChange(types.IndexStateClose),
+	}
+}
+
+// stateChangeFlags is the per-subcommand flag set shared by `index open`
+// and `index close`. --index is required (refused at the business layer
+// with a clear message anyway, but urfave's required:true gives the
+// faster "missing flag" message). --max-indices is the explicit opt-in
+// past the 20-index blast-radius cap; --ignore-unavailable and
+// --wait-for-active-shards are passed through to the cluster.
+func stateChangeFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:     "index",
+			Required: true,
+			Usage:    "Comma-separated index names or patterns (e.g. 'logs-2024-*,archive-2023')",
+		},
+		&cli.IntFlag{
+			Name:  "max-indices",
+			Usage: "Override the default 20-index blast-radius cap on the resolved pattern",
+		},
+		&cli.BoolFlag{
+			Name:  "ignore-unavailable",
+			Usage: "Treat missing indices as a no-op instead of a 404 error",
+		},
+		&cli.StringFlag{
+			Name:  "wait-for-active-shards",
+			Usage: "Forward to the cluster as ?wait_for_active_shards=<value> (numeric or 'all')",
+		},
+	}
+}
+
+// runStateChange returns an Action closure for the requested action.
+// Sharing the body keeps the open/close subcommands symmetric — there
+// is no command-specific behaviour beyond which verb is logged and
+// passed to the business layer.
+func runStateChange(action types.IndexStateAction) cli.ActionFunc {
+	return func(ctx context.Context, cmd *cli.Command) error {
+		s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+			Destructive:      true,
+			SupportedFormats: cmdsetup.FormatsStandard,
+		})
+		if err != nil {
+			return err
+		}
+
+		opts := esopsindex.StateChangeOptions{
+			Action:              action,
+			Pattern:             cmd.String("index"),
+			MaxIndices:          cmd.Int("max-indices"),
+			DryRun:              cmd.Bool("dry-run"),
+			IgnoreUnavailable:   cmd.Bool("ignore-unavailable"),
+			WaitForActiveShards: cmd.String("wait-for-active-shards"),
+		}
+
+		result, err := esopsindex.ChangeState(ctx, s.Client.Indices, s.Client.IndexState, opts)
+		if err != nil {
+			return err
+		}
+
+		logging.Logger().Info("index.state-change",
+			"context", s.ContextName,
+			"dialect", string(s.Client.Info.Dialect),
+			"version", s.Client.Info.Version,
+			"action", string(action),
+			"dry_run", result.DryRun,
+			"acknowledged", result.Acknowledged,
+			"changed", len(result.Indices),
+			"skipped", len(result.Skipped),
+		)
+		return output.IndexStateChange(os.Stdout, result, s.Format)
+	}
+}

@@ -60,7 +60,9 @@ certs-clean: ## Remove generated dev certs
 	rm -rf scripts/certs/out
 
 dev-up: certs ## Start local ES (:9200/:9201) + OS (:9202) + ES-mTLS (:9203) clusters
-	docker compose up -d --wait
+	docker compose up -d --wait es01 es02 os01 es-mtls
+	docker compose up -d es-mtls-setup
+	docker compose wait es-mtls-setup
 
 dev-down: ## Stop local dev clusters and remove their ephemeral state
 	docker compose down -v

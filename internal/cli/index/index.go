@@ -14,6 +14,8 @@ func Command() *cli.Command {
 		Usage: "Inspect and manage indices",
 		Commands: []*cli.Command{
 			listCommand(),
+			openCommand(),
+			closeCommand(),
 		},
 	}
 }
