@@ -840,3 +840,165 @@ func TestIndexRollover_rejectsNDJSON(t *testing.T) {
 		t.Fatal("IndexRollover(ndjson) should return 'not supported'")
 	}
 }
+
+func sampleShrink() types.IndexShrinkResult {
+	return types.IndexShrinkResult{
+		Action: "shrink", Source: "logs-2024", Target: "logs-2024-shrunk",
+		TargetShards: 1, Acknowledged: true, ShardsAcknowledged: true,
+	}
+}
+
+func TestIndexShrink_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexShrink(&buf, sampleShrink(), output.FormatJSON); err != nil {
+		t.Fatalf("IndexShrink(json): %v", err)
+	}
+	var got types.IndexShrinkResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Source != "logs-2024" || got.Target != "logs-2024-shrunk" {
+		t.Errorf("Source/Target round-trip = %q/%q", got.Source, got.Target)
+	}
+	if got.TargetShards != 1 {
+		t.Errorf("TargetShards = %d, want 1", got.TargetShards)
+	}
+}
+
+func TestIndexShrink_tableHasHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexShrink(&buf, sampleShrink(), output.FormatTable); err != nil {
+		t.Fatalf("IndexShrink(table): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "SOURCE", "TARGET", "logs-2024", "logs-2024-shrunk"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexShrink_rejectsNDJSON(t *testing.T) {
+	err := output.IndexShrink(&bytes.Buffer{}, sampleShrink(), output.FormatNDJSON)
+	if err == nil {
+		t.Fatal("IndexShrink(ndjson) should return 'not supported'")
+	}
+}
+
+func sampleAliases() []types.Alias {
+	return []types.Alias{
+		{Alias: "logs", Index: "logs-2024-12", IsWriteIndex: true},
+		{Alias: "logs", Index: "logs-2024-11"},
+		{Alias: "events-tenant-x", Index: "events-2024-12", Filter: `{"term":{"tenant":"x"}}`, RoutingIndex: "x", RoutingSearch: "x"},
+	}
+}
+
+func TestAliases_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Aliases(&buf, sampleAliases(), output.FormatJSON); err != nil {
+		t.Fatalf("Aliases(json): %v", err)
+	}
+	var got []types.Alias
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if len(got) != 3 {
+		t.Errorf("len(got) = %d, want 3", len(got))
+	}
+}
+
+func TestAliases_yamlIsValid(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Aliases(&buf, sampleAliases(), output.FormatYAML); err != nil {
+		t.Fatalf("Aliases(yaml): %v", err)
+	}
+	var got []types.Alias
+	if err := yaml.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid YAML: %v\n%s", err, buf.String())
+	}
+	if len(got) != 3 {
+		t.Errorf("len(got) = %d, want 3", len(got))
+	}
+}
+
+func TestAliases_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Aliases(&buf, sampleAliases(), output.FormatNDJSON); err != nil {
+		t.Fatalf("Aliases(ndjson): %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("ndjson lines = %d, want 3:\n%s", len(lines), buf.String())
+	}
+	for i, line := range lines {
+		var a types.Alias
+		if err := json.Unmarshal([]byte(line), &a); err != nil {
+			t.Errorf("line %d invalid JSON: %v (%q)", i, err, line)
+		}
+	}
+}
+
+func TestAliases_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Aliases(&buf, sampleAliases(), output.FormatTable); err != nil {
+		t.Fatalf("Aliases(table): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ALIAS", "INDEX", "WRITE_INDEX", "FILTERED", "logs-2024-12"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAliases_wideIncludesRoutingAndFilter(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Aliases(&buf, sampleAliases(), output.FormatWide); err != nil {
+		t.Fatalf("Aliases(wide): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ROUTING_INDEX", "ROUTING_SEARCH", "FILTER", `{"term":{"tenant":"x"}}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAliasUpdate_jsonIsStable(t *testing.T) {
+	r := types.AliasUpdateResult{
+		Action: "alias-update", Acknowledged: true,
+		Actions: []types.AliasUpdateAction{
+			{Action: types.AliasActionAdd, Alias: "logs", Index: "logs-2024-12"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := output.AliasUpdate(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("AliasUpdate(json): %v", err)
+	}
+	var got types.AliasUpdateResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if !got.Acknowledged || len(got.Actions) != 1 {
+		t.Errorf("round-trip = %+v", got)
+	}
+}
+
+func TestAliasUpdate_tableShowsActionList(t *testing.T) {
+	r := types.AliasUpdateResult{
+		Action: "alias-update", Acknowledged: true,
+		Actions: []types.AliasUpdateAction{
+			{Action: types.AliasActionAdd, Alias: "logs", Index: "logs-2024-12"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := output.AliasUpdate(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("AliasUpdate(table): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "ACKNOWLEDGED", "add", "logs", "logs-2024-12"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}

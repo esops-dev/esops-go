@@ -1471,3 +1471,291 @@ func hasDataRole(roles []string) bool {
 	}
 	return false
 }
+
+// shrinkWire mirrors a /<source>/_shrink/<target> response. Both ES
+// and OS return the same envelope: acknowledged + shards_acknowledged
+// + index (the new target name, echoed back).
+type shrinkWire struct {
+	Acknowledged       bool   `json:"acknowledged"`
+	ShardsAcknowledged bool   `json:"shards_acknowledged"`
+	Index              string `json:"index"`
+}
+
+// Shrink implements client.IndexShrinker via /<source>/_shrink/<target>.
+// Body shape is {settings: {index.number_of_shards, index.number_of_replicas}}
+// — aliases on the target are deferred to the separate `index aliases`
+// command rather than coupled to shrink, keeping the destructive
+// surface narrow.
+//
+// The cluster has no native dry-run for this endpoint; the business
+// layer covers --dry-run client-side. Implementations therefore only
+// need to execute the live shrink.
+func (c *Client) Shrink(ctx context.Context, req types.IndexShrinkRequest) (types.IndexShrinkResult, error) {
+	body, err := buildShrinkBody(req)
+	if err != nil {
+		return types.IndexShrinkResult{}, err
+	}
+
+	sh := c.api.Indices.Shrink
+	opts := []func(*esapi.IndicesShrinkRequest){sh.WithContext(ctx)}
+	if req.WaitForActiveShards != "" {
+		opts = append(opts, sh.WithWaitForActiveShards(req.WaitForActiveShards))
+	}
+
+	resp, err := c.api.Indices.Shrink(req.Source, bytes.NewReader(body), req.Target, opts...)
+	if err != nil {
+		return types.IndexShrinkResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices shrink", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexShrinkResult{}, err
+	}
+
+	var wire shrinkWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexShrinkResult{}, errors.Join(errors.New("decoding indices shrink response"), err)
+	}
+	return types.IndexShrinkResult{
+		Action:             "shrink",
+		Source:             req.Source,
+		Target:             req.Target,
+		Acknowledged:       wire.Acknowledged,
+		ShardsAcknowledged: wire.ShardsAcknowledged,
+		TargetShards:       req.TargetShards,
+	}, nil
+}
+
+// buildShrinkBody renders the JSON body the cluster expects on a
+// shrink call. We always set a non-empty settings block when the
+// operator named TargetShards or TargetReplicas — an empty settings
+// block is also valid (the cluster falls back to defaults), which is
+// what an unconditional `--shards 0` produces.
+//
+// CopySettings is not in the body — the cluster honours it as the
+// ?copy_settings=true query param. The ES typed client doesn't expose
+// a typed setter for it; rather than reaching for a raw query string
+// here, we surface the knob in the request type and document it as a
+// future add when an operator asks. The default (false) is what
+// scripts already expect.
+func buildShrinkBody(req types.IndexShrinkRequest) ([]byte, error) {
+	settings := make(map[string]any)
+	if req.TargetShards > 0 {
+		settings["index.number_of_shards"] = req.TargetShards
+	}
+	if req.TargetReplicas != nil {
+		settings["index.number_of_replicas"] = *req.TargetReplicas
+	}
+	body := map[string]any{}
+	if len(settings) > 0 {
+		body["settings"] = settings
+	}
+	return json.Marshal(body)
+}
+
+// catAliasesRow mirrors a /_cat/aliases?format=json row. Filter,
+// routing, and is_write_index columns return as bare strings on both
+// dialects; the cluster uses "-" for "not set" and "true"/"false" for
+// the boolean column. We normalise both forms here.
+type catAliasesRow struct {
+	Alias         string `json:"alias"`
+	Index         string `json:"index"`
+	Filter        string `json:"filter"`
+	RoutingIndex  string `json:"routing.index"`
+	RoutingSearch string `json:"routing.search"`
+	IsWriteIndex  string `json:"is_write_index"`
+}
+
+// aliasesColumns is the explicit h= selector for /_cat/aliases. _cat
+// APIs replace (not extend) the default column set when h is set, so
+// every field we surface has to be listed.
+var aliasesColumns = []string{
+	"alias", "index", "filter",
+	"routing.index", "routing.search", "is_write_index",
+}
+
+// Aliases implements client.AliasInspector via /_cat/aliases. Both
+// dialects accept name (alias) and index path filters; we forward the
+// AliasFilter Alias and Index fields verbatim.
+func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types.Alias, error) {
+	ca := c.api.Cat.Aliases
+	opts := []func(*esapi.CatAliasesRequest){
+		ca.WithContext(ctx),
+		ca.WithFormat("json"),
+		ca.WithH(aliasesColumns...),
+	}
+	if filter.Alias != "" {
+		opts = append(opts, ca.WithName(esopsclient.SplitCSV(filter.Alias)...))
+	}
+
+	resp, err := c.api.Cat.Aliases(opts...)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cat aliases", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var rows []catAliasesRow
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, errors.Join(errors.New("decoding cat aliases response"), err)
+	}
+	return rowsToAliases(rows, filter.Index), nil
+}
+
+// rowsToAliases maps the cat-aliases wire rows into the neutral
+// []types.Alias view, dropping the cluster's "-" sentinel for unset
+// fields and parsing is_write_index ("true"/"false"/"-") into a bool.
+//
+// indexFilter is applied client-side: /_cat/aliases takes a name path
+// segment for alias filtering but no index segment, so we filter to
+// match the AliasFilter contract on both dialects from one place.
+func rowsToAliases(rows []catAliasesRow, indexFilter string) []types.Alias {
+	wantedIndex := strings.TrimSpace(indexFilter)
+	wantedSet := map[string]struct{}{}
+	if wantedIndex != "" {
+		for _, name := range strings.Split(wantedIndex, ",") {
+			n := strings.TrimSpace(name)
+			if n != "" {
+				wantedSet[n] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]types.Alias, 0, len(rows))
+	for _, r := range rows {
+		if len(wantedSet) > 0 {
+			if _, ok := wantedSet[r.Index]; !ok {
+				continue
+			}
+		}
+		out = append(out, types.Alias{
+			Alias:         r.Alias,
+			Index:         r.Index,
+			Filter:        emptyOnDash(r.Filter),
+			RoutingIndex:  emptyOnDash(r.RoutingIndex),
+			RoutingSearch: emptyOnDash(r.RoutingSearch),
+			IsWriteIndex:  parseClusterBool(r.IsWriteIndex),
+		})
+	}
+	return out
+}
+
+// emptyOnDash maps the cluster's "-" sentinel to an empty string so
+// the JSON shape uses omitempty cleanly. Other values pass through
+// unchanged.
+func emptyOnDash(s string) string {
+	if s == "-" {
+		return ""
+	}
+	return s
+}
+
+// parseClusterBool maps the cluster's tri-state "true"/"false"/"-"
+// (or "") into a Go bool. Anything other than a literal "true" maps
+// to false — matching the cluster's own semantics for the
+// is_write_index column.
+func parseClusterBool(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), "true")
+}
+
+// updateAliasesWire mirrors the POST /_aliases response. Both dialects
+// return only the acknowledged flag.
+type updateAliasesWire struct {
+	Acknowledged bool `json:"acknowledged"`
+}
+
+// UpdateAliases implements client.AliasUpdater via POST /_aliases.
+// Body shape: {"actions":[{"<add|remove>":{<args>}}, ...]}.
+//
+// The cluster has no native dry-run for /_aliases; the business layer
+// implements --dry-run client-side as "validate + report" so the
+// adapter only executes live calls.
+func (c *Client) UpdateAliases(ctx context.Context, req types.AliasUpdateRequest) (types.AliasUpdateResult, error) {
+	body, err := buildUpdateAliasesBody(req.Actions)
+	if err != nil {
+		return types.AliasUpdateResult{}, err
+	}
+
+	ua := c.api.Indices.UpdateAliases
+	resp, err := c.api.Indices.UpdateAliases(bytes.NewReader(body), ua.WithContext(ctx))
+	if err != nil {
+		return types.AliasUpdateResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices update_aliases", resp.StatusCode, resp.Body); err != nil {
+		return types.AliasUpdateResult{}, err
+	}
+
+	var wire updateAliasesWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.AliasUpdateResult{}, errors.Join(errors.New("decoding update_aliases response"), err)
+	}
+	return types.AliasUpdateResult{
+		Action:       "alias-update",
+		Acknowledged: wire.Acknowledged,
+		Actions:      req.Actions,
+	}, nil
+}
+
+// buildUpdateAliasesBody renders the wire shape POST /_aliases expects.
+// Per-action argument keys (alias/index/filter/routing/is_write_index)
+// are written explicitly rather than reflecting over AliasUpdateAction
+// — the cluster validates field names and a stray extra key is a 400,
+// so listing the allowed set per action keeps the contract readable
+// here.
+//
+// Filter is parsed from the operator-supplied JSON string and embedded
+// as a JSON object, not a string — the cluster expects an object on
+// the wire. An empty Filter is omitted from the body.
+func buildUpdateAliasesBody(actions []types.AliasUpdateAction) ([]byte, error) {
+	wire := struct {
+		Actions []map[string]any `json:"actions"`
+	}{Actions: make([]map[string]any, 0, len(actions))}
+
+	for _, a := range actions {
+		args, err := aliasActionArgs(a)
+		if err != nil {
+			return nil, err
+		}
+		wire.Actions = append(wire.Actions, map[string]any{string(a.Action): args})
+	}
+	return json.Marshal(wire)
+}
+
+// aliasActionArgs returns the arg map for one alias action, keyed for
+// the cluster's expected JSON shape. Add carries the optional knobs
+// (filter/routing/is_write_index); remove only carries alias+index.
+func aliasActionArgs(a types.AliasUpdateAction) (map[string]any, error) {
+	switch a.Action {
+	case types.AliasActionAdd:
+		args := map[string]any{
+			"index": a.Index,
+			"alias": a.Alias,
+		}
+		if a.Filter != "" {
+			var f any
+			if err := json.Unmarshal([]byte(a.Filter), &f); err != nil {
+				return nil, fmt.Errorf("invalid alias filter JSON: %w", err)
+			}
+			args["filter"] = f
+		}
+		if a.Routing != "" {
+			args["routing"] = a.Routing
+		}
+		if a.IsWriteIndex != nil {
+			args["is_write_index"] = *a.IsWriteIndex
+		}
+		return args, nil
+	case types.AliasActionRemove:
+		return map[string]any{
+			"index": a.Index,
+			"alias": a.Alias,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported alias action %q (expected: add, remove)", a.Action)
+	}
+}

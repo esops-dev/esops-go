@@ -227,6 +227,171 @@ func indexOptimizeTable(w io.Writer, r types.IndexOptimizeResult, wide bool) err
 	return nil
 }
 
+// IndexShrink renders the outcome of `esops index shrink`. Table
+// format is a one-line header (action, dry-run, source, target, ack
+// flags, target shards). JSON/YAML emit the neutral
+// IndexShrinkResult shape directly.
+func IndexShrink(w io.Writer, r types.IndexShrinkResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return indexShrinkTable(w, r, true)
+	case FormatTable, "":
+		return indexShrinkTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexShrinkTable(w io.Writer, r types.IndexShrinkResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tSOURCE\tTARGET\tSHARDS\tACKNOWLEDGED\tSHARDS_ACK")
+	shards := "-"
+	if r.TargetShards > 0 {
+		shards = fmt.Sprintf("%d", r.TargetShards)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%s\t%s\t%t\t%t\n",
+		r.Action, r.DryRun,
+		dashIfEmpty(r.Source), dashIfEmpty(r.Target),
+		shards,
+		r.Acknowledged, r.ShardsAcknowledged,
+	)
+	_ = wide
+	return hw.Flush()
+}
+
+// Aliases renders the cat-aliases view for `esops index aliases list`.
+// Table output shows the columns operators reach for first (alias,
+// index, write-index flag, filter presence). Wide adds the routing
+// columns and the raw filter JSON. JSON/YAML emit the neutral Alias
+// slice; NDJSON writes one record per line so a cluster with tens of
+// thousands of aliases doesn't have to be parsed as one blob.
+func Aliases(w io.Writer, aliases []types.Alias, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(aliases)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, a := range aliases {
+			if err := enc.Encode(a); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(aliases)
+	case FormatWide:
+		return aliasesTable(w, aliases, true)
+	case FormatTable, "":
+		return aliasesTable(w, aliases, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func aliasesTable(w io.Writer, aliases []types.Alias, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ALIAS\tINDEX\tWRITE_INDEX\tROUTING_INDEX\tROUTING_SEARCH\tFILTER")
+	} else {
+		_, _ = fmt.Fprintln(tw, "ALIAS\tINDEX\tWRITE_INDEX\tFILTERED")
+	}
+	for _, a := range aliases {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%t\t%s\t%s\t%s\n",
+				a.Alias, a.Index, a.IsWriteIndex,
+				dashIfEmpty(a.RoutingIndex), dashIfEmpty(a.RoutingSearch),
+				dashIfEmpty(a.Filter),
+			)
+		} else {
+			filtered := "no"
+			if a.Filter != "" {
+				filtered = "yes"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%t\t%s\n",
+				a.Alias, a.Index, a.IsWriteIndex, filtered,
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// AliasUpdate renders the outcome of `esops index aliases add` /
+// `esops index aliases remove`. Table format is a one-line header
+// (action, dry-run, ack) followed by a per-action summary line. JSON/
+// YAML emit the neutral AliasUpdateResult shape directly.
+func AliasUpdate(w io.Writer, r types.AliasUpdateResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return aliasUpdateTable(w, r, true)
+	case FormatTable, "":
+		return aliasUpdateTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func aliasUpdateTable(w io.Writer, r types.AliasUpdateResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tACKNOWLEDGED\tACTIONS")
+	_, _ = fmt.Fprintf(hw, "%s\t%t\t%t\t%d\n",
+		r.Action, r.DryRun, r.Acknowledged, len(r.Actions),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	if len(r.Actions) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintln(w)
+	aw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(aw, "ACTION\tALIAS\tINDEX\tFILTER\tROUTING\tWRITE_INDEX")
+	} else {
+		_, _ = fmt.Fprintln(aw, "ACTION\tALIAS\tINDEX")
+	}
+	for _, a := range r.Actions {
+		if wide {
+			writeIndex := "-"
+			if a.IsWriteIndex != nil {
+				writeIndex = fmt.Sprintf("%t", *a.IsWriteIndex)
+			}
+			_, _ = fmt.Fprintf(aw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				a.Action, a.Alias, a.Index,
+				dashIfEmpty(a.Filter), dashIfEmpty(a.Routing), writeIndex,
+			)
+		} else {
+			_, _ = fmt.Fprintf(aw, "%s\t%s\t%s\n",
+				a.Action, a.Alias, a.Index,
+			)
+		}
+	}
+	return aw.Flush()
+}
+
 // IndexRollover renders the outcome of `esops index rollover`. Table
 // format is a one-line header (alias, rolled_over, dry_run, old/new
 // index) followed by a per-condition table when the cluster reported

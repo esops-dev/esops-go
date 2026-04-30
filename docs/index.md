@@ -1,8 +1,8 @@
 # index — inspect and manage indices
 
-`esops index` gives you `kubectl`-style commands for day-to-day index operations: listing, opening and closing, force-merging (optimize), and rolling aliases over.
+`esops index` gives you `kubectl`-style commands for day-to-day index operations: listing, opening and closing, force-merging (optimize), shrinking, rolling aliases over, and managing alias→index bindings.
 
-`esops index list` is read-only and safe to run on production at any time. `esops index open`, `esops index close`, `esops index optimize` and `esops index rollover` mutate cluster state — see the safety notes per command.
+`esops index list` and `esops index aliases list` are read-only and safe to run on production at any time. `esops index open`, `esops index close`, `esops index optimize`, `esops index rollover`, `esops index shrink`, and `esops index aliases add` / `esops index aliases remove` mutate cluster state — see the safety notes per command.
 
 See [config.md](./config.md) for context resolution and authentication.
 
@@ -296,3 +296,196 @@ Either at least one condition must be set, or `--force` must be passed. An uncon
 ```
 
 `old_index` / `new_index` come from the cluster — on a no-match dry-run, `new_index` may be empty. `conditions` echoes each submitted trigger and the cluster's verdict; an unconditional rollover (`--force`) returns it empty.
+
+---
+
+## esops index shrink
+
+Shrinks a source index into a new target index with fewer primary shards via `POST /<source>/_shrink/<target>`. The cluster hard-links segments rather than copying them — much cheaper than a reindex when the operator just needs to reduce primary shard count (the classic case is sealing an over-sharded daily index for archive).
+
+Works identically on Elasticsearch and OpenSearch.
+
+```sh
+$ esops index shrink --source esops-logs-2024-12 --target esops-logs-2024-12-shrunk --shards 1 --dry-run
+ACTION  DRY_RUN  SOURCE              TARGET                     SHARDS  ACKNOWLEDGED  SHARDS_ACK
+shrink  true     esops-logs-2024-12  esops-logs-2024-12-shrunk  1       true          true
+```
+
+`--dry-run` validates the request and reports what would be sent without contacting the shrink endpoint. The cluster has no native dry-run for `_shrink`, so dry-run is a client-side "validate + report" path.
+
+**Pre-flight requirements (operator-driven, not automated)**
+
+The cluster requires the source to be:
+
+- **read-only** (`index.blocks.write: true`)
+- **allocated with all primaries on a single node** (set `index.routing.allocation.require._name: <node>` and wait for the moves to complete)
+- have a primary shard count that is a **factor of `--shards`** (4→2, 4→1, 8→4, …)
+
+`esops` does **not** flip those settings automatically — they are policy decisions. The cluster surfaces its own canonical error if the source isn't ready, and that error is the right thing to read.
+
+**Safety**
+
+| Behaviour                  | Detail                                                                                                |
+|----------------------------|-------------------------------------------------------------------------------------------------------|
+| Literal names only         | `--source` and `--target` reject patterns (`*`, `_all`, `?`, etc.) — shrink is a per-index operation. |
+| Identical names            | `--source` and `--target` must differ.                                                                |
+| Negative `--shards` / `--replicas` | Refused with a usage error before the cluster sees the request.                               |
+| Protected contexts         | Against `protection: prod`, `--i-know-this-is-prod` is required. Exit code 9 otherwise.               |
+
+**Flags**
+
+| Flag                          | Purpose                                                                                          |
+|-------------------------------|--------------------------------------------------------------------------------------------------|
+| `--source` (required)         | Existing index to shrink (literal name)                                                          |
+| `--target` (required)         | New index name to create from the shrink (literal name)                                          |
+| `--shards N`                  | Number of primary shards on the target (must be a factor of source shards; 0 = cluster default) |
+| `--replicas N`                | Number of replicas on the target (omit to leave the cluster default; `0` keeps shrink cheap)     |
+| `--copy-settings`             | Copy compatible source settings to the target (`?copy_settings=true`)                            |
+| `--wait-for-active-shards V`  | Forwarded as `?wait_for_active_shards=V` (numeric or `all`)                                      |
+| `--dry-run` (global)          | Validate and report only — do not contact the shrink endpoint                                    |
+
+**Common use cases**
+
+- `esops index shrink --source esops-logs-2024-12 --target esops-logs-2024-12-shrunk --shards 1 --dry-run` – preview a sealed-archive shrink
+- `esops index shrink --source esops-events --target esops-events-1p --shards 1 --replicas 0 --i-know-this-is-prod` – minimise heap on a sealed prod archive
+- `esops index shrink --source esops-logs --target esops-logs-half --shards 2 -o json | jq '.acknowledged'` – capture a scriptable verdict
+
+**Output (`-o json`)**
+
+```json
+{
+  "action": "shrink",
+  "dry_run": false,
+  "source": "esops-logs-2024-12",
+  "target": "esops-logs-2024-12-shrunk",
+  "acknowledged": true,
+  "shards_acknowledged": true,
+  "target_shards": 1
+}
+```
+
+`target_shards` is omitted when 0 (cluster default).
+
+---
+
+## esops index aliases
+
+`esops index aliases` is the alias→index binding surface: `list` reads `/_cat/aliases`; `add` and `remove` post atomic actions to `POST /_aliases`.
+
+Works identically on Elasticsearch and OpenSearch.
+
+### esops index aliases list
+
+Lists alias→index bindings as flat rows: an alias fronting N indices materialises as N rows. Read-only and safe to run on a prod-protected context at any time.
+
+```sh
+$ esops index aliases list
+ALIAS                 INDEX                 WRITE_INDEX  FILTERED
+esops-events-tenant-x esops-events-2024-12  false        yes
+esops-logs            esops-logs-000001     false        no
+esops-logs            esops-logs-000002     true         no
+```
+
+**Filters**
+
+| Flag       | Purpose                                                                  |
+|------------|--------------------------------------------------------------------------|
+| `--alias`  | Limit to alias name(s) or pattern(s), comma-separated                    |
+| `--index`  | Limit to alias rows whose index matches one of these literal names       |
+
+**Output formats**
+
+- `-o table` (default) – human readable
+- `-o wide` – adds routing columns and the raw filter JSON
+- `-o json` / `-o yaml` – the neutral [`Alias`](../internal/types/types.go) shape
+- `-o ndjson` – one record per line (large clusters)
+
+**Common use cases**
+
+- `esops index aliases list --alias esops-logs` – inspect every backing index of a write alias
+- `esops index aliases list -o json | jq '.[] | select(.is_write_index)'` – find every write target across the cluster
+- `esops index aliases list -o wide` – inspect filtered/routed aliases at a glance
+
+### esops index aliases add
+
+Binds an alias to a single index. Mutates cluster state.
+
+```sh
+$ esops index aliases add --alias esops-logs --index esops-logs-2024-12 --is-write-index --dry-run
+ACTION        DRY_RUN  ACKNOWLEDGED  ACTIONS
+alias-update  true     true          1
+
+ACTION  ALIAS       INDEX
+add     esops-logs  esops-logs-2024-12
+```
+
+`--filter` accepts a JSON object (an Elasticsearch / OpenSearch query DSL fragment) to install a filtered alias. The fragment is parsed client-side — bad JSON is refused before the cluster sees the request — and otherwise embedded verbatim:
+
+```sh
+$ esops index aliases add --alias esops-tenant-x \
+    --index esops-events-2024-12 \
+    --filter '{"term":{"tenant":"x"}}' \
+    --routing tenant-x
+```
+
+**Safety**
+
+| Behaviour                | Detail                                                                                                  |
+|--------------------------|---------------------------------------------------------------------------------------------------------|
+| Literal names only       | `--alias` and `--index` reject patterns. For bulk operations, use the cluster's raw API.               |
+| Filter shape             | `--filter` must be a JSON object; arrays/strings are refused with a usage error.                        |
+| Protected contexts       | Against `protection: prod`, `--i-know-this-is-prod` is required. Exit code 9 otherwise.                 |
+
+**Flags**
+
+| Flag                  | Purpose                                                                          |
+|-----------------------|----------------------------------------------------------------------------------|
+| `--alias` (required)  | Alias name (literal)                                                              |
+| `--index` (required)  | Index name to bind (literal)                                                      |
+| `--filter`            | JSON filter object to install on the alias                                        |
+| `--routing`           | Routing value applied to indexing and search via this alias                       |
+| `--is-write-index`    | Mark this alias→index binding as the alias's write target                         |
+| `--dry-run` (global)  | Validate and report only — do not contact the cluster                             |
+
+### esops index aliases remove
+
+Removes a single alias→index binding.
+
+```sh
+$ esops index aliases remove --alias esops-logs --index esops-logs-2023-12
+ACTION        DRY_RUN  ACKNOWLEDGED  ACTIONS
+alias-update  false    true          1
+
+ACTION  ALIAS       INDEX
+remove  esops-logs  esops-logs-2023-12
+```
+
+To remove every binding for an alias, run remove once per index (or script over `esops index aliases list -o json`).
+
+**Flags**
+
+| Flag                  | Purpose                                                |
+|-----------------------|--------------------------------------------------------|
+| `--alias` (required)  | Alias name (literal)                                   |
+| `--index` (required)  | Index name to unbind (literal)                         |
+| `--dry-run` (global)  | Validate and report only — do not contact the cluster  |
+
+**Output (`-o json`)**
+
+```json
+{
+  "action": "alias-update",
+  "dry_run": false,
+  "acknowledged": true,
+  "actions": [
+    {
+      "action": "add",
+      "alias": "esops-logs",
+      "index": "esops-logs-2024-12",
+      "is_write_index": true
+    }
+  ]
+}
+```
+
+`actions` echoes the request's actions list back so a captured JSON record is interpretable on its own.

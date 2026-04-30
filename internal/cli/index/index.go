@@ -18,6 +18,8 @@ func Command() *cli.Command {
 			closeCommand(),
 			optimizeCommand(),
 			rolloverCommand(),
+			shrinkCommand(),
+			aliasesCommand(),
 		},
 	}
 }
