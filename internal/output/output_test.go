@@ -739,3 +739,104 @@ func TestAudit_rejectsNDJSON(t *testing.T) {
 		t.Fatal("Audit(ndjson) should return 'not supported'")
 	}
 }
+
+func sampleOptimize() types.IndexOptimizeResult {
+	return types.IndexOptimizeResult{
+		Action: "optimize", DryRun: false,
+		Indices:        []string{"esops-logs-000001", "esops-products"},
+		MaxNumSegments: 1,
+		ShardsTotal:    3, ShardsSuccess: 3,
+	}
+}
+
+func TestIndexOptimize_jsonHasStableFields(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexOptimize(&buf, sampleOptimize(), output.FormatJSON); err != nil {
+		t.Fatalf("IndexOptimize: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, field := range []string{"action", "dry_run", "indices", "shards_total", "shards_successful", "shards_failed"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in JSON:\n%s", field, buf.String())
+		}
+	}
+}
+
+func TestIndexOptimize_tableHasHeaderAndIndices(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexOptimize(&buf, sampleOptimize(), output.FormatTable); err != nil {
+		t.Fatalf("IndexOptimize: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "DRY_RUN", "INDICES", "SHARDS_OK", "esops-logs-000001"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexOptimize_tableShowsFailures(t *testing.T) {
+	r := sampleOptimize()
+	r.Failures = []string{"esops-archive: skipped (closed index — open it first to optimize)"}
+	var buf bytes.Buffer
+	if err := output.IndexOptimize(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("IndexOptimize: %v", err)
+	}
+	if !strings.Contains(buf.String(), "FAILURES") {
+		t.Errorf("missing FAILURES section:\n%s", buf.String())
+	}
+}
+
+func TestIndexOptimize_rejectsNDJSON(t *testing.T) {
+	err := output.IndexOptimize(&bytes.Buffer{}, sampleOptimize(), output.FormatNDJSON)
+	if err == nil {
+		t.Fatal("IndexOptimize(ndjson) should return 'not supported'")
+	}
+}
+
+func sampleRollover() types.IndexRolloverResult {
+	return types.IndexRolloverResult{
+		Alias: "esops-logs", RolledOver: true, DryRun: false, Acknowledged: true, ShardsAcknowledged: true,
+		OldIndex: "esops-logs-000001", NewIndex: "esops-logs-000002",
+		ConditionsMet: map[string]bool{"max_age": true, "max_docs": false},
+	}
+}
+
+func TestIndexRollover_jsonHasStableFields(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexRollover(&buf, sampleRollover(), output.FormatJSON); err != nil {
+		t.Fatalf("IndexRollover: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, field := range []string{"alias", "rolled_over", "dry_run", "acknowledged", "old_index", "new_index"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in JSON:\n%s", field, buf.String())
+		}
+	}
+}
+
+func TestIndexRollover_tableHasHeaderAndConditions(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IndexRollover(&buf, sampleRollover(), output.FormatTable); err != nil {
+		t.Fatalf("IndexRollover: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ALIAS", "ROLLED_OVER", "esops-logs-000002", "CONDITIONS", "max_age"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexRollover_rejectsNDJSON(t *testing.T) {
+	err := output.IndexRollover(&bytes.Buffer{}, sampleRollover(), output.FormatNDJSON)
+	if err == nil {
+		t.Fatal("IndexRollover(ndjson) should return 'not supported'")
+	}
+}

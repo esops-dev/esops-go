@@ -190,6 +190,127 @@ type IndexStateChange struct {
 	Skipped            []string         `json:"skipped,omitempty"     yaml:"skipped,omitempty"`
 }
 
+// IndexOptimizeRequest is the input to an IndexOptimizer.ForceMerge call.
+// Index is the comma-separated pattern the cluster receives (the same
+// shape /_cat/indices accepts); the business layer resolves it client-
+// side before the call to enforce the blast-radius limit and render a
+// useful dry-run.
+//
+// MaxNumSegments forwards to ?max_num_segments=N. The cluster default
+// is dynamic ("merge until it doesn't help any more"); the typical
+// operator value for a sealed-archive merge is 1. A zero value here
+// means "let the cluster decide".
+//
+// OnlyExpungeDeletes maps to ?only_expunge_deletes=true — the cheap
+// variant that only rewrites segments holding tombstoned docs. Useful
+// after a delete-by-query sweep on an otherwise-stable index.
+//
+// Flush mirrors ?flush=true|false. The cluster default is true; we
+// keep that behaviour with a *bool so the operator can suppress it.
+//
+// IgnoreUnavailable maps to ?ignore_unavailable=true — useful when a
+// pattern legitimately matches nothing and the operator wants a no-op
+// rather than a 404.
+type IndexOptimizeRequest struct {
+	Index              string
+	MaxNumSegments     int
+	OnlyExpungeDeletes bool
+	Flush              *bool
+	IgnoreUnavailable  bool
+}
+
+// IndexOptimizeResult is the normalised view of a /_forcemerge
+// response. Both ES and OS return a {_shards:{total,successful,failed}}
+// envelope; on synchronous calls, failed > 0 means at least one shard
+// hit a merge error which the cluster carries in Failures.
+//
+// Action is fixed to "optimize" so a captured JSON record is
+// interpretable alongside an IndexStateChange capture. DryRun mirrors
+// the request's --dry-run flag — the cluster has no native dry-run for
+// _forcemerge, so dry-run is implemented client-side as
+// "resolve + report".
+//
+// Indices is the resolved list of index names the request targeted
+// (the same names sent to the cluster). Per-shard failure descriptors
+// are kept opaque (Failures []string) — the cluster's own reasons are
+// the right thing to surface in a ticket and rephrasing them would
+// lose signal.
+type IndexOptimizeResult struct {
+	Action          string   `json:"action"                  yaml:"action"`
+	DryRun          bool     `json:"dry_run"                 yaml:"dry_run"`
+	Indices         []string `json:"indices"                 yaml:"indices"`
+	MaxNumSegments  int      `json:"max_num_segments,omitempty" yaml:"max_num_segments,omitempty"`
+	ShardsTotal     int      `json:"shards_total"            yaml:"shards_total"`
+	ShardsSuccess   int      `json:"shards_successful"       yaml:"shards_successful"`
+	ShardsFailed    int      `json:"shards_failed"           yaml:"shards_failed"`
+	Failures        []string `json:"failures,omitempty"      yaml:"failures,omitempty"`
+}
+
+// IndexRolloverConditions are the rollover triggers the cluster
+// evaluates against the alias's current write index. All fields are
+// zero-valued by default; a zero value means "no condition on this
+// dimension". When every condition is zero the cluster always rolls
+// over (the unconditional form). The business layer enforces "either
+// at least one condition or --force" so an absent-mindedly-typed
+// `index rollover --alias logs` doesn't roll a freshly-created index.
+//
+// MaxAge is forwarded as a duration string ("7d", "1h"). MaxDocs is a
+// document count; MaxSize/MaxPrimarySize are strings forwarded
+// verbatim (e.g. "50gb") — the cluster parses them. Strings rather
+// than typed bytes because both ES and OS accept the same human-size
+// notation, and parsing it client-side would risk drift.
+type IndexRolloverConditions struct {
+	MaxAge         string `json:"max_age,omitempty"          yaml:"max_age,omitempty"`
+	MaxDocs        int64  `json:"max_docs,omitempty"         yaml:"max_docs,omitempty"`
+	MaxSize        string `json:"max_size,omitempty"         yaml:"max_size,omitempty"`
+	MaxPrimarySize string `json:"max_primary_size,omitempty" yaml:"max_primary_size,omitempty"`
+}
+
+// IsEmpty reports whether the conditions block carries no triggers —
+// i.e. an unconditional rollover. The CLI uses this to require an
+// explicit --force opt-in for that case.
+func (c IndexRolloverConditions) IsEmpty() bool {
+	return c.MaxAge == "" && c.MaxDocs == 0 && c.MaxSize == "" && c.MaxPrimarySize == ""
+}
+
+// IndexRolloverRequest is the input to an IndexRollover call. Alias is
+// the rollover target — the cluster looks up the current write index
+// behind the alias and either rolls it over or refuses with a reason
+// when no conditions match. NewIndex is optional: the cluster derives
+// a sensible name from the existing index when it ends in `-NNNNNN`,
+// so this is only set when the operator wants to override.
+//
+// DryRun maps to the cluster's native ?dry_run=true — unlike open/close
+// the cluster evaluates conditions and reports rolled_over without
+// actually creating the new index. WaitForActiveShards forwards as-is.
+type IndexRolloverRequest struct {
+	Alias               string
+	NewIndex            string
+	Conditions          IndexRolloverConditions
+	DryRun              bool
+	WaitForActiveShards string
+}
+
+// IndexRolloverResult is the normalised view of an /<alias>/_rollover
+// response. RolledOver is the cluster's own verdict — false means the
+// conditions did not match (and on a non-dry-run, no index was
+// created). DryRun mirrors the request flag.
+//
+// ConditionsMet maps each condition the operator submitted to the
+// cluster's per-condition outcome (e.g. "max_age": true). Empty for
+// the unconditional form. The keys come straight from the cluster so
+// captured JSON stays interpretable alongside Elastic/OpenSearch docs.
+type IndexRolloverResult struct {
+	Alias              string          `json:"alias"               yaml:"alias"`
+	OldIndex           string          `json:"old_index,omitempty" yaml:"old_index,omitempty"`
+	NewIndex           string          `json:"new_index,omitempty" yaml:"new_index,omitempty"`
+	RolledOver         bool            `json:"rolled_over"         yaml:"rolled_over"`
+	DryRun             bool            `json:"dry_run"             yaml:"dry_run"`
+	Acknowledged       bool            `json:"acknowledged"        yaml:"acknowledged"`
+	ShardsAcknowledged bool            `json:"shards_acknowledged" yaml:"shards_acknowledged"`
+	ConditionsMet      map[string]bool `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+}
+
 // AllocationExplainRequest narrows an AllocationExplainer.Explain call.
 // Zero value (Index == "") asks the cluster to pick any unassigned shard
 // it finds — this mirrors how operators usually invoke the endpoint when

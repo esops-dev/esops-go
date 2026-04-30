@@ -1,8 +1,8 @@
 # index — inspect and manage indices
 
-`esops index` gives you `kubectl`-style commands for day-to-day index operations: listing, opening and closing, and (in future releases) rollover, shrink, and delete.
+`esops index` gives you `kubectl`-style commands for day-to-day index operations: listing, opening and closing, force-merging (optimize), and rolling aliases over.
 
-`esops index list` is read-only and safe to run on production at any time. `esops index open` and `esops index close` mutate cluster state — see the safety notes per command.
+`esops index list` is read-only and safe to run on production at any time. `esops index open`, `esops index close`, `esops index optimize` and `esops index rollover` mutate cluster state — see the safety notes per command.
 
 See [config.md](./config.md) for context resolution and authentication.
 
@@ -149,3 +149,150 @@ Same as `index close`: `--index` (required), `--max-indices`, `--ignore-unavaila
 ```
 
 `indices` is the changed set; `skipped` is omitted when empty.
+
+---
+
+## esops index optimize
+
+Force-merges open indices via `POST /{index}/_forcemerge` to reduce their segment count. The classic use case is sealing a rotated index after it stops receiving writes — merging to one segment recovers heap, reduces file-handle pressure, and speeds up small-shard searches.
+
+Works identically on Elasticsearch and OpenSearch.
+
+```sh
+$ esops index optimize --index 'esops-logs-2024-*' --max-num-segments 1 --dry-run
+ACTION    DRY_RUN  INDICES  MAX_SEGMENTS  SHARDS_OK  SHARDS_FAILED
+optimize  true     3        1             0          0
+
+INDICES
+  esops-logs-2024-10
+  esops-logs-2024-11
+  esops-logs-2024-12
+```
+
+`--dry-run` resolves the pattern client-side via `/_cat/indices` and reports what would be merged without contacting the force-merge endpoint. Re-run without `--dry-run` to apply.
+
+A force-merge is **I/O-intensive**: it can saturate disk on the affected nodes and slow reads while it runs. Run during a quiet window, or against a dedicated archive tier.
+
+**Closed indices** in the resolved pattern are surfaced under `failures` and skipped — `_forcemerge` against a closed index is a 400 on both dialects, so we report the skip rather than letting one bad index break the whole sweep. Open them first with `esops index open` if you intended to merge them.
+
+**Safety**
+
+| Behaviour                   | Detail                                                                                                              |
+|-----------------------------|---------------------------------------------------------------------------------------------------------------------|
+| Blast-radius cap            | Refuses when the resolved pattern matches more than **20** open indices unless `--max-indices N` is set. Exit code 8. |
+| Match-everything patterns   | `*` and `_all` are refused outright with exit code 8 — name a narrower pattern.                                     |
+| Closed indices              | Skipped (reported under `failures`); the merge call sent to the cluster only includes open indices.                 |
+| Protected contexts          | Against `protection: prod`, `--i-know-this-is-prod` is required. Exit code 9 otherwise.                             |
+
+**Flags**
+
+| Flag                       | Purpose                                                                                              |
+|----------------------------|------------------------------------------------------------------------------------------------------|
+| `--index` (required)       | Comma-separated index names or patterns                                                              |
+| `--max-indices N`          | Override the 20-index blast-radius cap                                                               |
+| `--max-num-segments N`     | Merge each shard down to N segments (1 is the typical sealed-archive value; omit to use the cluster default) |
+| `--only-expunge-deletes`   | Only rewrite segments holding tombstoned docs (`?only_expunge_deletes=true`) — cheap variant after a delete-by-query |
+| `--no-flush`               | Skip the post-merge flush (`?flush=false`; the cluster default is to flush)                          |
+| `--ignore-unavailable`     | Treat missing indices as a no-op (`?ignore_unavailable=true`)                                        |
+| `--dry-run` (global)       | Resolve and report only — do not contact the force-merge endpoint                                    |
+
+**Common use cases**
+
+- `esops index optimize --index 'esops-logs-2024-*' --max-num-segments 1 --dry-run` – preview a sealed-archive merge
+- `esops index optimize --index esops-archive-2024 --max-num-segments 1 --i-know-this-is-prod` – seal one rotated index in prod
+- `esops index optimize --index esops-events --only-expunge-deletes` – cheap cleanup after a delete-by-query
+- `esops index optimize --index 'esops-cold-*' --max-indices 200` – larger archive sweep with explicit opt-in
+- `esops index optimize --index 'esops-logs-*' -o json | jq '.shards_failed'` – check for per-shard merge failures
+
+**Output (`-o json`)**
+
+```json
+{
+  "action": "optimize",
+  "dry_run": false,
+  "indices": ["esops-logs-2024-10", "esops-logs-2024-11"],
+  "max_num_segments": 1,
+  "shards_total": 6,
+  "shards_successful": 6,
+  "shards_failed": 0
+}
+```
+
+`failures` is omitted when empty; per-shard cluster errors and closed-index skips are surfaced there.
+
+---
+
+## esops index rollover
+
+Rolls an alias's current write index over to a new generation via `POST /<alias>/_rollover`. The cluster evaluates the submitted conditions against the alias's current write index and either creates the next generation (rolling the alias forward) or reports which condition(s) didn't match.
+
+Works identically on Elasticsearch and OpenSearch.
+
+```sh
+$ esops index rollover --alias esops-logs --max-age 7d --max-docs 1000000 --dry-run
+ALIAS       ROLLED_OVER  DRY_RUN  ACKNOWLEDGED  OLD_INDEX           NEW_INDEX
+esops-logs  true         true     true          esops-logs-000001   esops-logs-000002
+
+CONDITIONS
+CONDITION  MET
+max_age    true
+max_docs   false
+```
+
+The cluster has a **native `?dry_run=true`** for `_rollover`, so unlike `index open` / `index close` the dry-run isn't synthesised client-side: the cluster evaluates conditions against real metadata and reports which ones matched without creating the new index.
+
+**Conditions**
+
+| Flag                     | Wire param                | Purpose                                                                |
+|--------------------------|---------------------------|------------------------------------------------------------------------|
+| `--max-age DURATION`     | `max_age`                 | Roll over when the current write index is older than DURATION (`7d`, `1h`) |
+| `--max-docs N`           | `max_docs`                | Roll over when the current write index reaches N documents             |
+| `--max-size SIZE`        | `max_size`                | Roll over when the index reaches SIZE (`50gb`)                         |
+| `--max-primary-size SIZE`| `max_primary_shard_size`  | Roll over when any primary shard reaches SIZE (`25gb`)                 |
+
+Either at least one condition must be set, or `--force` must be passed. An unconditional rollover is a real lever — it's used when an external scheduler decides cutover timing — but a typo like `index rollover --alias logs` shouldn't quietly roll a fresh index. The flag forces the operator to acknowledge the intent in shell history.
+
+**Other flags**
+
+| Flag                          | Purpose                                                                                                |
+|-------------------------------|--------------------------------------------------------------------------------------------------------|
+| `--alias` (required)          | Alias whose current write index will be rolled over                                                    |
+| `--new-index NAME`            | Override the cluster's default name for the new write index (rarely needed; the cluster auto-increments names ending in `-NNNNNN`) |
+| `--force`                     | Acknowledge an unconditional rollover when no `--max-*` flag is set                                    |
+| `--wait-for-active-shards V`  | Forwarded as `?wait_for_active_shards=V` (numeric or `all`)                                            |
+| `--dry-run` (global)          | Forwarded to the cluster's native `?dry_run=true`; conditions are evaluated, no new index is created   |
+
+**Safety**
+
+| Behaviour                   | Detail                                                                                                  |
+|-----------------------------|---------------------------------------------------------------------------------------------------------|
+| Unconditional rollover      | Refused unless `--force` is set, since a no-condition rollover always creates a new write index         |
+| Protected contexts          | Against `protection: prod`, `--i-know-this-is-prod` is required for the live rollover. Exit code 9.     |
+| Negative `--max-docs`       | Refused with a usage error — the cluster would reject it anyway, but failing fast keeps the message specific |
+
+**Common use cases**
+
+- `esops index rollover --alias esops-logs --max-age 7d --max-docs 1000000 --dry-run` – preview a daily/size-capped rollover policy
+- `esops index rollover --alias esops-logs --max-primary-size 25gb --i-know-this-is-prod` – production rollover gated on shard size
+- `esops index rollover --alias esops-events --force --i-know-this-is-prod` – manual cutover scheduled by an external job
+- `esops index rollover --alias esops-logs --max-age 7d -o json | jq '.rolled_over'` – check whether the alias actually rolled
+
+**Output (`-o json`)**
+
+```json
+{
+  "alias": "esops-logs",
+  "old_index": "esops-logs-000001",
+  "new_index": "esops-logs-000002",
+  "rolled_over": true,
+  "dry_run": false,
+  "acknowledged": true,
+  "shards_acknowledged": true,
+  "conditions": {
+    "max_age": true,
+    "max_docs": false
+  }
+}
+```
+
+`old_index` / `new_index` come from the cluster — on a no-match dry-run, `new_index` may be empty. `conditions` echoes each submitted trigger and the cluster's verdict; an unconditional rollover (`--force`) returns it empty.

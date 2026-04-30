@@ -338,6 +338,166 @@ func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeReque
 	}, nil
 }
 
+// forcemergeWire mirrors a /_forcemerge response. Both ES and OS use
+// the standard {_shards:{...}} shape with an optional failures[] block.
+// Each failure carries a free-form reason from the cluster — kept as
+// json.RawMessage on the wire so we can render it to the operator
+// without baking version-specific parsing into esops.
+type forcemergeWire struct {
+	Shards struct {
+		Total      int `json:"total"`
+		Successful int `json:"successful"`
+		Failed     int `json:"failed"`
+		Failures   []struct {
+			Index  string          `json:"index"`
+			Shard  int             `json:"shard"`
+			Status string          `json:"status"`
+			Reason json.RawMessage `json:"reason"`
+		} `json:"failures"`
+	} `json:"_shards"`
+}
+
+// ForceMerge implements client.IndexOptimizer via /{index}/_forcemerge.
+//
+// The cluster has no native dry-run for this endpoint; the business
+// layer implements --dry-run client-side by resolving the pattern via
+// IndexInspector and reporting the would-be merge without firing the
+// call. Implementations therefore only need to execute the live merge.
+func (c *Client) ForceMerge(ctx context.Context, req types.IndexOptimizeRequest) (types.IndexOptimizeResult, error) {
+	fm := c.api.Indices.Forcemerge
+	indices := esopsclient.SplitCSV(req.Index)
+	opts := []func(*esapi.IndicesForcemergeRequest){fm.WithContext(ctx)}
+	if len(indices) > 0 {
+		opts = append(opts, fm.WithIndex(indices...))
+	}
+	if req.MaxNumSegments > 0 {
+		opts = append(opts, fm.WithMaxNumSegments(req.MaxNumSegments))
+	}
+	if req.OnlyExpungeDeletes {
+		opts = append(opts, fm.WithOnlyExpungeDeletes(true))
+	}
+	if req.Flush != nil {
+		opts = append(opts, fm.WithFlush(*req.Flush))
+	}
+	if req.IgnoreUnavailable {
+		opts = append(opts, fm.WithIgnoreUnavailable(true))
+	}
+
+	resp, err := c.api.Indices.Forcemerge(opts...)
+	if err != nil {
+		return types.IndexOptimizeResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices forcemerge", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexOptimizeResult{}, err
+	}
+
+	var wire forcemergeWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexOptimizeResult{}, errors.Join(errors.New("decoding indices forcemerge response"), err)
+	}
+
+	out := types.IndexOptimizeResult{
+		Action:        "optimize",
+		ShardsTotal:   wire.Shards.Total,
+		ShardsSuccess: wire.Shards.Successful,
+		ShardsFailed:  wire.Shards.Failed,
+	}
+	for _, f := range wire.Shards.Failures {
+		out.Failures = append(out.Failures, fmt.Sprintf("%s[%d] %s: %s", f.Index, f.Shard, f.Status, string(f.Reason)))
+	}
+	return out, nil
+}
+
+// rolloverWire mirrors a /<alias>/_rollover response. ES and OS both
+// return the same envelope: acknowledged + shards_acknowledged +
+// old_index/new_index + rolled_over + dry_run + a per-condition
+// outcome map.
+type rolloverWire struct {
+	Acknowledged       bool            `json:"acknowledged"`
+	ShardsAcknowledged bool            `json:"shards_acknowledged"`
+	OldIndex           string          `json:"old_index"`
+	NewIndex           string          `json:"new_index"`
+	RolledOver         bool            `json:"rolled_over"`
+	DryRun             bool            `json:"dry_run"`
+	Conditions         map[string]bool `json:"conditions"`
+}
+
+// Rollover implements client.IndexRollover via /<alias>/_rollover.
+// The body shape is {"conditions":{...}}; an empty conditions map is
+// the unconditional form (the cluster always rolls over). The business
+// layer guards against unintentional unconditional calls; this adapter
+// just serialises whatever the request describes.
+func (c *Client) Rollover(ctx context.Context, req types.IndexRolloverRequest) (types.IndexRolloverResult, error) {
+	body, err := buildRolloverBody(req.Conditions)
+	if err != nil {
+		return types.IndexRolloverResult{}, err
+	}
+
+	ro := c.api.Indices.Rollover
+	opts := []func(*esapi.IndicesRolloverRequest){
+		ro.WithContext(ctx),
+		ro.WithBody(bytes.NewReader(body)),
+	}
+	if req.NewIndex != "" {
+		opts = append(opts, ro.WithNewIndex(req.NewIndex))
+	}
+	if req.DryRun {
+		opts = append(opts, ro.WithDryRun(true))
+	}
+	if req.WaitForActiveShards != "" {
+		opts = append(opts, ro.WithWaitForActiveShards(req.WaitForActiveShards))
+	}
+
+	resp, err := c.api.Indices.Rollover(req.Alias, opts...)
+	if err != nil {
+		return types.IndexRolloverResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("indices rollover", resp.StatusCode, resp.Body); err != nil {
+		return types.IndexRolloverResult{}, err
+	}
+
+	var wire rolloverWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.IndexRolloverResult{}, errors.Join(errors.New("decoding indices rollover response"), err)
+	}
+	return types.IndexRolloverResult{
+		Alias:              req.Alias,
+		OldIndex:           wire.OldIndex,
+		NewIndex:           wire.NewIndex,
+		RolledOver:         wire.RolledOver,
+		DryRun:             wire.DryRun || req.DryRun,
+		Acknowledged:       wire.Acknowledged,
+		ShardsAcknowledged: wire.ShardsAcknowledged,
+		ConditionsMet:      wire.Conditions,
+	}, nil
+}
+
+// buildRolloverBody serialises a conditions block into the cluster's
+// expected wire shape. An empty conditions struct produces
+// {"conditions":{}} — the unconditional form the cluster also accepts.
+// Kept here (rather than a shared helper) so a future per-dialect
+// divergence in conditions naming is a per-package change.
+func buildRolloverBody(c types.IndexRolloverConditions) ([]byte, error) {
+	conditions := make(map[string]any)
+	if c.MaxAge != "" {
+		conditions["max_age"] = c.MaxAge
+	}
+	if c.MaxDocs > 0 {
+		conditions["max_docs"] = c.MaxDocs
+	}
+	if c.MaxSize != "" {
+		conditions["max_size"] = c.MaxSize
+	}
+	if c.MaxPrimarySize != "" {
+		conditions["max_primary_shard_size"] = c.MaxPrimarySize
+	}
+	return json.Marshal(map[string]any{"conditions": conditions})
+}
+
 // allocationExplainWire mirrors the /_cluster/allocation/explain payload.
 // ES 9's typedapi exposes a fully-typed Response, but its types.Duration
 // values are custom and awkward to consume outside the package; decoding
