@@ -263,6 +263,44 @@ type ClusterDiagnoser interface {
 	DoGET(ctx context.Context, path string) (body []byte, status int, err error)
 }
 
+// ILMManager wraps the Elasticsearch ILM admin surface — list/get/put/
+// delete policies (/_ilm/policy[/<name>]) and per-index explain
+// (/<index>/_ilm/explain). ILM is ES-only; the OpenSearch adapter
+// returns ErrUnsupported on every method so the CLI can surface the
+// dialect mismatch loudly rather than silently no-op.
+//
+// The capability is not unified with ISMManager (the OpenSearch
+// equivalent) on purpose: the policy body shapes are fundamentally
+// different, and a neutral "lifecycle" interface would force a lossy
+// translation in both directions — exactly the lowest-common-denominator
+// CLAUDE.md §3 warns against.
+//
+// Errors mirror IndexTemplateUpdater: ErrUnreachable on transport
+// failure, ErrAuth/ErrForbidden on 401/403, ErrUnsupported when the
+// adapter is the OS one, and a wrapped error on 4xx with the cluster's
+// body in the message (typical case: a 4xx on Delete when the policy is
+// still attached to a managed index).
+type ILMManager interface {
+	ListPolicies(ctx context.Context, names []string) ([]types.ILMPolicy, error)
+	PutPolicy(ctx context.Context, req types.ILMPolicyPutRequest) (types.ILMPolicyPutResult, error)
+	DeletePolicy(ctx context.Context, req types.ILMPolicyDeleteRequest) (types.ILMPolicyDeleteResult, error)
+	ExplainPolicy(ctx context.Context, req types.ILMExplainRequest) ([]types.ILMExplainEntry, error)
+}
+
+// ISMManager wraps the OpenSearch ISM plugin admin surface —
+// list/get/put/delete policies (/_plugins/_ism/policies[/<id>]) and
+// explain (/_plugins/_ism/explain[/<index>]). ISM is OpenSearch-only;
+// the Elasticsearch adapter returns ErrUnsupported on every method.
+//
+// See ILMManager for the rationale behind keeping ILM and ISM as two
+// separate capabilities rather than a unified "lifecycle" interface.
+type ISMManager interface {
+	ListPolicies(ctx context.Context, ids []string) ([]types.ISMPolicy, error)
+	PutPolicy(ctx context.Context, req types.ISMPolicyPutRequest) (types.ISMPolicyPutResult, error)
+	DeletePolicy(ctx context.Context, req types.ISMPolicyDeleteRequest) (types.ISMPolicyDeleteResult, error)
+	ExplainPolicy(ctx context.Context, req types.ISMExplainRequest) ([]types.ISMExplainEntry, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -289,4 +327,6 @@ type Client struct {
 	Diag              ClusterDiagnoser
 	HotThreads        HotThreadsInspector
 	Reroute           RerouteExecutor
+	ILM               ILMManager
+	ISM               ISMManager
 }

@@ -43,7 +43,11 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
+		// ISM is OpenSearch-only — wire the unsupported-dialect stub
+		// so business code can call s.Client.ISM.* without nil-checks
+		// and get ErrUnsupported with a clear message when the
+		// operator targeted an ES context by mistake.
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}}, nil
 	case types.DialectOpenSearch:
 		impl, err := osadapter.New(addrs, provider, transport, osadapter.Options{
 			MaxRetries:          cc.MaxRetries,
@@ -52,10 +56,48 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl}, nil
+		// ILM is Elasticsearch-only — same stubbing pattern as the ES
+		// branch above for ISM.
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}
+}
+
+// unsupportedILM is the ILM capability stub installed on OpenSearch
+// clients. Every method returns ErrUnsupported so the CLI surfaces a
+// stable exit code 6 (and message "ILM is Elasticsearch-only…") instead
+// of a confusing 404 from /_ilm/policy on a cluster that simply doesn't
+// have the feature.
+type unsupportedILM struct{}
+
+func (unsupportedILM) ListPolicies(context.Context, []string) ([]types.ILMPolicy, error) {
+	return nil, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
+}
+func (unsupportedILM) PutPolicy(context.Context, types.ILMPolicyPutRequest) (types.ILMPolicyPutResult, error) {
+	return types.ILMPolicyPutResult{}, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
+}
+func (unsupportedILM) DeletePolicy(context.Context, types.ILMPolicyDeleteRequest) (types.ILMPolicyDeleteResult, error) {
+	return types.ILMPolicyDeleteResult{}, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
+}
+func (unsupportedILM) ExplainPolicy(context.Context, types.ILMExplainRequest) ([]types.ILMExplainEntry, error) {
+	return nil, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
+}
+
+// unsupportedISM is the mirror of unsupportedILM for the ES branch.
+type unsupportedISM struct{}
+
+func (unsupportedISM) ListPolicies(context.Context, []string) ([]types.ISMPolicy, error) {
+	return nil, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
+}
+func (unsupportedISM) PutPolicy(context.Context, types.ISMPolicyPutRequest) (types.ISMPolicyPutResult, error) {
+	return types.ISMPolicyPutResult{}, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
+}
+func (unsupportedISM) DeletePolicy(context.Context, types.ISMPolicyDeleteRequest) (types.ISMPolicyDeleteResult, error) {
+	return types.ISMPolicyDeleteResult{}, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
+}
+func (unsupportedISM) ExplainPolicy(context.Context, types.ISMExplainRequest) ([]types.ISMExplainEntry, error) {
+	return nil, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
 }
 
 // buildTransport returns the http.RoundTripper handed to the upstream

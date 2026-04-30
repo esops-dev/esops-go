@@ -1228,3 +1228,197 @@ type ShardAnalysis struct {
 	Unassigned    ShardUnassignedSummary  `json:"unassigned"      yaml:"unassigned"`
 	Summary       ShardAnalysisSummary    `json:"summary"         yaml:"summary"`
 }
+
+// ILMPolicy is the neutral view of one Index Lifecycle Management policy
+// from GET /_ilm/policy/<name> on Elasticsearch. ISM (the OpenSearch
+// equivalent) keeps a separate type because the policy body shape is
+// fundamentally different: ILM hangs a `phases` map off the policy, ISM
+// uses a `states` array with explicit transitions. Surfacing one neutral
+// "lifecycle policy" type would force a lossy translation in both
+// directions and is exactly the kind of lowest-common-denominator that
+// CLAUDE.md §3 warns against.
+//
+// Definition carries the inner `policy` block (phases + _meta) verbatim
+// as a decoded map so renderers can pretty-print it without re-parsing.
+// ModifiedDate / Version / InUseBy are populated when the cluster reports
+// them — older ES 7.x omits some of these fields, in which case the
+// zero value is what serialises out.
+type ILMPolicy struct {
+	Name         string         `json:"name"                       yaml:"name"`
+	Version      int            `json:"version,omitempty"          yaml:"version,omitempty"`
+	ModifiedDate string         `json:"modified_date,omitempty"    yaml:"modified_date,omitempty"`
+	InUseBy      ILMInUseBy     `json:"in_use_by,omitempty"        yaml:"in_use_by,omitempty"`
+	Definition   map[string]any `json:"definition,omitempty"       yaml:"definition,omitempty"`
+}
+
+// ILMInUseBy mirrors the cluster's `in_use_by` block: the indices,
+// composable templates, and data-stream lifecycle definitions that
+// reference the policy. Empty slices on policies the cluster reports as
+// unattached.
+type ILMInUseBy struct {
+	Indices          []string `json:"indices,omitempty"             yaml:"indices,omitempty"`
+	DataStreams      []string `json:"data_streams,omitempty"        yaml:"data_streams,omitempty"`
+	ComposableTemplates []string `json:"composable_templates,omitempty" yaml:"composable_templates,omitempty"`
+}
+
+// ILMPolicyPutRequest is the input to a PUT /_ilm/policy/<name> call.
+// Body is the raw JSON the operator handed in (the cluster expects
+// {"policy":{"phases":{…}}}). The cluster validates the inner shape;
+// esops only checks that the body is a JSON object.
+type ILMPolicyPutRequest struct {
+	Name string
+	Body []byte
+}
+
+// ILMPolicyPutResult is the normalised view of a PUT /_ilm/policy/<name>
+// response. The cluster only returns an acknowledged flag; Name is
+// echoed so a captured JSON record stays self-describing.
+type ILMPolicyPutResult struct {
+	Action       string `json:"action"        yaml:"action"`
+	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
+	Name         string `json:"name"          yaml:"name"`
+	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// ILMPolicyDeleteRequest is the input to a DELETE /_ilm/policy/<name>
+// call. The cluster refuses with a 4xx when the policy is still attached
+// to one or more indices; that error surfaces verbatim.
+type ILMPolicyDeleteRequest struct {
+	Name string
+}
+
+// ILMPolicyDeleteResult mirrors ILMPolicyPutResult for the delete path.
+type ILMPolicyDeleteResult struct {
+	Action       string `json:"action"        yaml:"action"`
+	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
+	Name         string `json:"name"          yaml:"name"`
+	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// ILMExplainRequest narrows a GET /<index>/_ilm/explain call. Index is
+// the comma-separated pattern the cluster accepts; OnlyErrors maps to
+// ?only_errors=true (return only indices in the ERROR step) and
+// OnlyManaged to ?only_managed=true (omit indices that have no policy
+// attached). Both default off, matching the cluster default.
+type ILMExplainRequest struct {
+	Index       string
+	OnlyErrors  bool
+	OnlyManaged bool
+}
+
+// ILMExplainEntry is one row in /<index>/_ilm/explain. Managed=false
+// means the cluster found the index but no policy is attached — surfaced
+// rather than dropped so an operator scanning a pattern sees the gap.
+//
+// Phase / Action / Step are the operator-facing breadcrumbs of where the
+// index is in its lifecycle right now. FailedStep / StepInfo carry the
+// cluster's diagnosis when Step is "ERROR"; surfacing them verbatim
+// keeps the message specific (e.g. "rollover_failed: alias not found").
+type ILMExplainEntry struct {
+	Index          string         `json:"index"                       yaml:"index"`
+	Managed        bool           `json:"managed"                     yaml:"managed"`
+	Policy         string         `json:"policy,omitempty"            yaml:"policy,omitempty"`
+	LifecycleDate  string         `json:"lifecycle_date,omitempty"    yaml:"lifecycle_date,omitempty"`
+	Phase          string         `json:"phase,omitempty"             yaml:"phase,omitempty"`
+	Action         string         `json:"action,omitempty"            yaml:"action,omitempty"`
+	Step           string         `json:"step,omitempty"              yaml:"step,omitempty"`
+	FailedStep     string         `json:"failed_step,omitempty"       yaml:"failed_step,omitempty"`
+	StepInfo       map[string]any `json:"step_info,omitempty"         yaml:"step_info,omitempty"`
+	Age            string         `json:"age,omitempty"               yaml:"age,omitempty"`
+}
+
+// ISMPolicy is the neutral view of one Index State Management policy
+// from GET /_plugins/_ism/policies/<id> on OpenSearch. ISM is intentionally
+// not unified with ILMPolicy — see ILMPolicy's docstring.
+//
+// Definition carries the inner `policy` block (states + transitions +
+// ism_template) as a decoded map. SeqNo / PrimaryTerm are the OpenSearch
+// optimistic-concurrency tokens the cluster returns and accepts back on
+// PUTs; we preserve them on the read path so a future "round-trip edit"
+// flow can hand them straight back to the cluster, but PutPolicy below
+// uses the create-or-overwrite semantics by default.
+type ISMPolicy struct {
+	ID           string         `json:"id"                       yaml:"id"`
+	SeqNo        int64          `json:"seq_no,omitempty"         yaml:"seq_no,omitempty"`
+	PrimaryTerm  int64          `json:"primary_term,omitempty"   yaml:"primary_term,omitempty"`
+	Definition   map[string]any `json:"definition,omitempty"     yaml:"definition,omitempty"`
+}
+
+// ISMPolicyPutRequest is the input to a PUT /_plugins/_ism/policies/<id>
+// call. Body is the raw JSON the operator handed in (the plugin expects
+// {"policy":{"description":"…","default_state":"…","states":[…]}}).
+//
+// SeqNo/PrimaryTerm map to the cluster's ?if_seq_no=N&if_primary_term=M
+// optimistic-concurrency parameters. When both are zero, the request
+// posts unconditionally — the create-or-overwrite path. When set, the
+// cluster refuses with a 409 if the policy has been concurrently
+// modified.
+type ISMPolicyPutRequest struct {
+	ID          string
+	Body        []byte
+	SeqNo       int64
+	PrimaryTerm int64
+}
+
+// ISMPolicyPutResult is the normalised view of a
+// PUT /_plugins/_ism/policies/<id> response. The plugin returns the
+// stored policy with fresh seq_no / primary_term — surfaced so a script
+// chaining edits can pick up the new tokens without a follow-up GET.
+type ISMPolicyPutResult struct {
+	Action      string `json:"action"                yaml:"action"`
+	DryRun      bool   `json:"dry_run"               yaml:"dry_run"`
+	ID          string `json:"id"                    yaml:"id"`
+	SeqNo       int64  `json:"seq_no,omitempty"      yaml:"seq_no,omitempty"`
+	PrimaryTerm int64  `json:"primary_term,omitempty" yaml:"primary_term,omitempty"`
+}
+
+// ISMPolicyDeleteRequest is the input to a
+// DELETE /_plugins/_ism/policies/<id> call. The plugin refuses when the
+// policy is still attached to managed indices; that error surfaces
+// verbatim.
+type ISMPolicyDeleteRequest struct {
+	ID string
+}
+
+// ISMPolicyDeleteResult mirrors ISMPolicyPutResult for the delete path.
+// The plugin's response is essentially "ok"; we surface ID so a captured
+// JSON record stays interpretable.
+type ISMPolicyDeleteResult struct {
+	Action string `json:"action"  yaml:"action"`
+	DryRun bool   `json:"dry_run" yaml:"dry_run"`
+	ID     string `json:"id"      yaml:"id"`
+	OK     bool   `json:"ok"      yaml:"ok"`
+}
+
+// ISMExplainRequest narrows a GET /_plugins/_ism/explain[/<index>] call.
+// Empty Index hits the no-index form (every managed index in the
+// cluster). ShowPolicy maps to ?show_policy=true — when set, the plugin
+// embeds each managed index's full policy body in the response, which
+// can be megabytes on a large fleet.
+type ISMExplainRequest struct {
+	Index      string
+	ShowPolicy bool
+}
+
+// ISMExplainEntry is one row in /_plugins/_ism/explain. Mirrors the
+// shape of ILMExplainEntry where it can — same operator-facing question
+// ("what is this index doing right now?") even though the underlying
+// state machine differs. Managed=false means the index was found but
+// is not under ISM control.
+//
+// PolicyID is the policy currently attached. State / Action are the
+// plugin's view of where the index is in the state machine. StepInfo
+// carries any error/diagnostic block the plugin reports — surfaced
+// verbatim because the plugin's error messages are the canonical
+// signal an operator needs.
+type ISMExplainEntry struct {
+	Index    string         `json:"index"                yaml:"index"`
+	Managed  bool           `json:"managed"              yaml:"managed"`
+	PolicyID string         `json:"policy_id,omitempty"  yaml:"policy_id,omitempty"`
+	State    string         `json:"state,omitempty"      yaml:"state,omitempty"`
+	Action   string         `json:"action,omitempty"     yaml:"action,omitempty"`
+	Step     string         `json:"step,omitempty"       yaml:"step,omitempty"`
+	StepInfo map[string]any `json:"step_info,omitempty"  yaml:"step_info,omitempty"`
+	Enabled  bool           `json:"enabled,omitempty"    yaml:"enabled,omitempty"`
+	Policy   map[string]any `json:"policy,omitempty"     yaml:"policy,omitempty"`
+}
