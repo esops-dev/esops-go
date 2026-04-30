@@ -3,9 +3,11 @@ package index_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/index"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -28,6 +30,19 @@ func (f *fakeISM) ListPolicies(_ context.Context, ids []string) ([]types.ISMPoli
 	return f.policies, f.err
 }
 
+func (f *fakeISM) GetPolicy(_ context.Context, id string) (types.ISMPolicy, error) {
+	f.gotIDs = append([]string(nil), id)
+	if f.err != nil {
+		return types.ISMPolicy{}, f.err
+	}
+	for _, p := range f.policies {
+		if p.ID == id {
+			return p, nil
+		}
+	}
+	return types.ISMPolicy{}, fmt.Errorf("%w: ism policy %q", client.ErrNotFound, id)
+}
+
 func (f *fakeISM) PutPolicy(_ context.Context, req types.ISMPolicyPutRequest) (types.ISMPolicyPutResult, error) {
 	f.puts = append(f.puts, req)
 	if f.err != nil {
@@ -42,6 +57,19 @@ func (f *fakeISM) DeletePolicy(_ context.Context, req types.ISMPolicyDeleteReque
 		return types.ISMPolicyDeleteResult{}, f.err
 	}
 	return types.ISMPolicyDeleteResult{Action: "ism-policy-delete", ID: req.ID, OK: true}, nil
+}
+
+func (f *fakeISM) ExplainPolicyStream(_ context.Context, req types.ISMExplainRequest, yield func(types.ISMExplainEntry) error) error {
+	f.explainReqs = append(f.explainReqs, req)
+	if f.err != nil {
+		return f.err
+	}
+	for _, e := range f.explainOut {
+		if err := yield(e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *fakeISM) ExplainPolicy(_ context.Context, req types.ISMExplainRequest) ([]types.ISMExplainEntry, error) {

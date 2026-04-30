@@ -24,6 +24,19 @@ func (f *fakeSettingsInspector) GetSettings(_ context.Context, req types.IndexSe
 	return f.rows, f.err
 }
 
+func (f *fakeSettingsInspector) GetSettingsStream(_ context.Context, req types.IndexSettingsGetRequest, yield func(types.IndexSettings) error) error {
+	f.got = req
+	if f.err != nil {
+		return f.err
+	}
+	for _, r := range f.rows {
+		if err := yield(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // fakeSettingsUpdater records every PutSettings call and returns a
 // canned response.
 type fakeSettingsUpdater struct {
@@ -50,7 +63,7 @@ func TestGetSettings_requiresIndex(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--index") {
 		t.Errorf("expected error mentioning --index, got: %v", err)
 	}
-	if gi.got.Index != "" {
+	if len(gi.got.Indices) != 0 {
 		t.Errorf("cluster contacted on validation failure: %+v", gi.got)
 	}
 }
@@ -69,8 +82,8 @@ func TestGetSettings_passesFilterThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}
-	if gi.got.Index != "logs-*" {
-		t.Errorf("Index forwarded = %q, want logs-*", gi.got.Index)
+	if len(gi.got.Indices) != 1 || gi.got.Indices[0] != "logs-*" {
+		t.Errorf("Indices forwarded = %v, want [logs-*]", gi.got.Indices)
 	}
 	if len(gi.got.Names) != 1 || gi.got.Names[0] != "index.number_of_replicas" {
 		t.Errorf("Names forwarded = %#v", gi.got.Names)
@@ -193,6 +206,53 @@ func TestUpdateSettings_buildsEnvelopeFromKVs(t *testing.T) {
 	// "index." prefix is stripped before placement under the wrapper.
 	if idx["refresh_interval"] != "30s" {
 		t.Errorf("refresh_interval = %v, want \"30s\"", idx["refresh_interval"])
+	}
+}
+
+func TestUpdateSettings_nestsDottedKeys(t *testing.T) {
+	su := &fakeSettingsUpdater{resp: types.IndexSettingsUpdateResult{Acknowledged: true}}
+	_, err := index.UpdateSettings(context.Background(), su, index.SettingsUpdateOptions{
+		Index: "logs",
+		KeyValues: map[string]string{
+			"index.lifecycle.name": "ilm-30d",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(su.calls[0].Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	idx, ok := got["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("body missing 'index' object: %#v", got)
+	}
+	lifecycle, ok := idx["lifecycle"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested lifecycle object, got %#v", idx)
+	}
+	if lifecycle["name"] != "ilm-30d" {
+		t.Errorf("lifecycle.name = %v, want ilm-30d", lifecycle["name"])
+	}
+}
+
+func TestUpdateSettings_rejectsCrossPrefixCollision(t *testing.T) {
+	su := &fakeSettingsUpdater{resp: types.IndexSettingsUpdateResult{Acknowledged: true}}
+	_, err := index.UpdateSettings(context.Background(), su, index.SettingsUpdateOptions{
+		Index: "logs",
+		KeyValues: map[string]string{
+			// "x" auto-prefixes to "index.x" — same effective key as
+			// the literal "index.x" pair. Should be rejected.
+			"x":       "1",
+			"index.x": "2",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "same effective key") {
+		t.Errorf("expected collision error, got %v", err)
+	}
+	if len(su.calls) != 0 {
+		t.Errorf("collision contacted cluster: %+v", su.calls)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
 )
 
@@ -86,10 +85,7 @@ func runOptimize(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.optimize",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.optimize",
 		"dry_run", result.DryRun,
 		"indices", len(result.Indices),
 		"shards_total", result.ShardsTotal,

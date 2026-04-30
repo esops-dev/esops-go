@@ -2,7 +2,6 @@ package index
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/dj-wasabi/esops-go/internal/client"
@@ -97,37 +96,26 @@ func validateShrinkOptions(opts ShrinkOptions) error {
 	source := strings.TrimSpace(opts.Source)
 	target := strings.TrimSpace(opts.Target)
 	if source == "" {
-		return fmt.Errorf("--source is required")
+		return client.UsageError("--source is required")
 	}
 	if target == "" {
-		return fmt.Errorf("--target is required")
+		return client.UsageError("--target is required")
 	}
 	if source == target {
-		return fmt.Errorf("--source and --target must differ (got %q for both)", source)
+		return client.UsageError("--source and --target must differ (got %q for both)", source)
 	}
 	if isPatternish(source) {
-		return fmt.Errorf("--source must be a literal index name, not a pattern (got %q)", source)
+		return client.UsageError("--source must be a literal index name, not a pattern (got %q)", source)
 	}
 	if isPatternish(target) {
-		return fmt.Errorf("--target must be a literal index name, not a pattern (got %q)", target)
+		return client.UsageError("--target must be a literal index name, not a pattern (got %q)", target)
 	}
 	if opts.TargetShards < 0 {
-		return fmt.Errorf("--shards must be >= 0 (got %d)", opts.TargetShards)
+		return client.UsageError("--shards must be >= 0 (got %d)", opts.TargetShards)
 	}
 	if opts.TargetReplicas != nil && *opts.TargetReplicas < 0 {
-		return fmt.Errorf("--replicas must be >= 0 (got %d)", *opts.TargetReplicas)
+		return client.UsageError("--replicas must be >= 0 (got %d)", *opts.TargetReplicas)
 	}
 	return nil
 }
 
-// isPatternish reports whether s contains any glob glyph the cluster
-// resolves at request time, or one of the match-everything sentinels.
-// The shrink path requires a literal name on both sides, so we treat
-// anything with a wildcard as a footgun and refuse upfront.
-func isPatternish(s string) bool {
-	switch s {
-	case "*", "_all":
-		return true
-	}
-	return strings.ContainsAny(s, "*?")
-}

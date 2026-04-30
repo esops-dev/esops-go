@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -40,21 +39,12 @@ func ListISMPolicies(ctx context.Context, m client.ISMManager, opts ISMListOptio
 func GetISMPolicy(ctx context.Context, m client.ISMManager, id string) (types.ISMPolicy, error) {
 	n := strings.TrimSpace(id)
 	if n == "" {
-		return types.ISMPolicy{}, fmt.Errorf("--id is required")
+		return types.ISMPolicy{}, client.UsageError("--id is required")
 	}
 	if isPatternish(n) {
-		return types.ISMPolicy{}, fmt.Errorf("--id must be a literal policy id, not a pattern (got %q); use 'index ism list --id %s' instead", n, n)
+		return types.ISMPolicy{}, client.UsageError("--id must be a literal policy id, not a pattern (got %q); use 'index ism list --id %s' instead", n, n)
 	}
-	rows, err := m.ListPolicies(ctx, []string{n})
-	if err != nil {
-		return types.ISMPolicy{}, err
-	}
-	for _, p := range rows {
-		if p.ID == n {
-			return p, nil
-		}
-	}
-	return types.ISMPolicy{}, fmt.Errorf("ism policy %q not found", n)
+	return m.GetPolicy(ctx, n)
 }
 
 // ISMPutOptions are the knobs the CLI layer hands to PutISMPolicy. ID
@@ -92,7 +82,7 @@ func PutISMPolicy(ctx context.Context, m client.ISMManager, opts ISMPutOptions) 
 		return types.ISMPolicyPutResult{}, err
 	}
 	if (opts.SeqNo > 0) != (opts.PrimaryTerm > 0) {
-		return types.ISMPolicyPutResult{}, fmt.Errorf("--if-seq-no and --if-primary-term must be set together (got seq_no=%d primary_term=%d)", opts.SeqNo, opts.PrimaryTerm)
+		return types.ISMPolicyPutResult{}, client.UsageError("--if-seq-no and --if-primary-term must be set together (got seq_no=%d primary_term=%d)", opts.SeqNo, opts.PrimaryTerm)
 	}
 	if opts.DryRun {
 		return types.ISMPolicyPutResult{
@@ -186,27 +176,36 @@ func ExplainISM(ctx context.Context, m client.ISMManager, opts ISMExplainOptions
 	return rows, nil
 }
 
+// ExplainISMStream is the streaming companion to ExplainISM. See the
+// ILM equivalent for the streaming-vs-sort contract.
+func ExplainISMStream(ctx context.Context, m client.ISMManager, opts ISMExplainOptions, yield func(types.ISMExplainEntry) error) error {
+	return m.ExplainPolicyStream(ctx, types.ISMExplainRequest{
+		Index:      strings.TrimSpace(opts.Index),
+		ShowPolicy: opts.ShowPolicy,
+	}, yield)
+}
+
 func validateISMID(id string) error {
 	n := strings.TrimSpace(id)
 	if n == "" {
-		return fmt.Errorf("--id is required")
+		return client.UsageError("--id is required")
 	}
 	if isPatternish(n) {
-		return fmt.Errorf("--id must be a literal policy id, not a pattern (got %q)", n)
+		return client.UsageError("--id must be a literal policy id, not a pattern (got %q)", n)
 	}
 	return nil
 }
 
 func validateISMBody(body []byte) error {
 	if len(body) == 0 {
-		return fmt.Errorf("policy body is required (use --from-file PATH or --body JSON)")
+		return client.UsageError("policy body is required (use --from-file PATH or --body JSON)")
 	}
 	var probe map[string]any
 	if err := json.Unmarshal(body, &probe); err != nil {
-		return fmt.Errorf("policy body is not valid JSON: %w", err)
+		return client.UsageError("policy body is not valid JSON: %v", err)
 	}
 	if _, ok := probe["policy"]; !ok {
-		return fmt.Errorf("policy body must declare a 'policy' object (plugin expects {\"policy\":{\"description\":\"…\",\"default_state\":\"…\",\"states\":[…]}})")
+		return client.UsageError("policy body must declare a 'policy' object (plugin expects {\"policy\":{\"description\":\"…\",\"default_state\":\"…\",\"states\":[…]}})")
 	}
 	return nil
 }

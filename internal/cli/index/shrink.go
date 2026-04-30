@@ -8,7 +8,6 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
 )
 
@@ -96,10 +95,7 @@ func runShrink(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.shrink",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.shrink",
 		"source", result.Source,
 		"target", result.Target,
 		"target_shards", result.TargetShards,

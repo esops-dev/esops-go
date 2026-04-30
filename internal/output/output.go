@@ -107,13 +107,25 @@ func Shards(w io.Writer, shards []types.Shard, f Format) error {
 	}
 }
 
+// IndicesNDJSONStream writes one Index per line to w as records arrive
+// from the supplied callback-shaped source. Honours CLAUDE.md §6: a
+// 20k-index cluster's first row reaches stdout before the cluster has
+// finished sending the last one. Use with index.ListStream.
+func IndicesNDJSONStream(w io.Writer, source func(yield func(types.Index) error) error) error {
+	enc := json.NewEncoder(w)
+	return source(func(ix types.Index) error {
+		return enc.Encode(ix)
+	})
+}
+
 // Indices renders a slice of Index rows in the requested format. Table
 // output shows the columns an operator reaches for when triaging an
 // index-count or size question (name, health, status, primaries/replicas,
 // docs, size). Wide adds deleted docs, UUID, creation date and
 // primary-store bytes. JSON/YAML emit the neutral Index shape;
-// NDJSON writes one Index per line so large lists don't have to be
-// held in the downstream consumer's memory in one blob.
+// NDJSON writes one Index per line — but if the caller has a row count
+// it cares about, prefer IndicesNDJSONStream so memory doesn't scale
+// with cluster size.
 func Indices(w io.Writer, indices []types.Index, f Format) error {
 	switch f {
 	case FormatJSON:
@@ -274,6 +286,16 @@ func indexShrinkTable(w io.Writer, r types.IndexShrinkResult, wide bool) error {
 // columns and the raw filter JSON. JSON/YAML emit the neutral Alias
 // slice; NDJSON writes one record per line so a cluster with tens of
 // thousands of aliases doesn't have to be parsed as one blob.
+// AliasesNDJSONStream writes one Alias per line to w as records
+// arrive from the supplied callback-shaped source. Honours CLAUDE.md
+// §6 for `aliases list`.
+func AliasesNDJSONStream(w io.Writer, source func(yield func(types.Alias) error) error) error {
+	enc := json.NewEncoder(w)
+	return source(func(a types.Alias) error {
+		return enc.Encode(a)
+	})
+}
+
 func Aliases(w io.Writer, aliases []types.Alias, f Format) error {
 	switch f {
 	case FormatJSON:
@@ -399,6 +421,16 @@ func aliasUpdateTable(w io.Writer, r types.AliasUpdateResult, wide bool) error {
 // JSON/YAML emit the neutral []IndexSettings shape directly. NDJSON
 // streams one IndexSettings record per line so a cluster with tens of
 // thousands of indices doesn't have to be parsed as a single blob.
+// IndexSettingsNDJSONStream writes one IndexSettings per line to w as
+// records arrive from the supplied callback-shaped source. Honours
+// CLAUDE.md §6 for `settings get`.
+func IndexSettingsNDJSONStream(w io.Writer, source func(yield func(types.IndexSettings) error) error) error {
+	enc := json.NewEncoder(w)
+	return source(func(r types.IndexSettings) error {
+		return enc.Encode(r)
+	})
+}
+
 func IndexSettings(w io.Writer, rows []types.IndexSettings, f Format) error {
 	switch f {
 	case FormatJSON:
@@ -429,27 +461,50 @@ func IndexSettings(w io.Writer, rows []types.IndexSettings, f Format) error {
 
 func indexSettingsTable(w io.Writer, rows []types.IndexSettings, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "INDEX\tKEY\tVALUE")
+	_, _ = fmt.Fprintln(tw, "INDEX\tKEY\tVALUE\tSOURCE")
 	for _, r := range rows {
-		flat := flattenSettings(r.Settings)
-		if len(flat) == 0 {
-			_, _ = fmt.Fprintf(tw, "%s\t-\t-\n", r.Index)
+		flatSet := flattenSettings(r.Settings)
+		flatDef := flattenSettings(r.Defaults)
+		if len(flatSet) == 0 && len(flatDef) == 0 {
+			_, _ = fmt.Fprintf(tw, "%s\t-\t-\t-\n", r.Index)
 			continue
 		}
-		keys := make([]string, 0, len(flat))
-		for k := range flat {
+		// Configured keys win over defaults — the cluster reports both
+		// blocks separately and "configured" is the load-bearing answer
+		// to "is this knob actually set". keyset is the merged sorted
+		// view; per-row source comes from which map the key lives in.
+		keyset := make(map[string]struct{}, len(flatSet)+len(flatDef))
+		for k := range flatSet {
+			keyset[k] = struct{}{}
+		}
+		for k := range flatDef {
+			keyset[k] = struct{}{}
+		}
+		keys := make([]string, 0, len(keyset))
+		for k := range keyset {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			v := settingValueString(flat[k])
+			val, source := settingsLookup(flatSet, flatDef, k)
+			v := settingValueString(val)
 			if !wide {
 				v = truncate(v, 60)
 			}
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Index, k, v)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Index, k, v, source)
 		}
 	}
 	return tw.Flush()
+}
+
+// settingsLookup picks the cluster's effective value for a flattened
+// dotted key: a configured value wins over the default. Returns
+// "configured" or "default" so the renderer can mark the source.
+func settingsLookup(set, def map[string]any, key string) (any, string) {
+	if v, ok := set[key]; ok {
+		return v, "configured"
+	}
+	return def[key], "default"
 }
 
 // flattenSettings walks a nested settings map and produces a flat map
@@ -1971,6 +2026,16 @@ func ILMPolicyDelete(w io.Writer, r types.ILMPolicyDeleteResult, f Format) error
 // policy, phase, action, step, age). Wide adds the failed-step name
 // and a compact step_info JSON blob. JSON/YAML emit the neutral
 // []ILMExplainEntry shape directly. NDJSON streams one record per line.
+// ILMExplainNDJSONStream writes one ILMExplainEntry per line to w as
+// records arrive from the supplied callback-shaped source. Honours
+// CLAUDE.md §6 for `ilm explain` against a multi-thousand-index fleet.
+func ILMExplainNDJSONStream(w io.Writer, source func(yield func(types.ILMExplainEntry) error) error) error {
+	enc := json.NewEncoder(w)
+	return source(func(e types.ILMExplainEntry) error {
+		return enc.Encode(e)
+	})
+}
+
 func ILMExplain(w io.Writer, rows []types.ILMExplainEntry, f Format) error {
 	switch f {
 	case FormatJSON:
@@ -2212,6 +2277,15 @@ func ISMPolicyDelete(w io.Writer, r types.ISMPolicyDeleteResult, f Format) error
 // renderer — same operator-facing question ("what is this index doing
 // right now?") even though the underlying state machine differs. Wide
 // adds a compact step_info JSON blob.
+// ISMExplainNDJSONStream writes one ISMExplainEntry per line to w as
+// records arrive from the supplied callback-shaped source.
+func ISMExplainNDJSONStream(w io.Writer, source func(yield func(types.ISMExplainEntry) error) error) error {
+	enc := json.NewEncoder(w)
+	return source(func(e types.ISMExplainEntry) error {
+		return enc.Encode(e)
+	})
+}
+
 func ISMExplain(w io.Writer, rows []types.ISMExplainEntry, f Format) error {
 	switch f {
 	case FormatJSON:

@@ -100,9 +100,9 @@ func TestOptimize_skipsClosedIndices(t *testing.T) {
 	if len(opt.calls) != 1 {
 		t.Fatalf("expected 1 forcemerge call, got %d", len(opt.calls))
 	}
-	wantPath := "logs-2022,logs-2024"
-	if opt.calls[0].Index != wantPath {
-		t.Errorf("forcemerge request Index = %q, want %q", opt.calls[0].Index, wantPath)
+	wantIndices := []string{"logs-2022", "logs-2024"}
+	if !equalSlices(opt.calls[0].Indices, wantIndices) {
+		t.Errorf("forcemerge request Indices = %v, want %v", opt.calls[0].Indices, wantIndices)
 	}
 }
 

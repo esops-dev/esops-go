@@ -31,6 +31,8 @@ func exitCode(err error) int {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return 130
+	case errors.Is(err, client.ErrUsage):
+		return 2
 	case errors.Is(err, client.ErrUnreachable):
 		return 3
 	case errors.Is(err, client.ErrAuth):

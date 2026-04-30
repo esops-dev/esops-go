@@ -8,8 +8,8 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
+	"github.com/dj-wasabi/esops-go/internal/types"
 )
 
 // ilmCommand is the parent for `esops index ilm <list|get|put|delete|
@@ -74,12 +74,7 @@ func runILMList(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ilm.list",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"rows", len(rows),
-	)
+	s.Log("index.ilm.list", "rows", len(rows))
 	return output.ILMPolicies(os.Stdout, rows, s.Format)
 }
 
@@ -121,12 +116,7 @@ func runILMGet(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ilm.get",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"name", p.Name,
-	)
+	s.Log("index.ilm.get", "name", p.Name)
 	return output.ILMPolicy(os.Stdout, p, s.Format)
 }
 
@@ -191,10 +181,7 @@ func runILMPut(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ilm.put",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.ilm.put",
 		"name", result.Name,
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,
@@ -243,10 +230,7 @@ func runILMDelete(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.ilm.delete",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.ilm.delete",
 		"name", result.Name,
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,
@@ -267,7 +251,9 @@ compact step_info preview for stuck indices.
 
 --only-errors maps to the cluster's ?only_errors=true and returns
 only indices stuck in the ERROR step — the right starting point
-for "what is broken right now?".
+for "what is broken right now?". On large clusters the cluster
+side of /_ilm/explain can take more than the global 30s default;
+raise --timeout if you hit a deadline.
 
 Read-only and safe to run on a prod-protected context. ILM is
 Elasticsearch-only.`,
@@ -297,19 +283,37 @@ func runILMExplain(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	rows, err := esopsindex.ExplainILM(ctx, s.Client.ILM, esopsindex.ILMExplainOptions{
+	opts := esopsindex.ILMExplainOptions{
 		Index:       cmd.String("index"),
 		OnlyErrors:  cmd.Bool("only-errors"),
 		OnlyManaged: cmd.Bool("only-managed"),
-	})
+	}
+
+	if s.Format == output.FormatNDJSON {
+		count := 0
+		err := output.ILMExplainNDJSONStream(os.Stdout, func(yield func(types.ILMExplainEntry) error) error {
+			return esopsindex.ExplainILMStream(ctx, s.Client.ILM, opts, func(e types.ILMExplainEntry) error {
+				count++
+				return yield(e)
+			})
+		})
+		if err != nil {
+			return err
+		}
+		s.Log("index.ilm.explain",
+			"index", cmd.String("index"),
+			"rows", count,
+			"stream", true,
+		)
+		return nil
+	}
+
+	rows, err := esopsindex.ExplainILM(ctx, s.Client.ILM, opts)
 	if err != nil {
 		return err
 	}
 
-	logging.Logger().Info("index.ilm.explain",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.ilm.explain",
 		"index", cmd.String("index"),
 		"rows", len(rows),
 	)

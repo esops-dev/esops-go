@@ -4,6 +4,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -74,6 +75,9 @@ type unsupportedILM struct{}
 func (unsupportedILM) ListPolicies(context.Context, []string) ([]types.ILMPolicy, error) {
 	return nil, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
 }
+func (unsupportedILM) GetPolicy(context.Context, string) (types.ILMPolicy, error) {
+	return types.ILMPolicy{}, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
+}
 func (unsupportedILM) PutPolicy(context.Context, types.ILMPolicyPutRequest) (types.ILMPolicyPutResult, error) {
 	return types.ILMPolicyPutResult{}, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
 }
@@ -83,12 +87,18 @@ func (unsupportedILM) DeletePolicy(context.Context, types.ILMPolicyDeleteRequest
 func (unsupportedILM) ExplainPolicy(context.Context, types.ILMExplainRequest) ([]types.ILMExplainEntry, error) {
 	return nil, fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
 }
+func (unsupportedILM) ExplainPolicyStream(context.Context, types.ILMExplainRequest, func(types.ILMExplainEntry) error) error {
+	return fmt.Errorf("%w: ILM is Elasticsearch-only; use 'esops index ism' for OpenSearch", client.ErrUnsupported)
+}
 
 // unsupportedISM is the mirror of unsupportedILM for the ES branch.
 type unsupportedISM struct{}
 
 func (unsupportedISM) ListPolicies(context.Context, []string) ([]types.ISMPolicy, error) {
 	return nil, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
+}
+func (unsupportedISM) GetPolicy(context.Context, string) (types.ISMPolicy, error) {
+	return types.ISMPolicy{}, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
 }
 func (unsupportedISM) PutPolicy(context.Context, types.ISMPolicyPutRequest) (types.ISMPolicyPutResult, error) {
 	return types.ISMPolicyPutResult{}, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
@@ -99,6 +109,9 @@ func (unsupportedISM) DeletePolicy(context.Context, types.ISMPolicyDeleteRequest
 func (unsupportedISM) ExplainPolicy(context.Context, types.ISMExplainRequest) ([]types.ISMExplainEntry, error) {
 	return nil, fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
 }
+func (unsupportedISM) ExplainPolicyStream(context.Context, types.ISMExplainRequest, func(types.ISMExplainEntry) error) error {
+	return fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
+}
 
 // buildTransport returns the http.RoundTripper handed to the upstream
 // clients. It honours TLS config (including an mTLS client keypair
@@ -106,16 +119,80 @@ func (unsupportedISM) ExplainPolicy(context.Context, types.ISMExplainRequest) ([
 // wrapping is applied separately by the adapter so dialect-specific
 // rejections (sigv4-on-ES, api_key-on-OS) can fail loudly before the
 // transport is ever exercised.
+//
+// When the context sets max_in_flight > 0, the transport is wrapped
+// with a semaphore so concurrent in-flight requests for that context
+// stay bounded — CLAUDE.md §9: "prevents one runaway esops invocation
+// from starving shared clusters". The cap applies across the whole
+// process since one config.Context produces one client.
 func buildTransport(cc config.Context) (http.RoundTripper, error) {
 	tlsConf, err := buildTLSConfig(cc.Auth, cc.TLS)
 	if err != nil {
 		return nil, err
 	}
-	t := &http.Transport{
+	var rt http.RoundTripper = &http.Transport{
 		TLSClientConfig:       tlsConf,
 		ResponseHeaderTimeout: effectiveTimeout(cc),
 	}
-	return t, nil
+	if cc.MaxInFlight > 0 {
+		rt = newBoundedTransport(rt, cc.MaxInFlight)
+	}
+	return rt, nil
+}
+
+// boundedTransport caps concurrent in-flight HTTP requests via a
+// counting semaphore. Acquired before delegating to the wrapped
+// RoundTripper, released when the response body is closed (or when
+// the wrapped call returns an error and there is no body to close).
+//
+// The semaphore is process-wide for the cluster client it backs: one
+// config.Context produces one client, and that client's transport is
+// the only path requests take to the cluster. Operators who want
+// per-host caps should split the cluster into multiple contexts.
+type boundedTransport struct {
+	inner http.RoundTripper
+	sem   chan struct{}
+}
+
+func newBoundedTransport(inner http.RoundTripper, max int) *boundedTransport {
+	return &boundedTransport{
+		inner: inner,
+		sem:   make(chan struct{}, max),
+	}
+}
+
+func (b *boundedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	select {
+	case b.sem <- struct{}{}:
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+	resp, err := b.inner.RoundTrip(req)
+	if err != nil {
+		<-b.sem
+		return nil, err
+	}
+	// Release on body close so the slot is held for the duration of
+	// the read, not just the headers. This is the contract operators
+	// expect from a "max in flight" knob: a slow consumer reading a
+	// large response counts against the cap.
+	resp.Body = &releaseOnClose{ReadCloser: resp.Body, sem: b.sem}
+	return resp, nil
+}
+
+type releaseOnClose struct {
+	io.ReadCloser
+	sem      chan struct{}
+	released bool
+}
+
+func (r *releaseOnClose) Close() error {
+	err := r.ReadCloser.Close()
+	if !r.released {
+		<-r.sem
+		r.released = true
+	}
+	return err
 }
 
 func effectiveTimeout(cc config.Context) time.Duration {

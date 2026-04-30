@@ -62,7 +62,7 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 		return types.IndexStateChange{}, err
 	}
 
-	indices, err := inspector.Indices(ctx, types.IndexFilter{
+	rows, err := inspector.IndicesNamesStatus(ctx, types.IndexFilter{
 		Index:  opts.Pattern,
 		Hidden: true, // closed indices and dot-prefixed system indices both
 		// need to be visible — the operator named them in the pattern.
@@ -71,7 +71,7 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 		return types.IndexStateChange{}, err
 	}
 
-	target, skipped := partitionByTargetState(indices, opts.Action)
+	target, skipped := partitionByTargetState(rows, opts.Action)
 	limit := opts.MaxIndices
 	if limit <= 0 {
 		limit = DefaultMaxIndices
@@ -110,7 +110,7 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 	// passing the explicit list keeps the cluster's view aligned with
 	// what the operator sees in the result.
 	cReq := types.IndexStateChangeRequest{
-		Index:               strings.Join(target, ","),
+		Indices:             target,
 		IgnoreUnavailable:   opts.IgnoreUnavailable,
 		WaitForActiveShards: opts.WaitForActiveShards,
 	}
@@ -122,7 +122,7 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 	case types.IndexStateClose:
 		changed, err = changer.CloseIndex(ctx, cReq)
 	default:
-		return types.IndexStateChange{}, fmt.Errorf("unsupported action %q", opts.Action)
+		return types.IndexStateChange{}, client.UsageError("unsupported action %q", opts.Action)
 	}
 	if err != nil {
 		return types.IndexStateChange{}, err
@@ -139,11 +139,11 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 // through the explicit override.
 func validateStateChangeOptions(opts StateChangeOptions) error {
 	if opts.Action != types.IndexStateOpen && opts.Action != types.IndexStateClose {
-		return fmt.Errorf("unsupported action %q (expected: open, close)", opts.Action)
+		return client.UsageError("unsupported action %q (expected: open, close)", opts.Action)
 	}
 	pattern := strings.TrimSpace(opts.Pattern)
 	if pattern == "" {
-		return fmt.Errorf("--index is required (a comma-separated list or pattern)")
+		return client.UsageError("--index is required (a comma-separated list or pattern)")
 	}
 	switch pattern {
 	case "*", "_all":
@@ -159,14 +159,16 @@ func validateStateChangeOptions(opts StateChangeOptions) error {
 //
 // Both lists are sorted alphabetically so the rendered output (and
 // captured JSON) is stable regardless of cluster response order.
-func partitionByTargetState(indices []types.Index, action types.IndexStateAction) (target, skipped []string) {
+func partitionByTargetState(rows []types.IndexNameStatus, action types.IndexStateAction) (target, skipped []string) {
 	want := wantPriorState(action)
-	for _, ix := range indices {
-		switch strings.ToLower(ix.Status) {
+	target = make([]string, 0, len(rows))
+	skipped = make([]string, 0, len(rows))
+	for _, r := range rows {
+		switch strings.ToLower(r.Status) {
 		case want:
-			target = append(target, ix.Name)
+			target = append(target, r.Name)
 		default:
-			skipped = append(skipped, ix.Name)
+			skipped = append(skipped, r.Name)
 		}
 	}
 	sort.Strings(target)
@@ -197,6 +199,6 @@ func ParseStateAction(s string) (types.IndexStateAction, error) {
 	case "close":
 		return types.IndexStateClose, nil
 	default:
-		return "", fmt.Errorf("unknown index state action %q (expected: open, close)", s)
+		return "", client.UsageError("unknown index state action %q (expected: open, close)", s)
 	}
 }

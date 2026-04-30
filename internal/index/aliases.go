@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -20,9 +19,23 @@ type AliasListOptions struct {
 	Index string
 }
 
-// ListAliases returns a sorted list of alias→index bindings. The
-// cluster response is unordered; we sort here so a captured stdout
-// (saved to a ticket, or diffed across runs) is stable.
+// ListAliasesStream is the streaming companion to ListAliases. The
+// adapter sorts server-side via /_cat/aliases?s=alias,index, so a
+// streamed NDJSON output is already in the same order a buffered
+// table render would show. No client-side sort happens here — sort
+// would buffer the whole result and defeat the point.
+func ListAliasesStream(ctx context.Context, ai client.AliasInspector, opts AliasListOptions, yield func(types.Alias) error) error {
+	return ai.AliasesStream(ctx, types.AliasFilter{
+		Alias: opts.Alias,
+		Index: opts.Index,
+	}, yield)
+}
+
+// ListAliases returns a sorted list of alias→index bindings. Both
+// adapters sort server-side via /_cat/aliases?s=alias,index. We
+// re-sort client-side as defense-in-depth — older cluster versions or
+// proxies that strip query params would otherwise produce non-stable
+// output, and the cost is negligible against an alias list.
 func ListAliases(ctx context.Context, ai client.AliasInspector, opts AliasListOptions) ([]types.Alias, error) {
 	rows, err := ai.Aliases(ctx, types.AliasFilter{
 		Alias: opts.Alias,
@@ -32,6 +45,9 @@ func ListAliases(ctx context.Context, ai client.AliasInspector, opts AliasListOp
 		return nil, err
 	}
 
+	// Defensive: cluster sort can be skipped on older ES versions or by
+	// proxies that strip query params. Re-sort client-side; a no-op if
+	// the cluster already did the work.
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Alias != rows[j].Alias {
 			return rows[i].Alias < rows[j].Alias
@@ -137,10 +153,10 @@ func validateAliasUpdateOptions(opts AliasUpdateOptions) error {
 	if filter := strings.TrimSpace(opts.Filter); filter != "" {
 		var probe any
 		if err := json.Unmarshal([]byte(filter), &probe); err != nil {
-			return fmt.Errorf("--filter must be a JSON object (got: %v)", err)
+			return client.UsageError("--filter must be a JSON object (got: %v)", err)
 		}
 		if _, ok := probe.(map[string]any); !ok {
-			return fmt.Errorf("--filter must be a JSON object, not a %T", probe)
+			return client.UsageError("--filter must be a JSON object, not a %T", probe)
 		}
 	}
 	return nil
@@ -152,16 +168,16 @@ func validateAliasIdentity(alias, index string) error {
 	a := strings.TrimSpace(alias)
 	i := strings.TrimSpace(index)
 	if a == "" {
-		return fmt.Errorf("--alias is required")
+		return client.UsageError("--alias is required")
 	}
 	if i == "" {
-		return fmt.Errorf("--index is required (a single literal index name)")
+		return client.UsageError("--index is required (a single literal index name)")
 	}
 	if isPatternish(a) {
-		return fmt.Errorf("--alias must be a literal name, not a pattern (got %q)", a)
+		return client.UsageError("--alias must be a literal name, not a pattern (got %q)", a)
 	}
 	if isPatternish(i) {
-		return fmt.Errorf("--index must be a literal name, not a pattern (got %q)", i)
+		return client.UsageError("--index must be a literal name, not a pattern (got %q)", i)
 	}
 	return nil
 }

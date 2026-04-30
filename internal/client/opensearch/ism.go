@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
@@ -45,16 +46,77 @@ func (c *Client) ListPolicies(ctx context.Context, ids []string) ([]types.ISMPol
 		}
 		return []types.ISMPolicy{p}, nil
 	default:
-		out := make([]types.ISMPolicy, 0, len(ids))
-		for _, id := range ids {
-			p, err := c.getOneISMPolicy(ctx, id)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, p)
-		}
-		return out, nil
+		// The plugin's GET /_plugins/_ism/policies/<id> endpoint takes
+		// a single id, so multi-id queries fan out. Run them
+		// concurrently with a small parallelism cap so a 50-id query
+		// doesn't open 50 simultaneous connections to the cluster.
+		// Any single failure cancels the rest via ctx.
+		return c.fanOutGetISMPolicies(ctx, ids)
 	}
+}
+
+// fanOutGetISMPolicies fetches the named policies concurrently with a
+// bounded worker pool. Output preserves the input id order so a
+// captured stdout is deterministic across runs. The first error
+// returned by any worker cancels the remaining requests.
+func (c *Client) fanOutGetISMPolicies(ctx context.Context, ids []string) ([]types.ISMPolicy, error) {
+	const maxParallel = 4
+	parallel := maxParallel
+	if len(ids) < parallel {
+		parallel = len(ids)
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make([]types.ISMPolicy, len(ids))
+	errs := make([]error, len(ids))
+	jobs := make(chan int)
+
+	var wg sync.WaitGroup
+	for w := 0; w < parallel; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				p, err := c.getOneISMPolicy(cctx, ids[i])
+				if err != nil {
+					errs[i] = err
+					cancel()
+					return
+				}
+				results[i] = p
+			}
+		}()
+	}
+dispatch:
+	for i := range ids {
+		select {
+		case <-cctx.Done():
+			// One worker hit an error and cancelled the context (or the
+			// caller's ctx fired). Stop dispatching; close(jobs) below
+			// drains the workers cleanly. Bare `break` would only exit
+			// the select — staticcheck SA4011 catches that.
+			break dispatch
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
+}
+
+// GetPolicy implements client.ISMManager for the single-id lookup. The
+// plugin's own 404 surfaces as ErrNotFound (wrapped) so the business
+// layer can produce a precise message without scanning a 1-element list.
+func (c *Client) GetPolicy(ctx context.Context, id string) (types.ISMPolicy, error) {
+	return c.getOneISMPolicy(ctx, id)
 }
 
 func (c *Client) listAllISMPolicies(ctx context.Context) ([]types.ISMPolicy, error) {
@@ -254,6 +316,100 @@ func (c *Client) ExplainPolicy(ctx context.Context, req types.ISMExplainRequest)
 	return out, nil
 }
 
+// ExplainPolicyStream implements client.ISMManager. Streams the ISM
+// explain envelope: {"index1": {...}, "index2": {...},
+// "total_managed_indices": N}. Decodes one entry at a time so a
+// `--show-policy` invocation against a multi-thousand-index fleet
+// doesn't have to buffer tens of MB into memory before printing.
+func (c *Client) ExplainPolicyStream(ctx context.Context, req types.ISMExplainRequest, yield func(types.ISMExplainEntry) error) error {
+	path := "/_plugins/_ism/explain"
+	if req.Index != "" {
+		path += "/" + req.Index
+	}
+	if req.ShowPolicy {
+		path += "?show_policy=true"
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "ism explain (stream) error"))
+		return classifyISMStatus("ism explain (stream)", resp.StatusCode, errBody)
+	}
+
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ism explain (stream)")
+	dec := json.NewDecoder(body)
+	if tok, err := dec.Token(); err != nil {
+		return errors.Join(errors.New("decoding ism explain (stream) response"), err)
+	} else if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("ism explain (stream): expected JSON object, got %v", tok)
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return errors.Join(errors.New("decoding ism explain (stream) key"), err)
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("ism explain (stream): expected string key, got %v", keyTok)
+		}
+		if name == "total_managed_indices" {
+			// Skip the counter.
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return errors.Join(errors.New("skipping ism explain (stream) total_managed_indices"), err)
+			}
+			continue
+		}
+		var entry ismExplainEntryWire
+		if err := dec.Decode(&entry); err != nil {
+			// A non-object value (the plugin sometimes embeds a per-index
+			// counter on errors) — skip rather than failing the whole
+			// stream. Mirrors the buffered ExplainPolicy behaviour.
+			continue
+		}
+		e := types.ISMExplainEntry{
+			Index:    name,
+			PolicyID: entry.PolicyID,
+			Enabled:  entry.Enabled,
+			Policy:   entry.Policy,
+		}
+		if entry.Meta != nil {
+			e.Managed = true
+			if s, ok := entry.Meta["state"].(map[string]any); ok {
+				if n, ok := s["name"].(string); ok {
+					e.State = n
+				}
+			}
+			if a, ok := entry.Meta["action"].(map[string]any); ok {
+				if n, ok := a["name"].(string); ok {
+					e.Action = n
+				}
+				if step, ok := a["step"].(map[string]any); ok {
+					if n, ok := step["name"].(string); ok {
+						e.Step = n
+					}
+				}
+			}
+			if info, ok := entry.Meta["info"].(map[string]any); ok {
+				e.StepInfo = info
+			}
+		}
+		if err := yield(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ismExplainEntryWire is the per-index payload from the explain endpoint.
 // The plugin uses a deeply nested layout: "policy_id" and "enabled" sit
 // at the top of each index entry, while the runtime state hangs off
@@ -272,7 +428,11 @@ type ismExplainEntryWire struct {
 // doISMRequest is the raw-HTTP escape hatch ISM needs because the
 // plugin's admin API has no typed helper in opensearch-go/v4. Body and
 // status come back paired so the caller can either decode JSON or
-// surface a non-2xx with the cluster's reason in the message.
+// surface a non-2xx with the cluster's reason in the message. The
+// response body is bounded by DefaultMaxResponseBytes so a runaway
+// `ism explain --show-policy` against a multi-thousand-index fleet
+// fails clean instead of buffering hundreds of MB into the operator's
+// heap.
 func (c *Client) doISMRequest(ctx context.Context, method, path string, body io.Reader) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, path, body)
 	if err != nil {
@@ -287,7 +447,8 @@ func (c *Client) doISMRequest(ctx context.Context, method, path string, body io.
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	op := method + " " + path
+	respBody, err := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, op))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -304,6 +465,8 @@ func classifyISMStatus(op string, status int, body []byte) error {
 		return esopsclient.ErrAuth
 	case http.StatusForbidden:
 		return esopsclient.ErrForbidden
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: %s returned HTTP 404: %s", esopsclient.ErrNotFound, op, formatISMError(body))
 	}
 	if status >= 400 {
 		return fmt.Errorf("%s returned HTTP %d: %s", op, status, formatISMError(body))

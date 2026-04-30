@@ -68,6 +68,31 @@ type Setup struct {
 	Client      *client.Client
 }
 
+// Log emits an info-level structured log with the four boilerplate
+// fields every command action carries (event name, context name,
+// dialect, cluster version) plus any per-event attrs the caller adds.
+// Replaces the per-action repetition of:
+//
+//	logging.Logger().Info("index.X",
+//	    "context", s.ContextName,
+//	    "dialect", string(s.Client.Info.Dialect),
+//	    "version", s.Client.Info.Version,
+//	    "k", v, ...)
+//
+// with:
+//
+//	s.Log("index.X", "k", v, ...)
+//
+// Eleven copies in the index command tree alone, all drift-prone.
+func (s Setup) Log(event string, attrs ...any) {
+	base := []any{
+		"context", s.ContextName,
+		"dialect", string(s.Client.Info.Dialect),
+		"version", s.Client.Info.Version,
+	}
+	logging.Logger().Info(event, append(base, attrs...)...)
+}
+
 // Prepare is the shared opening of every command action.
 func Prepare(ctx context.Context, cmd *cli.Command, spec Spec) (Setup, error) {
 	cfg, _, err := config.LoadDefault(cmd.String("config"))

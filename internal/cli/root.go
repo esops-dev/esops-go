@@ -5,7 +5,9 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -14,6 +16,7 @@ import (
 	configcmd "github.com/dj-wasabi/esops-go/internal/cli/config"
 	indexcmd "github.com/dj-wasabi/esops-go/internal/cli/index"
 	"github.com/dj-wasabi/esops-go/internal/cli/ops"
+	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/config"
 	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/version"
@@ -36,7 +39,33 @@ func Run(ctx context.Context, args []string) error {
 			configcmd.Command(),
 		},
 	}
-	return app.Run(ctx, args)
+	return wrapUsageError(app.Run(ctx, args))
+}
+
+// wrapUsageError wraps urfave's flag-validation errors with
+// client.ErrUsage so they map to exit code 2. urfave's typed errors
+// (errRequiredFlags, mutuallyExclusiveGroup, …) are unexported, so we
+// match on the well-known message prefixes the library emits. A
+// best-effort match: a missed prefix degrades to exit code 1, which is
+// the existing behaviour, not a regression.
+func wrapUsageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	for _, prefix := range []string{
+		"Required flag ",            // single missing required flag
+		"Required flags ",           // multiple missing required flags
+		"flag provided but not defined", // unknown flag
+		"flag needs an argument",        // bare --foo with a string flag
+		"option ",                       // mutually-exclusive flag groups
+		"one of these flags needs to be provided", // exclusive-required group
+	} {
+		if strings.Contains(msg, prefix) {
+			return fmt.Errorf("%w: %s", client.ErrUsage, msg)
+		}
+	}
+	return err
 }
 
 // initLogger configures slog from flag values, falling back to

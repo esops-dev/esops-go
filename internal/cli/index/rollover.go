@@ -8,7 +8,6 @@ import (
 
 	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
 	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/logging"
 	"github.com/dj-wasabi/esops-go/internal/output"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
@@ -95,10 +94,7 @@ func runRollover(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logging.Logger().Info("index.rollover",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
+	s.Log("index.rollover",
 		"alias", result.Alias,
 		"old_index", result.OldIndex,
 		"new_index", result.NewIndex,

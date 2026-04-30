@@ -34,6 +34,22 @@ type NodeInspector interface {
 // same filter produces the same view on ES and OS.
 type IndexInspector interface {
 	Indices(ctx context.Context, filter types.IndexFilter) ([]types.Index, error)
+	// IndicesNamesStatus is the slim companion: just (name, status)
+	// pairs from /_cat/indices?h=index,status. The state-change and
+	// optimize pre-flights only need the open/closed split — pulling
+	// the full 12-column row to throw 10 of them away is wasted
+	// network on busy clusters.
+	IndicesNamesStatus(ctx context.Context, filter types.IndexFilter) ([]types.IndexNameStatus, error)
+	// IndicesStream decodes /_cat/indices one row at a time and invokes
+	// yield for each parsed Index. yield returning a non-nil error
+	// stops iteration and surfaces the error from the call. Used by
+	// `index list --output ndjson` so a 20k-index cluster doesn't have
+	// to be buffered into one slice before the first row is printed.
+	//
+	// Implementations must apply the same server-side filtering as
+	// Indices (filter.Index, filter.Hidden via expand_wildcards) so the
+	// streaming and slice paths produce identical row sets.
+	IndicesStream(ctx context.Context, filter types.IndexFilter, yield func(types.Index) error) error
 }
 
 // IndexStateChanger exposes /{index}/_open and /{index}/_close. Both
@@ -129,6 +145,11 @@ type IndexShrinker interface {
 //     false)
 type IndexSettingsInspector interface {
 	GetSettings(ctx context.Context, req types.IndexSettingsGetRequest) ([]types.IndexSettings, error)
+	// GetSettingsStream streams /<indices>/_settings — one IndexSettings
+	// per cluster-keyed entry — and yields each. Lets `settings get
+	// --include-defaults -o ndjson` honour CLAUDE.md §6 on a busy cluster
+	// where the full nested-defaults payload is multiple MB.
+	GetSettingsStream(ctx context.Context, req types.IndexSettingsGetRequest, yield func(types.IndexSettings) error) error
 }
 
 // IndexSettingsUpdater wraps PUT /<indices>/_settings — the destructive
@@ -157,6 +178,11 @@ type IndexSettingsUpdater interface {
 // muddy the CLI story.
 type IndexTemplateInspector interface {
 	GetTemplates(ctx context.Context, names []string) ([]types.IndexTemplate, error)
+	// GetTemplate returns one template by literal name, or a wrapped
+	// error including a not-found case the caller can match on. Avoids
+	// the GetTemplates([]string{name}) → linear-scan-1-element pattern
+	// the business layer used to do.
+	GetTemplate(ctx context.Context, name string) (types.IndexTemplate, error)
 }
 
 // IndexTemplateUpdater wraps PUT /_index_template/<name> and
@@ -180,6 +206,11 @@ type IndexTemplateUpdater interface {
 // cluster as path segments. Behaviour is identical across dialects.
 type AliasInspector interface {
 	Aliases(ctx context.Context, filter types.AliasFilter) ([]types.Alias, error)
+	// AliasesStream decodes /_cat/aliases?format=json one row at a
+	// time and invokes yield for each parsed Alias. Honours the same
+	// CLAUDE.md §6 contract as IndicesStream — a 5k-alias cluster
+	// emits the first row before the cluster has finished sending.
+	AliasesStream(ctx context.Context, filter types.AliasFilter, yield func(types.Alias) error) error
 }
 
 // AliasUpdater wraps POST /_aliases — the bulk add/remove endpoint.
@@ -282,9 +313,15 @@ type ClusterDiagnoser interface {
 // still attached to a managed index).
 type ILMManager interface {
 	ListPolicies(ctx context.Context, names []string) ([]types.ILMPolicy, error)
+	GetPolicy(ctx context.Context, name string) (types.ILMPolicy, error)
 	PutPolicy(ctx context.Context, req types.ILMPolicyPutRequest) (types.ILMPolicyPutResult, error)
 	DeletePolicy(ctx context.Context, req types.ILMPolicyDeleteRequest) (types.ILMPolicyDeleteResult, error)
 	ExplainPolicy(ctx context.Context, req types.ILMExplainRequest) ([]types.ILMExplainEntry, error)
+	// ExplainPolicyStream streams /<index>/_ilm/explain — one entry per
+	// managed index — and yields each. Cluster-wide explain on a
+	// multi-thousand-index fleet is the canonical case where buffering
+	// the whole response is wasted memory.
+	ExplainPolicyStream(ctx context.Context, req types.ILMExplainRequest, yield func(types.ILMExplainEntry) error) error
 }
 
 // ISMManager wraps the OpenSearch ISM plugin admin surface —
@@ -296,9 +333,14 @@ type ILMManager interface {
 // separate capabilities rather than a unified "lifecycle" interface.
 type ISMManager interface {
 	ListPolicies(ctx context.Context, ids []string) ([]types.ISMPolicy, error)
+	GetPolicy(ctx context.Context, id string) (types.ISMPolicy, error)
 	PutPolicy(ctx context.Context, req types.ISMPolicyPutRequest) (types.ISMPolicyPutResult, error)
 	DeletePolicy(ctx context.Context, req types.ISMPolicyDeleteRequest) (types.ISMPolicyDeleteResult, error)
 	ExplainPolicy(ctx context.Context, req types.ISMExplainRequest) ([]types.ISMExplainEntry, error)
+	// ExplainPolicyStream is the streaming companion. Same rationale as
+	// the ILM equivalent — `--show-policy` on a multi-thousand-index
+	// fleet can run into tens of MB.
+	ExplainPolicyStream(ctx context.Context, req types.ISMExplainRequest, yield func(types.ISMExplainEntry) error) error
 }
 
 // Client is the composite surface returned by the cluster factory: the
