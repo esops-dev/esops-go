@@ -1245,3 +1245,243 @@ func TestIndexTemplateDelete_jsonRoundTrips(t *testing.T) {
 		t.Errorf("name = %q", got.Name)
 	}
 }
+
+// ─────────────────────────── ILM / ISM ───────────────────────────
+
+func sampleILMPolicies() []types.ILMPolicy {
+	return []types.ILMPolicy{
+		{Name: "logs-30d", Version: 1, ModifiedDate: "2026-04-30T00:00:00Z",
+			InUseBy: types.ILMInUseBy{Indices: []string{"logs-2026-04-30"}}},
+		{Name: "audit-90d", Version: 2, InUseBy: types.ILMInUseBy{}},
+	}
+}
+
+func TestILMPolicies_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ILMPolicies(&buf, sampleILMPolicies(), output.FormatTable); err != nil {
+		t.Fatalf("ILMPolicies: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "VERSION", "MODIFIED", "INDICES", "logs-30d", "audit-90d"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestILMPolicies_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ILMPolicies(&buf, sampleILMPolicies(), output.FormatJSON); err != nil {
+		t.Fatalf("ILMPolicies: %v", err)
+	}
+	var got []types.ILMPolicy
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "logs-30d" {
+		t.Errorf("round-trip: %+v", got)
+	}
+}
+
+func TestILMPolicies_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ILMPolicies(&buf, sampleILMPolicies(), output.FormatNDJSON); err != nil {
+		t.Fatalf("ILMPolicies: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 lines, got %d:\n%s", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		var p types.ILMPolicy
+		if err := json.Unmarshal([]byte(line), &p); err != nil {
+			t.Errorf("line not valid JSON: %v -- %q", err, line)
+		}
+	}
+}
+
+func TestILMPolicy_wideIncludesPolicyBody(t *testing.T) {
+	p := types.ILMPolicy{
+		Name:    "logs-30d",
+		Version: 1,
+		Definition: map[string]any{
+			"phases": map[string]any{"hot": map[string]any{"actions": map[string]any{}}},
+		},
+	}
+	var buf bytes.Buffer
+	if err := output.ILMPolicy(&buf, p, output.FormatWide); err != nil {
+		t.Fatalf("ILMPolicy: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "POLICY") || !strings.Contains(out, "phases") {
+		t.Errorf("wide should embed policy body:\n%s", out)
+	}
+}
+
+func TestILMPolicyPut_yamlIsValid(t *testing.T) {
+	r := types.ILMPolicyPutResult{Action: "ilm-policy-put", Name: "logs-30d", Acknowledged: true}
+	var buf bytes.Buffer
+	if err := output.ILMPolicyPut(&buf, r, output.FormatYAML); err != nil {
+		t.Fatalf("ILMPolicyPut: %v", err)
+	}
+	var got types.ILMPolicyPutResult
+	if err := yaml.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not YAML: %v", err)
+	}
+	if got.Name != "logs-30d" || !got.Acknowledged {
+		t.Errorf("round-trip: %+v", got)
+	}
+}
+
+func TestILMPolicyDelete_tableShowsName(t *testing.T) {
+	r := types.ILMPolicyDeleteResult{Action: "ilm-policy-delete", Name: "logs-30d", Acknowledged: true}
+	var buf bytes.Buffer
+	if err := output.ILMPolicyDelete(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("ILMPolicyDelete: %v", err)
+	}
+	if !strings.Contains(buf.String(), "logs-30d") {
+		t.Errorf("table missing name:\n%s", buf.String())
+	}
+}
+
+func sampleILMExplain() []types.ILMExplainEntry {
+	return []types.ILMExplainEntry{
+		{Index: "logs-000001", Managed: true, Policy: "logs-30d", Phase: "hot", Action: "rollover", Step: "check-rollover-ready", Age: "12h"},
+		{Index: "audit-000001", Managed: false},
+	}
+}
+
+func TestILMExplain_tableColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ILMExplain(&buf, sampleILMExplain(), output.FormatTable); err != nil {
+		t.Fatalf("ILMExplain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"INDEX", "MANAGED", "POLICY", "PHASE", "ACTION", "STEP", "AGE",
+		"logs-000001", "audit-000001", "logs-30d"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestILMExplain_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ILMExplain(&buf, sampleILMExplain(), output.FormatNDJSON); err != nil {
+		t.Fatalf("ILMExplain: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 lines, got %d:\n%s", len(lines), buf.String())
+	}
+}
+
+func sampleISMPolicies() []types.ISMPolicy {
+	return []types.ISMPolicy{
+		{ID: "logs-rollover", SeqNo: 5, PrimaryTerm: 1,
+			Definition: map[string]any{"policy": map[string]any{"description": "rotate logs daily"}}},
+		{ID: "audit-90d"},
+	}
+}
+
+func TestISMPolicies_tableShowsTokens(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ISMPolicies(&buf, sampleISMPolicies(), output.FormatTable); err != nil {
+		t.Fatalf("ISMPolicies: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ID", "SEQ_NO", "PRIMARY_TERM", "logs-rollover", "audit-90d"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestISMPolicies_wideShowsDescription(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ISMPolicies(&buf, sampleISMPolicies(), output.FormatWide); err != nil {
+		t.Fatalf("ISMPolicies: %v", err)
+	}
+	if !strings.Contains(buf.String(), "rotate logs daily") {
+		t.Errorf("wide should show description:\n%s", buf.String())
+	}
+}
+
+func TestISMPolicy_jsonRoundTrips(t *testing.T) {
+	p := types.ISMPolicy{ID: "logs-rollover", SeqNo: 5, PrimaryTerm: 1}
+	var buf bytes.Buffer
+	if err := output.ISMPolicy(&buf, p, output.FormatJSON); err != nil {
+		t.Fatalf("ISMPolicy: %v", err)
+	}
+	var got types.ISMPolicy
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if got.ID != "logs-rollover" || got.SeqNo != 5 || got.PrimaryTerm != 1 {
+		t.Errorf("round-trip: %+v", got)
+	}
+}
+
+func TestISMPolicyPut_tableShowsTokens(t *testing.T) {
+	r := types.ISMPolicyPutResult{Action: "ism-policy-put", ID: "logs-rollover", SeqNo: 6, PrimaryTerm: 1}
+	var buf bytes.Buffer
+	if err := output.ISMPolicyPut(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("ISMPolicyPut: %v", err)
+	}
+	for _, want := range []string{"ACTION", "ID", "SEQ_NO", "logs-rollover"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("table missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestISMPolicyDelete_jsonShowsOK(t *testing.T) {
+	r := types.ISMPolicyDeleteResult{Action: "ism-policy-delete", ID: "logs-rollover", OK: true}
+	var buf bytes.Buffer
+	if err := output.ISMPolicyDelete(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("ISMPolicyDelete: %v", err)
+	}
+	var got types.ISMPolicyDeleteResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if !got.OK || got.ID != "logs-rollover" {
+		t.Errorf("round-trip: %+v", got)
+	}
+}
+
+func sampleISMExplain() []types.ISMExplainEntry {
+	return []types.ISMExplainEntry{
+		{Index: "logs-000001", Managed: true, PolicyID: "logs-rollover", State: "hot", Action: "rollover", Step: "attempt_rollover", Enabled: true},
+		{Index: "audit-000001", Managed: false},
+	}
+}
+
+func TestISMExplain_tableColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ISMExplain(&buf, sampleISMExplain(), output.FormatTable); err != nil {
+		t.Fatalf("ISMExplain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"INDEX", "MANAGED", "POLICY_ID", "STATE", "ACTION", "STEP",
+		"logs-000001", "audit-000001", "logs-rollover"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestISMExplain_wideShowsEnabledAndStepInfo(t *testing.T) {
+	rows := []types.ISMExplainEntry{
+		{Index: "logs-000001", Managed: true, PolicyID: "logs-rollover", State: "hot",
+			StepInfo: map[string]any{"message": "queued"}},
+	}
+	var buf bytes.Buffer
+	if err := output.ISMExplain(&buf, rows, output.FormatWide); err != nil {
+		t.Fatalf("ISMExplain: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "ENABLED") || !strings.Contains(out, "STEP_INFO") {
+		t.Errorf("wide missing ENABLED / STEP_INFO column:\n%s", out)
+	}
+}

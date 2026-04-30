@@ -22,6 +22,8 @@ func Command() *cli.Command {
 			aliasesCommand(),
 			settingsCommand(),
 			templateCommand(),
+			ilmCommand(),
+			ismCommand(),
 		},
 	}
 }

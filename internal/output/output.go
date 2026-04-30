@@ -1797,3 +1797,467 @@ func pluralize(n int, singular, plural string) string {
 	}
 	return plural
 }
+
+// ILMPolicies renders the cluster-side policy list for
+// `esops index ilm list`. Table format is one row per policy, showing
+// name, version, modified date, and the count of indices it currently
+// manages. Wide adds the data-streams and composable-templates
+// reference counts so an audit can spot heavily-shared policies. JSON/
+// YAML emit the neutral []ILMPolicy shape directly. NDJSON streams one
+// record per line.
+func ILMPolicies(w io.Writer, rows []types.ILMPolicy, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return ilmPoliciesTable(w, rows, true)
+	case FormatTable, "":
+		return ilmPoliciesTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ilmPoliciesTable(w io.Writer, rows []types.ILMPolicy, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tVERSION\tMODIFIED\tINDICES\tDATA_STREAMS\tTEMPLATES")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tVERSION\tMODIFIED\tINDICES")
+	}
+	for _, r := range rows {
+		version := "-"
+		if r.Version > 0 {
+			version = fmt.Sprintf("%d", r.Version)
+		}
+		modified := dashIfEmpty(r.ModifiedDate)
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\n",
+				r.Name, version, modified,
+				len(r.InUseBy.Indices), len(r.InUseBy.DataStreams), len(r.InUseBy.ComposableTemplates))
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n",
+				r.Name, version, modified, len(r.InUseBy.Indices))
+		}
+	}
+	return tw.Flush()
+}
+
+// ILMPolicy renders a single ILM policy — `esops index ilm get`. Table
+// format is a header line followed by an in-use-by section and a
+// pretty-printed policy body block. JSON/YAML emit the neutral
+// ILMPolicy shape directly.
+func ILMPolicy(w io.Writer, p types.ILMPolicy, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(p)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(p)
+	case FormatWide:
+		return ilmPolicyDetail(w, p, true)
+	case FormatTable, "":
+		return ilmPolicyDetail(w, p, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ilmPolicyDetail(w io.Writer, p types.ILMPolicy, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "NAME\tVERSION\tMODIFIED\tINDICES\tDATA_STREAMS\tTEMPLATES")
+	version := "-"
+	if p.Version > 0 {
+		version = fmt.Sprintf("%d", p.Version)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%s\t%s\t%d\t%d\t%d\n",
+		p.Name, version, dashIfEmpty(p.ModifiedDate),
+		len(p.InUseBy.Indices), len(p.InUseBy.DataStreams), len(p.InUseBy.ComposableTemplates))
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if !wide {
+		return nil
+	}
+	if len(p.InUseBy.Indices) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "INDICES")
+		for _, name := range p.InUseBy.Indices {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+	if len(p.Definition) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "POLICY")
+		buf, err := json.MarshalIndent(p.Definition, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	return nil
+}
+
+// ILMPolicyPut renders the outcome of `esops index ilm put`. One-line
+// header (action, dry-run, name, ack). JSON/YAML emit the neutral
+// ILMPolicyPutResult shape directly.
+func ILMPolicyPut(w io.Writer, r types.ILMPolicyPutResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatTable, FormatWide, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tNAME\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Name), r.Acknowledged)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// ILMPolicyDelete mirrors ILMPolicyPut for the delete path.
+func ILMPolicyDelete(w io.Writer, r types.ILMPolicyDeleteResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatTable, FormatWide, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tNAME\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Name), r.Acknowledged)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// ILMExplain renders the cluster's per-index lifecycle status for
+// `esops index ilm explain`. Table format shows the columns operators
+// reach for first when triaging a stuck rollover (index, managed flag,
+// policy, phase, action, step, age). Wide adds the failed-step name
+// and a compact step_info JSON blob. JSON/YAML emit the neutral
+// []ILMExplainEntry shape directly. NDJSON streams one record per line.
+func ILMExplain(w io.Writer, rows []types.ILMExplainEntry, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return ilmExplainTable(w, rows, true)
+	case FormatTable, "":
+		return ilmExplainTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ilmExplainTable(w io.Writer, rows []types.ILMExplainEntry, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "INDEX\tMANAGED\tPOLICY\tPHASE\tACTION\tSTEP\tAGE\tFAILED_STEP\tSTEP_INFO")
+	} else {
+		_, _ = fmt.Fprintln(tw, "INDEX\tMANAGED\tPOLICY\tPHASE\tACTION\tSTEP\tAGE")
+	}
+	for _, r := range rows {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				r.Index, r.Managed, dashIfEmpty(r.Policy), dashIfEmpty(r.Phase),
+				dashIfEmpty(r.Action), dashIfEmpty(r.Step), dashIfEmpty(r.Age),
+				dashIfEmpty(r.FailedStep), dashIfEmpty(stepInfoString(r.StepInfo)))
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%s\t%s\t%s\n",
+				r.Index, r.Managed, dashIfEmpty(r.Policy), dashIfEmpty(r.Phase),
+				dashIfEmpty(r.Action), dashIfEmpty(r.Step), dashIfEmpty(r.Age))
+		}
+	}
+	return tw.Flush()
+}
+
+// stepInfoString collapses the cluster's step_info object to a compact
+// one-line preview for table cells. Long error blobs are truncated; the
+// JSON output carries the full object for scripts that need it.
+func stepInfoString(info map[string]any) string {
+	if len(info) == 0 {
+		return ""
+	}
+	buf, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Sprintf("(unrenderable: %v)", err)
+	}
+	return truncate(string(buf), 60)
+}
+
+// ISMPolicies renders the cluster-side policy list for
+// `esops index ism list`. Mirrors ILMPolicies in shape; the per-policy
+// columns differ because ISM exposes seq_no/primary_term (the optimistic-
+// concurrency tokens) where ILM exposes version/modified-date.
+func ISMPolicies(w io.Writer, rows []types.ISMPolicy, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return ismPoliciesTable(w, rows, true)
+	case FormatTable, "":
+		return ismPoliciesTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ismPoliciesTable(w io.Writer, rows []types.ISMPolicy, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ID\tSEQ_NO\tPRIMARY_TERM\tDESCRIPTION")
+	} else {
+		_, _ = fmt.Fprintln(tw, "ID\tSEQ_NO\tPRIMARY_TERM")
+	}
+	for _, r := range rows {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%s\n",
+				r.ID, r.SeqNo, r.PrimaryTerm,
+				dashIfEmpty(truncate(ismPolicyDescription(r.Definition), 60)))
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\n",
+				r.ID, r.SeqNo, r.PrimaryTerm)
+		}
+	}
+	return tw.Flush()
+}
+
+// ismPolicyDescription extracts the description field from the plugin's
+// policy body. Renderers use it to give the operator a one-line preview
+// of what each policy is for; missing or non-string values render as ""
+// so dashIfEmpty can take over.
+//
+// The plugin returns the policy fields directly under the entry's
+// "policy" key — by the time we reach this renderer the adapter has
+// already pulled that out into Definition, so description is one level
+// down. We also check the wrapped form ({"policy":{"description":...}})
+// for callers that pass a body that hasn't been unwrapped yet.
+func ismPolicyDescription(def map[string]any) string {
+	if len(def) == 0 {
+		return ""
+	}
+	if d, ok := def["description"].(string); ok && d != "" {
+		return d
+	}
+	if policy, ok := def["policy"].(map[string]any); ok {
+		if d, ok := policy["description"].(string); ok {
+			return d
+		}
+	}
+	return ""
+}
+
+// ISMPolicy renders a single ISM policy — `esops index ism get`.
+// JSON/YAML emit the neutral ISMPolicy shape directly. Table format is
+// a header followed by the policy body block under -o wide.
+func ISMPolicy(w io.Writer, p types.ISMPolicy, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(p)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(p)
+	case FormatWide:
+		return ismPolicyDetail(w, p, true)
+	case FormatTable, "":
+		return ismPolicyDetail(w, p, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ismPolicyDetail(w io.Writer, p types.ISMPolicy, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "ID\tSEQ_NO\tPRIMARY_TERM\tDESCRIPTION")
+	_, _ = fmt.Fprintf(hw, "%s\t%d\t%d\t%s\n",
+		p.ID, p.SeqNo, p.PrimaryTerm,
+		dashIfEmpty(ismPolicyDescription(p.Definition)))
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if !wide {
+		return nil
+	}
+	if len(p.Definition) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "POLICY")
+		buf, err := json.MarshalIndent(p.Definition, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	return nil
+}
+
+// ISMPolicyPut renders the outcome of `esops index ism put`. One-line
+// header (action, dry-run, id, seq_no, primary_term). JSON/YAML emit
+// the neutral ISMPolicyPutResult shape directly.
+func ISMPolicyPut(w io.Writer, r types.ISMPolicyPutResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatTable, FormatWide, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tID\tSEQ_NO\tPRIMARY_TERM")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%d\t%d\n",
+			r.Action, r.DryRun, dashIfEmpty(r.ID), r.SeqNo, r.PrimaryTerm)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// ISMPolicyDelete mirrors ISMPolicyPut for the delete path.
+func ISMPolicyDelete(w io.Writer, r types.ISMPolicyDeleteResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatTable, FormatWide, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tID\tOK")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.ID), r.OK)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// ISMExplain renders the per-index ISM status for
+// `esops index ism explain`. Table format mirrors the ILM explain
+// renderer — same operator-facing question ("what is this index doing
+// right now?") even though the underlying state machine differs. Wide
+// adds a compact step_info JSON blob.
+func ISMExplain(w io.Writer, rows []types.ISMExplainEntry, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return ismExplainTable(w, rows, true)
+	case FormatTable, "":
+		return ismExplainTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ismExplainTable(w io.Writer, rows []types.ISMExplainEntry, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "INDEX\tMANAGED\tPOLICY_ID\tSTATE\tACTION\tSTEP\tENABLED\tSTEP_INFO")
+	} else {
+		_, _ = fmt.Fprintln(tw, "INDEX\tMANAGED\tPOLICY_ID\tSTATE\tACTION\tSTEP")
+	}
+	for _, r := range rows {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%s\t%s\t%t\t%s\n",
+				r.Index, r.Managed, dashIfEmpty(r.PolicyID),
+				dashIfEmpty(r.State), dashIfEmpty(r.Action), dashIfEmpty(r.Step),
+				r.Enabled, dashIfEmpty(stepInfoString(r.StepInfo)))
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%s\t%s\n",
+				r.Index, r.Managed, dashIfEmpty(r.PolicyID),
+				dashIfEmpty(r.State), dashIfEmpty(r.Action), dashIfEmpty(r.Step))
+		}
+	}
+	return tw.Flush()
+}
