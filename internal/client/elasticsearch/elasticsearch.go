@@ -484,7 +484,7 @@ func (c *Client) ForceMerge(ctx context.Context, req types.IndexOptimizeRequest)
 		opts = append(opts, fm.WithIndex(req.Indices...))
 	}
 	if req.MaxNumSegments > 0 {
-		opts = append(opts, fm.WithMaxNumSegments(req.MaxNumSegments))
+		opts = append(opts, fm.WithMaxNumSegments(int64(req.MaxNumSegments)))
 	}
 	if req.OnlyExpungeDeletes {
 		opts = append(opts, fm.WithOnlyExpungeDeletes(true))
@@ -778,13 +778,13 @@ func (c *Client) HotThreads(ctx context.Context, req types.HotThreadsRequest) (t
 		opts = append(opts, ht.WithNodeID(req.Nodes...))
 	}
 	if req.Threads != nil {
-		opts = append(opts, ht.WithThreads(*req.Threads))
+		opts = append(opts, ht.WithThreads(int64(*req.Threads)))
 	}
 	if req.Interval > 0 {
 		opts = append(opts, ht.WithInterval(req.Interval))
 	}
 	if req.Snapshots != nil {
-		opts = append(opts, ht.WithSnapshots(*req.Snapshots))
+		opts = append(opts, ht.WithSnapshots(int64(*req.Snapshots)))
 	}
 	if req.Type != "" {
 		opts = append(opts, ht.WithDocumentType(req.Type))

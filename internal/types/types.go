@@ -1596,3 +1596,118 @@ type SnapshotVerifyResult struct {
 	VerifiedNodes []string `json:"verified_nodes"          yaml:"verified_nodes"`
 	Names         []string `json:"node_names,omitempty"    yaml:"node_names,omitempty"`
 }
+
+// SnapshotRestoreRequest is the input to POST /_snapshot/<repo>/<snap>/_restore.
+// Repository and Snapshot are literal names — patterns are not honoured by the
+// cluster on the restore path. Indices is forwarded as the body's `indices`
+// field; empty restores every index in the snapshot. RenamePattern /
+// RenameReplacement map to the body's regex rename pair so an operator can
+// restore a side-by-side copy without clobbering the live index — the standard
+// "restore-into-staging" workflow.
+//
+// IncludeGlobalState / Partial / IgnoreUnavailable are *bool so the CLI can
+// distinguish "leave the cluster default" from "explicitly false".
+// IndexSettings overrides settings on the restored index (most commonly
+// number_of_replicas to 0 during a quick restore-and-promote). IgnoreIndexSettings
+// is the inverse — drop these settings from the source, falling back to the
+// cluster's defaults on the restored index.
+//
+// WaitForCompletion mirrors ?wait_for_completion=true. Default false; long
+// restores should not hold an HTTP connection open, and `snapshot list` /
+// `_recovery` is the canonical post-hoc view.
+type SnapshotRestoreRequest struct {
+	Repository          string
+	Snapshot            string
+	Indices             string
+	IncludeGlobalState  *bool
+	Partial             *bool
+	IgnoreUnavailable   *bool
+	RenamePattern       string
+	RenameReplacement   string
+	IndexSettings       map[string]any
+	IgnoreIndexSettings []string
+	WaitForCompletion   bool
+}
+
+// SnapshotRestoreInfo is the per-snapshot record echoed by the cluster on
+// POST /_snapshot/<repo>/<snap>/_restore. Both dialects return the same shape:
+// `{snapshot:{snapshot, indices, shards:{total,successful,failed}}}` when the
+// cluster acted synchronously (wait_for_completion=true) and `{accepted:true}`
+// when it queued the restore. Indices is the post-rename list — i.e. the
+// indices the cluster *will* materialise — which makes a restore record
+// directly comparable to a `snapshot list` row when verifying.
+type SnapshotRestoreInfo struct {
+	Snapshot         string   `json:"snapshot,omitempty"          yaml:"snapshot,omitempty"`
+	Indices          []string `json:"indices,omitempty"           yaml:"indices,omitempty"`
+	ShardsTotal      int      `json:"shards_total,omitempty"      yaml:"shards_total,omitempty"`
+	ShardsSuccessful int      `json:"shards_successful,omitempty" yaml:"shards_successful,omitempty"`
+	ShardsFailed     int      `json:"shards_failed,omitempty"     yaml:"shards_failed,omitempty"`
+}
+
+// SnapshotRestoreResult is the normalised view of a snapshot restore. Action /
+// DryRun / Repository / Name / Accepted / WaitForCompletion mirror the create
+// shape so JSON/YAML consumers can treat the two operations symmetrically.
+//
+// RenamePattern / RenameReplacement echo the operator's intent so a captured
+// JSON record describes the side-by-side restore without having to back-derive
+// it from the resulting indices.
+//
+// DryRun is the global flag — when true the cluster is not contacted and the
+// returned record reports what would have been sent. The cluster has no native
+// dry-run for restore, so dry-run is implemented client-side.
+type SnapshotRestoreResult struct {
+	Action            string              `json:"action"                       yaml:"action"`
+	DryRun            bool                `json:"dry_run"                      yaml:"dry_run"`
+	Repository        string              `json:"repository"                   yaml:"repository"`
+	Name              string              `json:"name"                         yaml:"name"`
+	Accepted          bool                `json:"accepted"                     yaml:"accepted"`
+	WaitForCompletion bool                `json:"wait_for_completion"          yaml:"wait_for_completion"`
+	RenamePattern     string              `json:"rename_pattern,omitempty"     yaml:"rename_pattern,omitempty"`
+	RenameReplacement string              `json:"rename_replacement,omitempty" yaml:"rename_replacement,omitempty"`
+	Snapshot          SnapshotRestoreInfo `json:"snapshot,omitempty"           yaml:"snapshot,omitempty"`
+}
+
+// SnapshotDeleteRequest is the input to DELETE /_snapshot/<repo>/<snap[,snap…]>.
+// Repository is a literal repo name; Snapshots is the explicit list to delete.
+// Patterns are not accepted at this layer — the business `Prune` resolves them
+// up-front, presents a deterministic list, and only then asks the cluster to
+// delete. Surfacing the resolved set in `--dry-run` is the whole point.
+type SnapshotDeleteRequest struct {
+	Repository string
+	Snapshots  []string
+}
+
+// SnapshotDeleteResult is the normalised view of a delete acknowledgement.
+// The cluster returns `{acknowledged:true}` on success on both dialects;
+// per-snapshot failures (a missing snapshot mid-list) are surfaced as a
+// wrapped error rather than a partial success, mirroring how the rest of the
+// codebase handles destructive cluster refusals.
+type SnapshotDeleteResult struct {
+	Action       string   `json:"action"        yaml:"action"`
+	Repository   string   `json:"repository"    yaml:"repository"`
+	Snapshots    []string `json:"snapshots"     yaml:"snapshots"`
+	Acknowledged bool     `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// SnapshotPruneResult is the normalised view of `esops snapshot prune`. The
+// retention plan is computed client-side (neither cluster has a native prune
+// endpoint), so the result enumerates which snapshots were kept and which were
+// deleted. Considered is the total candidate set after the snapshot-pattern
+// filter; Kept and Deleted partition that set.
+//
+// On `--dry-run` the cluster is not contacted; Deleted lists what *would* be
+// deleted and Acknowledged stays false. On a live run Acknowledged is true
+// once the cluster confirms the bulk delete.
+type SnapshotPruneResult struct {
+	Action          string   `json:"action"                       yaml:"action"`
+	DryRun          bool     `json:"dry_run"                      yaml:"dry_run"`
+	Repository      string   `json:"repository"                   yaml:"repository"`
+	Considered      int      `json:"considered"                   yaml:"considered"`
+	Kept            []string `json:"kept"                         yaml:"kept"`
+	Deleted         []string `json:"deleted"                      yaml:"deleted"`
+	Acknowledged    bool     `json:"acknowledged"                 yaml:"acknowledged"`
+	KeepLast        int      `json:"keep_last,omitempty"          yaml:"keep_last,omitempty"`
+	OlderThan       string   `json:"older_than,omitempty"         yaml:"older_than,omitempty"`
+	StateFilter     string   `json:"state_filter,omitempty"       yaml:"state_filter,omitempty"`
+	SnapshotPattern string   `json:"snapshot_pattern,omitempty"   yaml:"snapshot_pattern,omitempty"`
+}

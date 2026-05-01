@@ -319,6 +319,159 @@ func snapshotVerifyResultFromWire(repo string, wire snapshotVerifyResponseWire) 
 	}
 }
 
+// snapshotRestoreResponseWire mirrors POST /_snapshot/<repo>/<snap>/_restore
+// on OpenSearch — same envelope as Elasticsearch.
+type snapshotRestoreResponseWire struct {
+	Accepted bool `json:"accepted"`
+	Snapshot *struct {
+		Snapshot string   `json:"snapshot"`
+		Indices  []string `json:"indices"`
+		Shards   struct {
+			Total      int `json:"total"`
+			Successful int `json:"successful"`
+			Failed     int `json:"failed"`
+		} `json:"shards"`
+	} `json:"snapshot"`
+}
+
+// RestoreSnapshot implements client.SnapshotRestorer via
+// POST /_snapshot/<repo>/<snap>/_restore. Goes through raw HTTP for the same
+// reason CreateSnapshot does — the typed osapi shape doesn't carry the full
+// rename/index_settings block round-trip cleanly.
+func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreRequest) (types.SnapshotRestoreResult, error) {
+	body, err := buildSnapshotRestoreBody(req)
+	if err != nil {
+		return types.SnapshotRestoreResult{}, err
+	}
+
+	path := fmt.Sprintf("/_snapshot/%s/%s/_restore", url.PathEscape(req.Repository), url.PathEscape(req.Snapshot))
+	if req.WaitForCompletion {
+		path += "?wait_for_completion=true"
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
+	if err != nil {
+		return types.SnapshotRestoreResult{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return types.SnapshotRestoreResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot restore error"))
+		return types.SnapshotRestoreResult{}, esopsclient.ClassifyStatus("snapshot restore repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
+	}
+
+	var wire snapshotRestoreResponseWire
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot restore")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotRestoreResult{}, errors.Join(errors.New("decoding snapshot restore response"), err)
+	}
+	return snapshotRestoreResultFromWire(req, wire), nil
+}
+
+// DeleteSnapshots implements client.SnapshotPruner via
+// DELETE /_snapshot/<repo>/<snap[,snap…]>. OpenSearch accepts the same
+// comma-separated path segment Elasticsearch does, so one bulk request per
+// repository covers any prune plan.
+func (c *Client) DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error) {
+	if len(req.Snapshots) == 0 {
+		return types.SnapshotDeleteResult{}, errors.New("snapshot delete: no snapshots specified")
+	}
+
+	path := fmt.Sprintf("/_snapshot/%s/%s", url.PathEscape(req.Repository), strings.Join(req.Snapshots, ","))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return types.SnapshotDeleteResult{}, err
+	}
+
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return types.SnapshotDeleteResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot delete error"))
+		return types.SnapshotDeleteResult{}, esopsclient.ClassifyStatus("snapshot delete repo="+req.Repository, resp.StatusCode, errBody)
+	}
+
+	var wire struct {
+		Acknowledged bool `json:"acknowledged"`
+	}
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot delete")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotDeleteResult{}, errors.Join(errors.New("decoding snapshot delete response"), err)
+	}
+	return types.SnapshotDeleteResult{
+		Action:       "delete",
+		Repository:   req.Repository,
+		Snapshots:    append([]string(nil), req.Snapshots...),
+		Acknowledged: wire.Acknowledged,
+	}, nil
+}
+
+// buildSnapshotRestoreBody mirrors the ES adapter's helper. Duplicated rather
+// than shared because the wire structs are package-private and the function is
+// a flat translation.
+func buildSnapshotRestoreBody(req types.SnapshotRestoreRequest) ([]byte, error) {
+	body := make(map[string]any)
+	if indices := strings.TrimSpace(req.Indices); indices != "" {
+		body["indices"] = indices
+	}
+	if req.IncludeGlobalState != nil {
+		body["include_global_state"] = *req.IncludeGlobalState
+	}
+	if req.Partial != nil {
+		body["partial"] = *req.Partial
+	}
+	if req.IgnoreUnavailable != nil {
+		body["ignore_unavailable"] = *req.IgnoreUnavailable
+	}
+	if req.RenamePattern != "" {
+		body["rename_pattern"] = req.RenamePattern
+	}
+	if req.RenameReplacement != "" {
+		body["rename_replacement"] = req.RenameReplacement
+	}
+	if len(req.IndexSettings) > 0 {
+		body["index_settings"] = req.IndexSettings
+	}
+	if len(req.IgnoreIndexSettings) > 0 {
+		body["ignore_index_settings"] = req.IgnoreIndexSettings
+	}
+	return json.Marshal(body)
+}
+
+func snapshotRestoreResultFromWire(req types.SnapshotRestoreRequest, wire snapshotRestoreResponseWire) types.SnapshotRestoreResult {
+	out := types.SnapshotRestoreResult{
+		Action:            "restore",
+		Repository:        req.Repository,
+		Name:              req.Snapshot,
+		WaitForCompletion: req.WaitForCompletion,
+		Accepted:          wire.Accepted,
+		RenamePattern:     req.RenamePattern,
+		RenameReplacement: req.RenameReplacement,
+	}
+	if wire.Snapshot != nil {
+		out.Snapshot = types.SnapshotRestoreInfo{
+			Snapshot:         wire.Snapshot.Snapshot,
+			Indices:          wire.Snapshot.Indices,
+			ShardsTotal:      wire.Snapshot.Shards.Total,
+			ShardsSuccessful: wire.Snapshot.Shards.Successful,
+			ShardsFailed:     wire.Snapshot.Shards.Failed,
+		}
+		out.Accepted = true
+	} else {
+		out.Snapshot = types.SnapshotRestoreInfo{Snapshot: req.Snapshot}
+	}
+	return out
+}
+
 // snapshotFromWire mirrors the ES adapter's helper. Kept as a private
 // package-level function (rather than shared via internal/types) because
 // the wire struct is package-private — the conversion is mechanical and

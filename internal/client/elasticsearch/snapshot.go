@@ -336,6 +336,165 @@ func snapshotVerifyResultFromWire(repo string, wire snapshotVerifyResponseWire) 
 	}
 }
 
+// snapshotRestoreResponseWire mirrors POST /_snapshot/<repo>/<snap>/_restore.
+// When wait_for_completion=true the cluster returns
+// `{"snapshot":{"snapshot":"<n>","indices":[...],"shards":{...}}}`. When false
+// it returns `{"accepted":true}`. Same shape as `create` plus the indices /
+// shards block — modelled separately because the field set after rename is
+// the post-restore index list, not the source-snapshot one.
+type snapshotRestoreResponseWire struct {
+	Accepted bool `json:"accepted"`
+	Snapshot *struct {
+		Snapshot string   `json:"snapshot"`
+		Indices  []string `json:"indices"`
+		Shards   struct {
+			Total      int `json:"total"`
+			Successful int `json:"successful"`
+			Failed     int `json:"failed"`
+		} `json:"shards"`
+	} `json:"snapshot"`
+}
+
+// RestoreSnapshot implements client.SnapshotRestorer via
+// POST /_snapshot/<repo>/<snap>/_restore. Body shape and query params are
+// identical on ES and OS, so the same body builder serves the OS adapter.
+func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreRequest) (types.SnapshotRestoreResult, error) {
+	body, err := buildSnapshotRestoreBody(req)
+	if err != nil {
+		return types.SnapshotRestoreResult{}, err
+	}
+
+	rs := c.api.Snapshot.Restore
+	opts := []func(*esapi.SnapshotRestoreRequest){
+		rs.WithContext(ctx),
+		rs.WithBody(bytes.NewReader(body)),
+	}
+	if req.WaitForCompletion {
+		opts = append(opts, rs.WithWaitForCompletion(true))
+	}
+
+	resp, err := c.api.Snapshot.Restore(req.Repository, req.Snapshot, opts...)
+	if err != nil {
+		return types.SnapshotRestoreResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("snapshot restore repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, resp.Body); err != nil {
+		return types.SnapshotRestoreResult{}, err
+	}
+
+	var wire snapshotRestoreResponseWire
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot restore")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotRestoreResult{}, errors.Join(errors.New("decoding snapshot restore response"), err)
+	}
+	return snapshotRestoreResultFromWire(req, wire), nil
+}
+
+// DeleteSnapshots implements client.SnapshotPruner via
+// DELETE /_snapshot/<repo>/<snap[,snap…]>. The cluster returns
+// `{acknowledged:true}` on success; per-snapshot failures (missing names) are
+// surfaced as a wrapped error from classifyResponse rather than silently
+// dropped, so the prune business layer never reports "deleted" for something
+// the cluster refused.
+func (c *Client) DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error) {
+	if len(req.Snapshots) == 0 {
+		return types.SnapshotDeleteResult{}, errors.New("snapshot delete: no snapshots specified")
+	}
+
+	sd := c.api.Snapshot.Delete
+	opts := []func(*esapi.SnapshotDeleteRequest){sd.WithContext(ctx)}
+
+	resp, err := c.api.Snapshot.Delete(req.Repository, req.Snapshots, opts...)
+	if err != nil {
+		return types.SnapshotDeleteResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("snapshot delete repo="+req.Repository, resp.StatusCode, resp.Body); err != nil {
+		return types.SnapshotDeleteResult{}, err
+	}
+
+	var wire struct {
+		Acknowledged bool `json:"acknowledged"`
+	}
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot delete")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotDeleteResult{}, errors.Join(errors.New("decoding snapshot delete response"), err)
+	}
+	return types.SnapshotDeleteResult{
+		Action:       "delete",
+		Repository:   req.Repository,
+		Snapshots:    append([]string(nil), req.Snapshots...),
+		Acknowledged: wire.Acknowledged,
+	}, nil
+}
+
+// buildSnapshotRestoreBody renders the body the cluster expects. Empty fields
+// are omitted entirely so the cluster falls back to its own defaults — the
+// rename pair must be set together (the cluster rejects one without the
+// other), but that pre-flight is the business layer's job.
+func buildSnapshotRestoreBody(req types.SnapshotRestoreRequest) ([]byte, error) {
+	body := make(map[string]any)
+	if indices := strings.TrimSpace(req.Indices); indices != "" {
+		body["indices"] = indices
+	}
+	if req.IncludeGlobalState != nil {
+		body["include_global_state"] = *req.IncludeGlobalState
+	}
+	if req.Partial != nil {
+		body["partial"] = *req.Partial
+	}
+	if req.IgnoreUnavailable != nil {
+		body["ignore_unavailable"] = *req.IgnoreUnavailable
+	}
+	if req.RenamePattern != "" {
+		body["rename_pattern"] = req.RenamePattern
+	}
+	if req.RenameReplacement != "" {
+		body["rename_replacement"] = req.RenameReplacement
+	}
+	if len(req.IndexSettings) > 0 {
+		body["index_settings"] = req.IndexSettings
+	}
+	if len(req.IgnoreIndexSettings) > 0 {
+		body["ignore_index_settings"] = req.IgnoreIndexSettings
+	}
+	return json.Marshal(body)
+}
+
+// snapshotRestoreResultFromWire builds the neutral result. Mirrors the create
+// helper: an `accepted: true` async response gets a placeholder snapshot block
+// so a captured JSON record stays interpretable on its own; a synchronous
+// response carries the cluster's per-restore index/shard counts.
+func snapshotRestoreResultFromWire(req types.SnapshotRestoreRequest, wire snapshotRestoreResponseWire) types.SnapshotRestoreResult {
+	out := types.SnapshotRestoreResult{
+		Action:            "restore",
+		Repository:        req.Repository,
+		Name:              req.Snapshot,
+		WaitForCompletion: req.WaitForCompletion,
+		Accepted:          wire.Accepted,
+		RenamePattern:     req.RenamePattern,
+		RenameReplacement: req.RenameReplacement,
+	}
+	if wire.Snapshot != nil {
+		out.Snapshot = types.SnapshotRestoreInfo{
+			Snapshot:         wire.Snapshot.Snapshot,
+			Indices:          wire.Snapshot.Indices,
+			ShardsTotal:      wire.Snapshot.Shards.Total,
+			ShardsSuccessful: wire.Snapshot.Shards.Successful,
+			ShardsFailed:     wire.Snapshot.Shards.Failed,
+		}
+		// The cluster echoes the snapshot block once it has acted on the
+		// restore — treat that as acknowledgement so callers syncing on
+		// `Accepted` see a consistent signal across both wait modes.
+		out.Accepted = true
+	} else {
+		out.Snapshot = types.SnapshotRestoreInfo{Snapshot: req.Snapshot}
+	}
+	return out
+}
+
 // snapshotFromWire converts the ES wire shape into the neutral type.
 // Failures are surfaced as raw JSON strings so the cluster's per-failure
 // reasons (which carry the operator's most useful signal) survive the
