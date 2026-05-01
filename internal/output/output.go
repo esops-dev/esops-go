@@ -2826,3 +2826,432 @@ func snapshotPruneTable(w io.Writer, r types.SnapshotPruneResult, wide bool) err
 	}
 	return tw.Flush()
 }
+
+// Nodes renders a slice of Node rows. Default table is the columns
+// CLAUDE.md §6 calls out for `ops nodes`: name, role, version, heap,
+// disk usage. Wide adds the master flag, IP, CPU, load, and uptime.
+// JSON/YAML emit the full Node struct.
+func Nodes(w io.Writer, nodes []types.Node, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(nodes)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, n := range nodes {
+			if err := enc.Encode(n); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(nodes)
+	case FormatWide:
+		return nodesTable(w, nodes, true)
+	case FormatTable, "":
+		return nodesTable(w, nodes, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func nodesTable(w io.Writer, nodes []types.Node, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tROLES\tVERSION\tIP\tMASTER\tHEAP%\tHEAP_USED\tHEAP_MAX\tDISK_USED\tDISK_AVAIL\tDISK%\tCPU\tLOAD_1M\tUPTIME")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tROLES\tVERSION\tHEAP%\tDISK_USED\tDISK_AVAIL\tDISK%")
+	}
+	for _, n := range nodes {
+		roles := joinOrDash(n.Roles)
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				n.Name, roles,
+				dashIfEmpty(n.Version),
+				dashIfEmpty(n.IP),
+				masterMark(n.Master),
+				percentOrDash(n.HeapPercent),
+				humanBytesOrDash(n.HeapUsedBytes),
+				humanBytesOrDash(n.HeapMaxBytes),
+				humanBytesOrDash(n.DiskUsedBytes),
+				humanBytesOrDash(n.DiskAvailBytes),
+				percentOrDash(n.DiskUsedPercent),
+				percentOrDash(n.CPUPercent),
+				dashIfEmpty(n.Load1m),
+				dashIfEmpty(n.Uptime),
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				n.Name, roles,
+				dashIfEmpty(n.Version),
+				percentOrDash(n.HeapPercent),
+				humanBytesOrDash(n.DiskUsedBytes),
+				humanBytesOrDash(n.DiskAvailBytes),
+				percentOrDash(n.DiskUsedPercent),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// masterMark renders the elected-master flag as the same '*' the
+// cluster prints in /_cat/nodes — kubectl-ish single character keeps
+// the column narrow without losing meaning.
+func masterMark(b bool) string {
+	if b {
+		return "*"
+	}
+	return "-"
+}
+
+// percentOrDash formats an integer 0–100 cell. Zero is ambiguous —
+// could be "0% reported" or "no value reported" — so we render zero as
+// "-" because /_cat/nodes leaves the column blank when the cluster has
+// nothing to say (coordinating-only nodes have no heap/disk).
+func percentOrDash(p int) string {
+	if p <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d%%", p)
+}
+
+// humanBytesOrDash is humanBytes with a "-" placeholder for zero bytes.
+// Same rationale as percentOrDash: a coordinating-only node returning
+// no disk total is information, not a 0b shard.
+func humanBytesOrDash(n int64) string {
+	if n <= 0 {
+		return "-"
+	}
+	return humanBytes(n)
+}
+
+// NodeDrain renders the outcome of `esops ops drain`. Header carries
+// the action/scope/dry-run flags plus the shard-count snapshot; the
+// before/after exclude lists follow as two stacked sections. JSON/YAML
+// emit the neutral NodeDrainResult shape directly.
+func NodeDrain(w io.Writer, r types.NodeDrainResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return nodeDrainTable(w, r, true)
+	case FormatTable, "":
+		return nodeDrainTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func nodeDrainTable(w io.Writer, r types.NodeDrainResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	scope := drainScope(r.Persistent)
+	_, _ = fmt.Fprintln(hw, "ACTION\tNODES\tSCOPE\tDRY_RUN\tACK\tALREADY_EXCLUDED\tWAITED\tSHARDS_LEFT")
+	_, _ = fmt.Fprintf(hw, "drain\t%s\t%s\t%t\t%t\t%s\t%t\t%d\n",
+		joinOrDash(r.NodeNames), scope, r.DryRun, r.Acknowledged,
+		dashIfEmpty(strings.Join(r.AlreadyExcluded, ",")),
+		r.Waited, r.ShardsRemaining,
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	// Per-node breakdown: only useful when there's more than one
+	// node, or when wide is requested. Single-node drains have the
+	// total in SHARDS_LEFT already.
+	if (wide || len(r.NodeNames) > 1) && len(r.PerNodeShardsRemaining) > 0 {
+		_, _ = fmt.Fprintln(w)
+		pw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(pw, "NODE\tSHARDS_LEFT")
+		// Iterate NodeNames (not the map) so the order is the
+		// operator's input order — stable and grep-friendly.
+		for _, name := range r.NodeNames {
+			_, _ = fmt.Fprintf(pw, "%s\t%d\n", name, r.PerNodeShardsRemaining[name])
+		}
+		if err := pw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if r.VotingExclusionAcked || len(r.VotingExclusionsAdded) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "VOTING_CONFIG_EXCLUSIONS")
+		_, _ = fmt.Fprintf(w, "  added:        %s\n", joinOrDash(r.VotingExclusionsAdded))
+		_, _ = fmt.Fprintf(w, "  acknowledged: %t\n", r.VotingExclusionAcked)
+	}
+
+	if wide || len(r.AlreadyExcluded) != len(r.NodeNames) {
+		writeExcludeBeforeAfter(w, r.Before, r.After)
+	}
+	return nil
+}
+
+// NodeUncordon renders the outcome of `esops ops uncordon`. Mirrors
+// NodeDrain but omits the wait/shards columns since uncordon does not
+// poll progress.
+func NodeUncordon(w io.Writer, r types.NodeUncordonResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return nodeUncordonTable(w, r, true)
+	case FormatTable, "":
+		return nodeUncordonTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func nodeUncordonTable(w io.Writer, r types.NodeUncordonResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	scope := drainScope(r.Persistent)
+	_, _ = fmt.Fprintln(hw, "ACTION\tNODES\tSCOPE\tDRY_RUN\tACK\tNOT_IN_LIST\tVOTING_CLEARED")
+	_, _ = fmt.Fprintf(hw, "uncordon\t%s\t%s\t%t\t%t\t%s\t%t\n",
+		joinOrDash(r.NodeNames), scope, r.DryRun, r.Acknowledged,
+		dashIfEmpty(strings.Join(r.NotInList, ",")),
+		r.VotingExclusionsCleared,
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	// The before/after exclude list is interesting whenever the
+	// cluster's allocation state actually changed (some node was
+	// removed). Skip it on a pure --clear-voting invocation, and on
+	// the no-op case where every requested node was already absent.
+	allAbsent := len(r.NodeNames) > 0 && len(r.NotInList) == len(r.NodeNames)
+	allocationChanged := len(r.NodeNames) > 0 && !allAbsent
+	if wide || allocationChanged {
+		writeExcludeBeforeAfter(w, r.Before, r.After)
+	}
+	return nil
+}
+
+// NodeDrainList renders the read-only output of `ops drain --list`.
+// Three small sections (persistent / transient / voting) — each empty
+// list reads as "-" so the section is always present and grep-able.
+func NodeDrainList(w io.Writer, r types.NodeDrainListResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		nodeDrainListTable(w, r)
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func nodeDrainListTable(w io.Writer, r types.NodeDrainListResult) {
+	_, _ = fmt.Fprintln(w, "ALLOCATION_EXCLUDE")
+	_, _ = fmt.Fprintf(w, "  persistent: %s\n", joinOrDash(r.PersistentExcluded))
+	_, _ = fmt.Fprintf(w, "  transient:  %s\n", joinOrDash(r.TransientExcluded))
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "VOTING_CONFIG_EXCLUSIONS")
+	_, _ = fmt.Fprintf(w, "  nodes: %s\n", joinOrDash(r.VotingExcluded))
+}
+
+// drainScope picks the scope label for the table view — "transient" or
+// "persistent". Used by both drain and uncordon renderers.
+func drainScope(persistent bool) string {
+	if persistent {
+		return "persistent"
+	}
+	return "transient"
+}
+
+// writeExcludeBeforeAfter prints the BEFORE/AFTER exclude name lists.
+// Empty list renders as a single "-" placeholder so the section is
+// always present and grep-able in shell history.
+func writeExcludeBeforeAfter(w io.Writer, before, after []string) {
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "EXCLUDE._NAME")
+	_, _ = fmt.Fprintf(w, "  before: %s\n", joinOrDash(before))
+	_, _ = fmt.Fprintf(w, "  after:  %s\n", joinOrDash(after))
+}
+
+// TasksNDJSONStream writes one Task per line to w as records arrive
+// from the supplied callback-shaped source. Honours the same
+// CLAUDE.md §6 contract as IndicesNDJSONStream: a fleet running
+// thousands of concurrent tasks emits the first row before the
+// cluster has finished sending the last one. Use with
+// ops.ListTasksStream.
+func TasksNDJSONStream(w io.Writer, source func(yield func(types.Task) error) error) error {
+	enc := json.NewEncoder(w)
+	return source(func(t types.Task) error {
+		return enc.Encode(t)
+	})
+}
+
+// Tasks renders a slice of in-flight Task rows for `ops tasks list`.
+// Default table is the columns operators reach for first when triaging
+// "what's hot right now" (id, action, running, cancellable). Wide adds
+// the description, parent task ID, and start time. JSON/YAML emit the
+// neutral Task shape; NDJSON streams one record per line so a fleet
+// with thousands of tasks doesn't have to parse a single blob.
+func Tasks(w io.Writer, tasks []types.Task, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(tasks)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, t := range tasks {
+			if err := enc.Encode(t); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(tasks)
+	case FormatWide:
+		return tasksTable(w, tasks, true)
+	case FormatTable, "":
+		return tasksTable(w, tasks, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func tasksTable(w io.Writer, tasks []types.Task, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ID\tNODE\tACTION\tRUNNING\tCANCELLABLE\tCANCELLED\tPARENT\tDESCRIPTION")
+		for _, t := range tasks {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%t\t%s\t%s\n",
+				t.ID, dashIfEmpty(t.Node), t.Action,
+				humanRunningTime(t.RunningTimeNanos),
+				t.Cancellable, t.Cancelled,
+				dashIfEmpty(t.ParentTaskID),
+				dashIfEmpty(t.Description),
+			)
+		}
+	} else {
+		_, _ = fmt.Fprintln(tw, "ID\tNODE\tACTION\tRUNNING\tCANCELLABLE")
+		for _, t := range tasks {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\n",
+				t.ID, dashIfEmpty(t.Node), t.Action,
+				humanRunningTime(t.RunningTimeNanos),
+				t.Cancellable,
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// TasksCancel renders the outcome of `ops tasks cancel`. Default table
+// is a one-line header (action, dry-run, target, count, wait flag,
+// node-failure count) followed by the per-task list of cancelled rows
+// (the cluster's own echo of what got the signal). Wide adds the same
+// extra columns the list renderer surfaces, plus the node_failures
+// section verbatim. JSON/YAML emit the neutral TasksCancelResult shape.
+func TasksCancel(w io.Writer, r types.TasksCancelResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return tasksCancelTable(w, r, true)
+	case FormatTable, "":
+		return tasksCancelTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func tasksCancelTable(w io.Writer, r types.TasksCancelResult, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	target := tasksCancelTarget(r.TaskIDs)
+	_, _ = fmt.Fprintln(hw, "ACTION\tTARGET\tDRY_RUN\tWAIT\tCANCELLED\tNODE_FAILURES")
+	_, _ = fmt.Fprintf(hw, "cancel\t%s\t%t\t%t\t%d\t%d\n",
+		target, r.DryRun, r.WaitForCompletion,
+		len(r.Cancelled), len(r.NodeFailures),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+
+	if len(r.Cancelled) > 0 {
+		_, _ = fmt.Fprintln(w)
+		if err := tasksTable(w, r.Cancelled, wide); err != nil {
+			return err
+		}
+	}
+
+	if len(r.NodeFailures) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "NODE_FAILURES")
+		for _, line := range r.NodeFailures {
+			_, _ = fmt.Fprintf(w, "  %s\n", line)
+		}
+	}
+	return nil
+}
+
+// tasksCancelTarget renders the TARGET cell for the cancel result
+// header. One ID prints verbatim, two or three are joined for
+// at-a-glance auditability, and four or more collapse to a count so
+// the column doesn't blow out the table; the operator who ran the
+// command already knows the IDs they passed, and `-o json` carries the
+// full slice. "filter" marks the bulk-by-actions/nodes path.
+func tasksCancelTarget(ids []string) string {
+	switch len(ids) {
+	case 0:
+		return "filter"
+	case 1, 2, 3:
+		return strings.Join(ids, ",")
+	default:
+		return fmt.Sprintf("%d ids", len(ids))
+	}
+}
+
+// humanRunningTime formats a nanosecond running-time value as a short
+// scannable string. Mirrors humanDuration's contract (zero = "-") so
+// the table cell stays aligned with how the snapshot/restore views
+// render duration.
+func humanRunningTime(ns int64) string {
+	if ns <= 0 {
+		return "-"
+	}
+	d := time.Duration(ns)
+	if d >= time.Minute {
+		d = d.Round(time.Second)
+	} else if d >= time.Second {
+		d = d.Round(time.Millisecond)
+	}
+	return d.String()
+}

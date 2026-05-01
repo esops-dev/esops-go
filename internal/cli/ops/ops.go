@@ -14,12 +14,16 @@ func Command() *cli.Command {
 		Usage: "Day-to-day cluster operations",
 		Commands: []*cli.Command{
 			healthCommand(),
+			nodesCommand(),
 			shardsCommand(),
 			allocationExplainCommand(),
 			auditCommand(),
 			diagCommand(),
 			hotThreadsCommand(),
 			rebalanceCommand(),
+			drainCommand(),
+			uncordonCommand(),
+			tasksCommand(),
 		},
 	}
 }

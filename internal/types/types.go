@@ -18,9 +18,9 @@ const (
 
 // ClusterInfo is the outcome of the GET / probe.
 type ClusterInfo struct {
-	Dialect     Dialect
-	ClusterName string
-	Version     string
+	Dialect      Dialect
+	ClusterName  string
+	Version      string
 	Distribution string // OS only; empty on ES
 }
 
@@ -250,14 +250,14 @@ type IndexOptimizeRequest struct {
 // the right thing to surface in a ticket and rephrasing them would
 // lose signal.
 type IndexOptimizeResult struct {
-	Action          string   `json:"action"                  yaml:"action"`
-	DryRun          bool     `json:"dry_run"                 yaml:"dry_run"`
-	Indices         []string `json:"indices"                 yaml:"indices"`
-	MaxNumSegments  int      `json:"max_num_segments,omitempty" yaml:"max_num_segments,omitempty"`
-	ShardsTotal     int      `json:"shards_total"            yaml:"shards_total"`
-	ShardsSuccess   int      `json:"shards_successful"       yaml:"shards_successful"`
-	ShardsFailed    int      `json:"shards_failed"           yaml:"shards_failed"`
-	Failures        []string `json:"failures,omitempty"      yaml:"failures,omitempty"`
+	Action         string   `json:"action"                  yaml:"action"`
+	DryRun         bool     `json:"dry_run"                 yaml:"dry_run"`
+	Indices        []string `json:"indices"                 yaml:"indices"`
+	MaxNumSegments int      `json:"max_num_segments,omitempty" yaml:"max_num_segments,omitempty"`
+	ShardsTotal    int      `json:"shards_total"            yaml:"shards_total"`
+	ShardsSuccess  int      `json:"shards_successful"       yaml:"shards_successful"`
+	ShardsFailed   int      `json:"shards_failed"           yaml:"shards_failed"`
+	Failures       []string `json:"failures,omitempty"      yaml:"failures,omitempty"`
 }
 
 // IndexRolloverConditions are the rollover triggers the cluster
@@ -937,10 +937,10 @@ type RerouteRequest struct {
 // One entry per submitted command, with the per-decider breakdown
 // the cluster evaluated for that command on each candidate node.
 type RerouteResult struct {
-	Acknowledged bool                  `json:"acknowledged"           yaml:"acknowledged"`
-	DryRun       bool                  `json:"dry_run"                yaml:"dry_run"`
-	Commands     []RerouteCommand      `json:"commands"               yaml:"commands"`
-	Explanations []RerouteExplanation  `json:"explanations,omitempty" yaml:"explanations,omitempty"`
+	Acknowledged bool                 `json:"acknowledged"           yaml:"acknowledged"`
+	DryRun       bool                 `json:"dry_run"                yaml:"dry_run"`
+	Commands     []RerouteCommand     `json:"commands"               yaml:"commands"`
+	Explanations []RerouteExplanation `json:"explanations,omitempty" yaml:"explanations,omitempty"`
 }
 
 // RerouteExplanation is one explanation block from /_cluster/reroute
@@ -1103,15 +1103,15 @@ type DiagVerifySummary struct {
 // list. Cluster echoes the manifest's recorded cluster identity so
 // scripts don't have to re-parse the manifest themselves.
 type DiagVerifyResult struct {
-	ManifestSHA256  string               `json:"manifest_sha256"            yaml:"manifest_sha256"`
-	Cluster         DiagClusterSummary   `json:"cluster"                    yaml:"cluster"`
-	Tool            string               `json:"tool,omitempty"             yaml:"tool,omitempty"`
-	Version         string               `json:"version,omitempty"          yaml:"version,omitempty"`
-	CreatedAt       string               `json:"created_at,omitempty"       yaml:"created_at,omitempty"`
-	Artifacts       []DiagVerifyArtifact `json:"artifacts"                  yaml:"artifacts"`
-	UnknownEntries  []string             `json:"unknown_entries,omitempty"  yaml:"unknown_entries,omitempty"`
-	Summary         DiagVerifySummary    `json:"summary"                    yaml:"summary"`
-	Pass            bool                 `json:"pass"                       yaml:"pass"`
+	ManifestSHA256 string               `json:"manifest_sha256"            yaml:"manifest_sha256"`
+	Cluster        DiagClusterSummary   `json:"cluster"                    yaml:"cluster"`
+	Tool           string               `json:"tool,omitempty"             yaml:"tool,omitempty"`
+	Version        string               `json:"version,omitempty"          yaml:"version,omitempty"`
+	CreatedAt      string               `json:"created_at,omitempty"       yaml:"created_at,omitempty"`
+	Artifacts      []DiagVerifyArtifact `json:"artifacts"                  yaml:"artifacts"`
+	UnknownEntries []string             `json:"unknown_entries,omitempty"  yaml:"unknown_entries,omitempty"`
+	Summary        DiagVerifySummary    `json:"summary"                    yaml:"summary"`
+	Pass           bool                 `json:"pass"                       yaml:"pass"`
 }
 
 // Node is the neutral view of one cluster node from /_cat/nodes. Roles
@@ -1124,10 +1124,197 @@ type DiagVerifyResult struct {
 // shards" flag: true when any role equals "data" or starts with
 // "data_". Computed on the adapter side so callers don't have to
 // re-implement the role-string heuristic in every consumer.
+//
+// The remaining fields populate `ops nodes` — version, IP, master flag,
+// heap usage, and disk usage. They are best-effort: /_cat/nodes leaves
+// some columns out for coordinating-only nodes (no disk, no heap) and
+// the byte fields are zero when the cluster did not report a value.
+// Numeric fields are bytes; percent fields are 0–100 ints.
 type Node struct {
-	Name       string   `json:"name"                  yaml:"name"`
-	Roles      []string `json:"roles,omitempty"       yaml:"roles,omitempty"`
-	IsDataNode bool     `json:"is_data_node"          yaml:"is_data_node"`
+	Name            string   `json:"name"                          yaml:"name"`
+	Roles           []string `json:"roles,omitempty"               yaml:"roles,omitempty"`
+	IsDataNode      bool     `json:"is_data_node"                  yaml:"is_data_node"`
+	Version         string   `json:"version,omitempty"             yaml:"version,omitempty"`
+	IP              string   `json:"ip,omitempty"                  yaml:"ip,omitempty"`
+	Master          bool     `json:"master,omitempty"              yaml:"master,omitempty"`
+	HeapUsedBytes   int64    `json:"heap_used_bytes,omitempty"     yaml:"heap_used_bytes,omitempty"`
+	HeapMaxBytes    int64    `json:"heap_max_bytes,omitempty"      yaml:"heap_max_bytes,omitempty"`
+	HeapPercent     int      `json:"heap_percent,omitempty"        yaml:"heap_percent,omitempty"`
+	DiskUsedBytes   int64    `json:"disk_used_bytes,omitempty"     yaml:"disk_used_bytes,omitempty"`
+	DiskAvailBytes  int64    `json:"disk_avail_bytes,omitempty"    yaml:"disk_avail_bytes,omitempty"`
+	DiskTotalBytes  int64    `json:"disk_total_bytes,omitempty"    yaml:"disk_total_bytes,omitempty"`
+	DiskUsedPercent int      `json:"disk_used_percent,omitempty"   yaml:"disk_used_percent,omitempty"`
+	CPUPercent      int      `json:"cpu_percent,omitempty"         yaml:"cpu_percent,omitempty"`
+	Load1m          string   `json:"load_1m,omitempty"             yaml:"load_1m,omitempty"`
+	Uptime          string   `json:"uptime,omitempty"              yaml:"uptime,omitempty"`
+}
+
+// NodeDrainRequest is the input to ops.DrainNode. NodeNames carries the
+// nodes the operator wants excluded from shard allocation; each must
+// already be present in the cluster (validated client-side via
+// NodeInspector before any setting is touched). Multi-node calls write
+// one PUT to /_cluster/settings — the cluster honours
+// `cluster.routing.allocation.exclude._name` as a single comma-separated
+// value, so adding three nodes is one request, not three.
+//
+// Persistent toggles between /_cluster/settings transient (default —
+// clears on master restart, the safer choice for a temporary drain)
+// and persistent (survives restart; pair with `ops uncordon` to remove).
+//
+// AlsoExcludeVoting toggles the voting-config exclusion the cluster
+// uses to retire master-eligible nodes safely. POST
+// /_cluster/voting_config_exclusions?node_names=… runs after the
+// allocation PUT acknowledges, so the voting state never leads the
+// allocation state. The cluster accepts non-master nodes as a no-op,
+// so the flag is safe to set on a mixed-role drain.
+//
+// DryRun records the intended transition without firing the PUT/POST.
+// Wait blocks until every named node has relocated all of its shards
+// (or the context is cancelled); WaitTimeout caps the wait,
+// WaitInterval controls how often the shard count is re-polled
+// (default 5s).
+type NodeDrainRequest struct {
+	NodeNames         []string
+	Persistent        bool
+	DryRun            bool
+	Wait              bool
+	WaitTimeout       time.Duration
+	WaitInterval      time.Duration
+	AlsoExcludeVoting bool
+}
+
+// NodeDrainResult records the cluster-state transition. Acknowledged
+// mirrors the cluster's `acknowledged` field on the PUT
+// /_cluster/settings call. Before/After are the
+// `cluster.routing.allocation.exclude._name` values before and after
+// the change — a captured DryRun listing is the same transition the
+// live run would apply.
+//
+// AlreadyExcluded records the subset of NodeNames already in the
+// exclude list before the call (idempotency tracking). When every
+// requested node was already excluded, AlreadyExcluded == NodeNames
+// and the cluster is not touched.
+//
+// ShardsRemaining is the total shard count across the named nodes at
+// the time Wait returned (zero on a clean drain, or the count that
+// was still resident when the timeout fired). PerNodeShardsRemaining
+// breaks that count down per node so the operator sees which node is
+// the laggard.
+//
+// VotingExclusionsAdded names the nodes that were appended to the
+// voting-config exclusions list — the same as NodeNames when
+// AlsoExcludeVoting was set and the POST acknowledged, empty
+// otherwise. VotingExclusionAcked is the acknowledgement flag for
+// that secondary call so a partial-success can be surfaced
+// (allocation PUT acked, voting POST refused).
+type NodeDrainResult struct {
+	NodeNames              []string       `json:"node_names"                          yaml:"node_names"`
+	Acknowledged           bool           `json:"acknowledged"                        yaml:"acknowledged"`
+	DryRun                 bool           `json:"dry_run"                             yaml:"dry_run"`
+	Persistent             bool           `json:"persistent"                          yaml:"persistent"`
+	AlreadyExcluded        []string       `json:"already_excluded"                    yaml:"already_excluded"`
+	Before                 []string       `json:"before"                              yaml:"before"`
+	After                  []string       `json:"after"                               yaml:"after"`
+	Waited                 bool           `json:"waited,omitempty"                    yaml:"waited,omitempty"`
+	ShardsRemaining        int            `json:"shards_remaining"                    yaml:"shards_remaining"`
+	PerNodeShardsRemaining map[string]int `json:"per_node_shards_remaining,omitempty" yaml:"per_node_shards_remaining,omitempty"`
+	VotingExclusionsAdded  []string       `json:"voting_exclusions_added,omitempty"   yaml:"voting_exclusions_added,omitempty"`
+	VotingExclusionAcked   bool           `json:"voting_exclusion_acked,omitempty"    yaml:"voting_exclusion_acked,omitempty"`
+}
+
+// NodeUncordonRequest is the input to ops.UncordonNode. NodeNames is
+// the list of nodes to remove from the allocation-exclude list; the
+// nodes do not need to be present in the cluster (a drained node may
+// have already been decommissioned, leaving the exclusion behind —
+// cleaning that up is exactly what uncordon is for).
+//
+// ClearVoting toggles a DELETE /_cluster/voting_config_exclusions
+// call alongside the allocation PUT. The cluster's API for voting
+// exclusions only supports clear-all (no per-node delete), so this is
+// a cluster-wide sweep — call it during the standard "bring nodes
+// back online" flow when the voting list is known stale.
+//
+// Either NodeNames or ClearVoting must be set: an empty uncordon
+// request is rejected at the validation layer rather than silently
+// no-op.
+type NodeUncordonRequest struct {
+	NodeNames   []string
+	Persistent  bool
+	DryRun      bool
+	ClearVoting bool
+}
+
+// NodeUncordonResult mirrors NodeDrainResult for the uncordon path.
+// NotInList records the subset of NodeNames that were not actually in
+// the exclude list — a no-op uncordon (NotInList == NodeNames) is
+// reported, not errored, so a sweep across a fleet doesn't fail on
+// the first node that was never drained.
+//
+// VotingExclusionsCleared / VotingExclusionAcked report the
+// outcome of the secondary DELETE call.
+type NodeUncordonResult struct {
+	NodeNames               []string `json:"node_names"                          yaml:"node_names"`
+	Acknowledged            bool     `json:"acknowledged"                        yaml:"acknowledged"`
+	DryRun                  bool     `json:"dry_run"                             yaml:"dry_run"`
+	Persistent              bool     `json:"persistent"                          yaml:"persistent"`
+	NotInList               []string `json:"not_in_list"                         yaml:"not_in_list"`
+	Before                  []string `json:"before"                              yaml:"before"`
+	After                   []string `json:"after"                               yaml:"after"`
+	VotingExclusionsCleared bool     `json:"voting_exclusions_cleared,omitempty" yaml:"voting_exclusions_cleared,omitempty"`
+	VotingExclusionAcked    bool     `json:"voting_exclusion_acked,omitempty"    yaml:"voting_exclusion_acked,omitempty"`
+}
+
+// NodeDrainListResult is the read-only view returned by `ops drain
+// --list`: which nodes are currently excluded, by scope, plus the
+// cluster's voting-config exclusion list. Listing is a separate
+// result type from NodeDrainResult because the shape (no acked, no
+// before/after, just a snapshot) shares almost nothing with the
+// mutating result.
+type NodeDrainListResult struct {
+	PersistentExcluded []string `json:"persistent_excluded" yaml:"persistent_excluded"`
+	TransientExcluded  []string `json:"transient_excluded"  yaml:"transient_excluded"`
+	VotingExcluded     []string `json:"voting_excluded"     yaml:"voting_excluded"`
+}
+
+// ClusterSettingsView is the slim read-side view of /_cluster/settings
+// the drain/uncordon path needs: the current
+// cluster.routing.allocation.exclude._name from each scope. Persistent
+// and Transient are always populated (empty slices when the scope has
+// no exclusions); the adapter is responsible for parsing the cluster's
+// nested-or-flat envelope into these flat slices.
+type ClusterSettingsView struct {
+	PersistentExcludeName []string
+	TransientExcludeName  []string
+}
+
+// ClusterAllocationExcludeUpdate carries the desired
+// cluster.routing.allocation.exclude._name value into the adapter.
+// Persistent picks the scope. Names is the post-update list; an empty
+// slice clears the setting (the adapter sends a JSON null to the
+// cluster so the key is removed rather than left as an empty string,
+// which the cluster would treat as "exclude no nodes" but keep the key
+// in /_cluster/settings forever).
+type ClusterAllocationExcludeUpdate struct {
+	Persistent bool
+	Names      []string
+}
+
+// ClusterSettingsUpdateResult is the cluster's `acknowledged` flag after
+// a PUT /_cluster/settings call.
+type ClusterSettingsUpdateResult struct {
+	Acknowledged bool `json:"acknowledged" yaml:"acknowledged"`
+}
+
+// VotingExclusionsResult is the outcome of POST/DELETE on
+// /_cluster/voting_config_exclusions. Neither endpoint returns a
+// JSON body on success (HTTP 200 alone is the cluster's
+// acknowledgement), so Acknowledged is set to true on a 2xx and false
+// when the cluster refused the call. The capability layer surfaces
+// the cluster's response body verbatim when the call fails — typical
+// case is a 503 when the master can't reach quorum to commit the
+// metadata change.
+type VotingExclusionsResult struct {
+	Acknowledged bool `json:"acknowledged" yaml:"acknowledged"`
 }
 
 // ShardAnalysisRequest is the input to ops.AnalyzeShards. Threshold
@@ -1271,8 +1458,8 @@ type ILMPolicy struct {
 // reference the policy. Empty slices on policies the cluster reports as
 // unattached.
 type ILMInUseBy struct {
-	Indices          []string `json:"indices,omitempty"             yaml:"indices,omitempty"`
-	DataStreams      []string `json:"data_streams,omitempty"        yaml:"data_streams,omitempty"`
+	Indices             []string `json:"indices,omitempty"             yaml:"indices,omitempty"`
+	DataStreams         []string `json:"data_streams,omitempty"        yaml:"data_streams,omitempty"`
 	ComposableTemplates []string `json:"composable_templates,omitempty" yaml:"composable_templates,omitempty"`
 }
 
@@ -1330,16 +1517,16 @@ type ILMExplainRequest struct {
 // cluster's diagnosis when Step is "ERROR"; surfacing them verbatim
 // keeps the message specific (e.g. "rollover_failed: alias not found").
 type ILMExplainEntry struct {
-	Index          string         `json:"index"                       yaml:"index"`
-	Managed        bool           `json:"managed"                     yaml:"managed"`
-	Policy         string         `json:"policy,omitempty"            yaml:"policy,omitempty"`
-	LifecycleDate  string         `json:"lifecycle_date,omitempty"    yaml:"lifecycle_date,omitempty"`
-	Phase          string         `json:"phase,omitempty"             yaml:"phase,omitempty"`
-	Action         string         `json:"action,omitempty"            yaml:"action,omitempty"`
-	Step           string         `json:"step,omitempty"              yaml:"step,omitempty"`
-	FailedStep     string         `json:"failed_step,omitempty"       yaml:"failed_step,omitempty"`
-	StepInfo       map[string]any `json:"step_info,omitempty"         yaml:"step_info,omitempty"`
-	Age            string         `json:"age,omitempty"               yaml:"age,omitempty"`
+	Index         string         `json:"index"                       yaml:"index"`
+	Managed       bool           `json:"managed"                     yaml:"managed"`
+	Policy        string         `json:"policy,omitempty"            yaml:"policy,omitempty"`
+	LifecycleDate string         `json:"lifecycle_date,omitempty"    yaml:"lifecycle_date,omitempty"`
+	Phase         string         `json:"phase,omitempty"             yaml:"phase,omitempty"`
+	Action        string         `json:"action,omitempty"            yaml:"action,omitempty"`
+	Step          string         `json:"step,omitempty"              yaml:"step,omitempty"`
+	FailedStep    string         `json:"failed_step,omitempty"       yaml:"failed_step,omitempty"`
+	StepInfo      map[string]any `json:"step_info,omitempty"         yaml:"step_info,omitempty"`
+	Age           string         `json:"age,omitempty"               yaml:"age,omitempty"`
 }
 
 // ISMPolicy is the neutral view of one Index State Management policy
@@ -1353,10 +1540,10 @@ type ILMExplainEntry struct {
 // flow can hand them straight back to the cluster, but PutPolicy below
 // uses the create-or-overwrite semantics by default.
 type ISMPolicy struct {
-	ID           string         `json:"id"                       yaml:"id"`
-	SeqNo        int64          `json:"seq_no,omitempty"         yaml:"seq_no,omitempty"`
-	PrimaryTerm  int64          `json:"primary_term,omitempty"   yaml:"primary_term,omitempty"`
-	Definition   map[string]any `json:"definition,omitempty"     yaml:"definition,omitempty"`
+	ID          string         `json:"id"                       yaml:"id"`
+	SeqNo       int64          `json:"seq_no,omitempty"         yaml:"seq_no,omitempty"`
+	PrimaryTerm int64          `json:"primary_term,omitempty"   yaml:"primary_term,omitempty"`
+	Definition  map[string]any `json:"definition,omitempty"     yaml:"definition,omitempty"`
 }
 
 // ISMPolicyPutRequest is the input to a PUT /_plugins/_ism/policies/<id>
@@ -1474,7 +1661,7 @@ type Snapshot struct {
 	ShardsTotal        int      `json:"shards_total"              yaml:"shards_total"`
 	ShardsSuccessful   int      `json:"shards_successful"         yaml:"shards_successful"`
 	ShardsFailed       int      `json:"shards_failed"             yaml:"shards_failed"`
-	Version            string            `json:"version,omitempty"         yaml:"version,omitempty"`
+	Version            string   `json:"version,omitempty"         yaml:"version,omitempty"`
 	// Failures carries the cluster's per-shard failure objects verbatim
 	// so `--output json` consumers can drill in with jq (e.g.
 	// `.failures[].reason`) instead of receiving JSON-encoded strings
@@ -1791,17 +1978,17 @@ type IndexRecovery struct {
 // operator polling a multi-snapshot recovery can see which of N
 // concurrent restores each shard belongs to.
 type ShardRecovery struct {
-	ID              int    `json:"id"                          yaml:"id"`
-	Type            string `json:"type"                        yaml:"type"`
-	Stage           string `json:"stage"                       yaml:"stage"`
-	Primary         bool   `json:"primary"                     yaml:"primary"`
-	Source          string `json:"source,omitempty"            yaml:"source,omitempty"`
-	BytesPercent    string `json:"bytes_percent,omitempty"     yaml:"bytes_percent,omitempty"`
-	FilesPercent    string `json:"files_percent,omitempty"     yaml:"files_percent,omitempty"`
-	BytesTotal      int64  `json:"bytes_total,omitempty"       yaml:"bytes_total,omitempty"`
-	BytesRecovered  int64  `json:"bytes_recovered,omitempty"   yaml:"bytes_recovered,omitempty"`
-	FilesTotal      int    `json:"files_total,omitempty"       yaml:"files_total,omitempty"`
-	FilesRecovered  int    `json:"files_recovered,omitempty"   yaml:"files_recovered,omitempty"`
+	ID             int    `json:"id"                          yaml:"id"`
+	Type           string `json:"type"                        yaml:"type"`
+	Stage          string `json:"stage"                       yaml:"stage"`
+	Primary        bool   `json:"primary"                     yaml:"primary"`
+	Source         string `json:"source,omitempty"            yaml:"source,omitempty"`
+	BytesPercent   string `json:"bytes_percent,omitempty"     yaml:"bytes_percent,omitempty"`
+	FilesPercent   string `json:"files_percent,omitempty"     yaml:"files_percent,omitempty"`
+	BytesTotal     int64  `json:"bytes_total,omitempty"       yaml:"bytes_total,omitempty"`
+	BytesRecovered int64  `json:"bytes_recovered,omitempty"   yaml:"bytes_recovered,omitempty"`
+	FilesTotal     int    `json:"files_total,omitempty"       yaml:"files_total,omitempty"`
+	FilesRecovered int    `json:"files_recovered,omitempty"   yaml:"files_recovered,omitempty"`
 }
 
 // SnapshotStatusRequest is the input to GET /_snapshot/<repo>/<snap>/_status.
@@ -1918,4 +2105,98 @@ type SnapshotRepositoryDeregisterResult struct {
 	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
 	Repository   string `json:"repository"    yaml:"repository"`
 	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// Task is the neutral view of one in-flight task as reported by GET
+// /_tasks?group_by=none. ID is the cluster's composite "<node_id>:
+// <task_number>" identifier; the cancel API requires this exact form.
+// Both ES and OS expose the same fields, so one shape covers both.
+//
+// Description is only populated when the request asked for detailed=true
+// — the cluster otherwise returns an empty string. RunningTimeNanos
+// counts wall-clock time since the task started; the renderer formats
+// it as a short duration so saved JSON keeps the raw value (scriptable)
+// while the table view stays readable.
+//
+// ParentTaskID is "" when the cluster reports the task as a root.
+// Cancellable says whether the task accepts a cancel signal at all
+// (force_merge tasks are not cancellable, for instance) — surfaced so
+// `ops tasks cancel` can refuse with a clear message instead of issuing
+// a POST the cluster will silently ignore.
+type Task struct {
+	ID               string `json:"id"                          yaml:"id"`
+	Node             string `json:"node,omitempty"              yaml:"node,omitempty"`
+	Type             string `json:"type,omitempty"              yaml:"type,omitempty"`
+	Action           string `json:"action"                      yaml:"action"`
+	Description      string `json:"description,omitempty"       yaml:"description,omitempty"`
+	StartTimeMillis  int64  `json:"start_time_millis,omitempty" yaml:"start_time_millis,omitempty"`
+	RunningTimeNanos int64  `json:"running_time_nanos"          yaml:"running_time_nanos"`
+	Cancellable      bool   `json:"cancellable"                 yaml:"cancellable"`
+	Cancelled        bool   `json:"cancelled,omitempty"         yaml:"cancelled,omitempty"`
+	ParentTaskID     string `json:"parent_task_id,omitempty"    yaml:"parent_task_id,omitempty"`
+}
+
+// TasksFilter narrows a TasksInspector.Tasks call. Zero value lists every
+// in-flight task on the cluster. Actions, Nodes and ParentTaskID are
+// forwarded to the cluster as query params (the cluster does the
+// filtering — no client-side scan); Detailed flips on the cluster's
+// `?detailed=true` so the Description field on each Task is populated.
+//
+// Actions accept the cluster's dotted action names and shell-style
+// wildcards: "indices:data/write/reindex", "*search*", etc. The cluster
+// short-circuits the unfiltered "no actions" path so listing without a
+// filter is the same call shape as a filtered list.
+type TasksFilter struct {
+	Actions      []string
+	Nodes        []string
+	ParentTaskID string
+	Detailed     bool
+}
+
+// TasksCancelRequest is the input to a TasksCanceller.CancelTasks call.
+// Either TaskIDs (each literal "<node_id>:<task_number>") or Filter
+// must be set; mutually exclusive at the validation layer to keep
+// "cancel one/many by ID" and "cancel by filter" calls visually
+// distinct in shell history. An empty request is rejected — the
+// cluster's POST /_tasks/_cancel with no filter would cancel every
+// cancellable task in the cluster, which is a foot-gun we deliberately
+// do not expose.
+//
+// At the capability layer, at most one TaskIDs entry is honoured per
+// call (the cluster's POST /_tasks/<id>/_cancel endpoint takes a
+// single ID). Multi-ID requests are fanned out by the business layer,
+// which invokes the capability once per ID and aggregates per-call
+// results — there is no batched cluster endpoint to fold this back
+// into one request.
+//
+// WaitForCompletion forwards `?wait_for_completion=true` so the call
+// blocks until the cancel signal lands; useful when the operator wants
+// proof that the task is gone before continuing the runbook.
+type TasksCancelRequest struct {
+	TaskIDs           []string
+	Filter            TasksFilter
+	WaitForCompletion bool
+}
+
+// TasksCancelResult is the cluster's view of a successful cancel call.
+// Cancelled is the slice of tasks the cluster reports as having received
+// the signal — the cluster echoes the set so the operator sees what was
+// actually targeted (a wildcard `--actions` match that hits zero tasks
+// returns an empty Cancelled slice, which is information, not an error).
+//
+// NodeFailures captures the cluster's `node_failures` array verbatim so
+// a partial cancel (one node refused) is still surfaced rather than
+// silently dropped. DryRun mirrors the request's --dry-run flag (the
+// cancel endpoints have no native dry-run; we list-then-report
+// client-side). For multi-ID requests, TaskIDs echoes the full set the
+// business layer fanned out across; Cancelled and NodeFailures are
+// unions across every per-ID call so a partial fan-out (one ID
+// succeeded, one failed) is faithfully surfaced.
+type TasksCancelResult struct {
+	Action            string   `json:"action"                  yaml:"action"`
+	DryRun            bool     `json:"dry_run"                 yaml:"dry_run"`
+	TaskIDs           []string `json:"task_ids,omitempty"      yaml:"task_ids,omitempty"`
+	WaitForCompletion bool     `json:"wait_for_completion"     yaml:"wait_for_completion"`
+	Cancelled         []Task   `json:"cancelled"               yaml:"cancelled"`
+	NodeFailures      []string `json:"node_failures,omitempty" yaml:"node_failures,omitempty"`
 }

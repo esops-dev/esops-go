@@ -183,3 +183,35 @@ $ esops snapshot deregister --repository s3-old
 
 **All commands** support `--context`, `--url`, `--output` (table/wide/json/yaml/ndjson), `--dry-run`, and global auth/timeout flags.  
 The `context=…` line always prints to stderr so pipelines stay clean.
+
+---
+
+## Watching in-flight snapshot operations
+
+`snapshot create --wait` and `snapshot restore --wait` poll the
+cluster's snapshot/recovery surface directly:
+
+- `create --wait` → `_snapshot/<repo>/<name>/_status` per shard.
+- `restore --wait` → `_recovery` per target index.
+
+Neither uses `/_tasks`. **The cluster's snapshot service runs shard
+work outside the transport-task framework**, so `esops ops tasks list`
+will *not* reliably show an in-flight `snapshot create` once the
+initial PUT has been accepted — the request task completes in
+milliseconds and the per-shard work is invisible to `/_tasks`.
+
+If you need to interrupt a runaway snapshot, use the cluster's own
+delete-during-progress: `esops snapshot prune --repository <repo>
+--snapshot <name>`. The cluster aborts the in-flight snapshot and
+removes the partial blobs from the repository.
+
+Restore has no `_cancel` endpoint at all. `snapshot restore --wait` is
+a *local* poller: SIGINT stops it, but the cluster keeps recovering
+shards. Clean up partial indices afterwards with `esops index list` /
+`esops index close` if needed.
+
+`esops ops tasks list` is still useful for cluster work that *does*
+register as transport tasks: reindex, search, `_recovery` for an
+in-progress restore, persistent maintenance tasks (`geoip-downloader`,
+`health-node`), and any other op the cluster surfaces in `/_tasks`.
+See [`ops.md`](./ops.md#esops-ops-tasks-list) for the full surface.
