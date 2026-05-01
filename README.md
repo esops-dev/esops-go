@@ -117,6 +117,7 @@ See [docs/](docs/) for per-command reference.
 
 - [docs/index.md](docs/index.md) — index management
 - [docs/ops.md](docs/ops.md) — cluster operations
+- [docs/snapshot.md](docs/snapshot.md) — snapshot and repository inspection
 - [docs/config.md](docs/config.md) — config schema, contexts, secrets
 - [docs/completion.md](docs/completion.md) — shell completion
 

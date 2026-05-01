@@ -14,19 +14,31 @@
 #                        YELLOW on the 2-node ES cluster and on the 1-node
 #                        OS cluster. Exercises `ops allocation-explain`
 #                        and the unassigned-reason path in `ops shards`.
+#
+#   --with-snapshots     Register an `fs` repository (`local-fs`) at the
+#                        cluster's path.repo and take two snapshots:
+#                        `seed-products-<ts>` (esops-products only) and
+#                        `seed-all-<ts>` (every esops-* index). Requires
+#                        path.repo to be configured cluster-side — the
+#                        local docker-compose sets this automatically.
+#                        Exercises `snapshot list` and gives `snapshot
+#                        create/verify/restore/prune` something to work
+#                        with later.
 
 set -euo pipefail
 
 URL=""
 AUTH=""
 WITH_UNASSIGNED=0
+WITH_SNAPSHOTS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url)             URL="$2";  shift 2 ;;
     --user)            AUTH="$2"; shift 2 ;;
     --with-unassigned) WITH_UNASSIGNED=1; shift ;;
+    --with-snapshots)  WITH_SNAPSHOTS=1;  shift ;;
     -h|--help)
-      sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -214,8 +226,46 @@ if (( WITH_UNASSIGNED )); then
   INDEXES+=(esops-stuck-replicas)
 fi
 
+if (( WITH_SNAPSHOTS )); then
+  # Discover the cluster's path.repo rather than hard-coding it, so a
+  # non-default bootstrap config (e.g. a self-managed cluster) still
+  # works. /_nodes/_all/settings carries the resolved path even when
+  # nothing else uses it; filter_path keeps the response tiny.
+  PATH_REPO=$(curl -sS "${AUTH_ARG[@]}" \
+    "$URL/_nodes/_all/settings?filter_path=nodes.*.settings.path.repo" \
+    | grep -oE '"/[^"]+"' | head -1 | tr -d '"')
+  if [[ -z "$PATH_REPO" ]]; then
+    echo "!!! cluster has no path.repo set — register an fs repo manually or rebuild dev clusters" >&2
+    echo "!!! (the local docker-compose configures path.repo automatically; run 'make dev-down && make dev-up')" >&2
+    exit 1
+  fi
+
+  REPO_NAME=local-fs
+  echo ">>> registering fs repository '$REPO_NAME' at $PATH_REPO"
+  http PUT "/_snapshot/$REPO_NAME" "{\"type\":\"fs\",\"settings\":{\"location\":\"$PATH_REPO\",\"compress\":true}}"
+
+  TS=$(date -u +%Y%m%d-%H%M%S)
+  SNAP_PRODUCTS="seed-products-$TS"
+  SNAP_ALL="seed-all-$TS"
+
+  echo ">>> taking snapshot '$SNAP_PRODUCTS' (esops-products only)"
+  http PUT "/_snapshot/$REPO_NAME/$SNAP_PRODUCTS?wait_for_completion=true" \
+    '{"indices":"esops-products","include_global_state":false}'
+
+  echo ">>> taking snapshot '$SNAP_ALL' (esops-* wildcard)"
+  http PUT "/_snapshot/$REPO_NAME/$SNAP_ALL?wait_for_completion=true" \
+    '{"indices":"esops-*","include_global_state":false}'
+fi
+
 echo ">>> done. doc counts:"
 for idx in "${INDEXES[@]}"; do
   count=$(curl -sS "${AUTH_ARG[@]}" "$URL/$idx/_count" | sed -E 's/.*"count":([0-9]+).*/\1/')
   printf "  %-22s %s\n" "$idx" "$count"
 done
+
+if (( WITH_SNAPSHOTS )); then
+  echo ">>> snapshots in $REPO_NAME:"
+  curl -sS "${AUTH_ARG[@]}" "$URL/_snapshot/$REPO_NAME/_all?filter_path=snapshots.snapshot,snapshots.state" \
+    | sed -E 's/[][{}"]//g; s/,/\n  /g; s/^/  /'
+  echo
+fi

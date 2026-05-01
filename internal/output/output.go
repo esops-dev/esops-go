@@ -2335,3 +2335,152 @@ func ismExplainTable(w io.Writer, rows []types.ISMExplainEntry, wide bool) error
 	}
 	return tw.Flush()
 }
+
+// SnapshotRepositories renders a slice of SnapshotRepository entries.
+// Default table shows name + type; wide adds a flattened settings preview
+// so an operator scanning for misconfigured S3 bucket paths doesn't have
+// to hop into JSON. JSON/YAML emit the neutral SnapshotRepository shape.
+func SnapshotRepositories(w io.Writer, rows []types.SnapshotRepository, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return snapshotRepositoriesTable(w, rows, true)
+	case FormatTable, "":
+		return snapshotRepositoriesTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotRepositoriesTable(w io.Writer, rows []types.SnapshotRepository, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tTYPE\tSETTINGS")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tTYPE")
+	}
+	for _, r := range rows {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Name, r.Type, dashIfEmpty(settingsPreview(r.Settings)))
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\n", r.Name, r.Type)
+		}
+	}
+	return tw.Flush()
+}
+
+// settingsPreview renders the repository settings map as a flat
+// key=value list, sorted by key for stable output. Nested values render
+// via fmt.Sprintf("%v") rather than a JSON marshal — keeps the wide
+// table column scannable; operators who want the full structure use
+// `-o json` or `-o yaml`.
+func settingsPreview(m map[string]any) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, m[k]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// Snapshots renders a slice of Snapshot rows. Default table shows the
+// columns operators reach for during incident triage (repo, name, state,
+// duration, shard counts); wide adds UUID, indices count and start time.
+// JSON/YAML emit the neutral Snapshot shape; NDJSON streams one record
+// per line.
+func Snapshots(w io.Writer, rows []types.Snapshot, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return snapshotsTable(w, rows, true)
+	case FormatTable, "":
+		return snapshotsTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotsTable(w io.Writer, rows []types.Snapshot, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "REPOSITORY\tNAME\tSTATE\tINDICES\tSHARDS\tFAILED\tDURATION\tSTART\tUUID")
+	} else {
+		_, _ = fmt.Fprintln(tw, "REPOSITORY\tNAME\tSTATE\tINDICES\tSHARDS\tDURATION")
+	}
+	for _, r := range rows {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d/%d\t%d\t%s\t%s\t%s\n",
+				r.Repository, r.Name, r.State,
+				len(r.Indices),
+				r.ShardsSuccessful, r.ShardsTotal, r.ShardsFailed,
+				humanDuration(r.DurationMillis),
+				formatCreation(r.StartTimeMillis),
+				dashIfEmpty(r.UUID),
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d/%d\t%s\n",
+				r.Repository, r.Name, r.State,
+				len(r.Indices),
+				r.ShardsSuccessful, r.ShardsTotal,
+				humanDuration(r.DurationMillis),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// humanDuration renders a millisecond duration as a short, scannable
+// string ("2m30s", "5h10m", "120ms"). Zero or negative renders as "-"
+// — in-progress snapshots leave duration unset until completion and
+// "0ms" would be misleading.
+func humanDuration(ms int64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	d := time.Duration(ms) * time.Millisecond
+	// time.Duration.String() emits "2m30.000s" — truncate sub-second
+	// noise for the common case where snapshots run for minutes.
+	if d >= time.Minute {
+		d = d.Round(time.Second)
+	}
+	return d.String()
+}

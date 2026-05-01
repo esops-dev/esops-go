@@ -343,6 +343,32 @@ type ISMManager interface {
 	ExplainPolicyStream(ctx context.Context, req types.ISMExplainRequest, yield func(types.ISMExplainEntry) error) error
 }
 
+// SnapshotInspector exposes the read-only repository/snapshot listing
+// surface — GET /_snapshot[/<repos>] for repositories and
+// GET /_snapshot/<repo>/<snapshot> for snapshots themselves. The
+// envelope shapes are identical across dialects (per-repo `{type,
+// settings}` for repositories; a `snapshots: [...]` array of objects
+// with `snapshot/state/indices/start_time_in_millis/...` for the
+// snapshot listing), so one capability covers ES and OS.
+//
+// The cluster has no native multi-repo snapshot endpoint that returns
+// stable cross-product semantics: ES 8+ accepts a comma-separated repo
+// list on /_snapshot/<repos>/<pattern> while OS 1.x rejects it. The
+// adapter resolves an empty/wildcard Repository client-side by listing
+// repositories first and fanning out per repo — the same fan-out a
+// hand-rolled curl loop would do, just behind a single capability call.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a 404 on a missing repo, or a 500 from a
+//     repository whose backing storage is unreachable)
+type SnapshotInspector interface {
+	Repositories(ctx context.Context, filter types.SnapshotRepositoryFilter) ([]types.SnapshotRepository, error)
+	Snapshots(ctx context.Context, filter types.SnapshotFilter) ([]types.Snapshot, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -371,4 +397,5 @@ type Client struct {
 	Reroute           RerouteExecutor
 	ILM               ILMManager
 	ISM               ISMManager
+	Snapshot          SnapshotInspector
 }
