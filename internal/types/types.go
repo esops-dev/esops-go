@@ -1510,3 +1510,89 @@ type SnapshotFilter struct {
 type SnapshotRepositoryFilter struct {
 	Repository string
 }
+
+// SnapshotCreateRequest is the input to PUT /_snapshot/<repo>/<snapshot>.
+// Repository and Snapshot are literal names — patterns are not honoured
+// by the cluster on the create path. Indices is a comma-separated pattern
+// the cluster receives as the body's `indices` field; empty means "every
+// open index" (the cluster default). IncludeGlobalState mirrors the body
+// field of the same name; defaults to the cluster's own default when nil.
+//
+// Partial maps to the body's `partial` field — when true, the cluster
+// proceeds even if some shards are unavailable. Off by default because a
+// silent partial backup is the worst kind of regret.
+//
+// IgnoreUnavailable maps to the body's `ignore_unavailable` field;
+// useful when Indices includes a pattern that may not match anything.
+//
+// WaitForCompletion mirrors ?wait_for_completion. true blocks the HTTP
+// call until the snapshot finishes (good for `--wait`); false returns
+// immediately and the operator polls via `snapshot list`. Default false
+// (the cluster's default) — long-running snapshots should not hold an
+// HTTP connection open by default.
+//
+// Metadata is forwarded as the body's `metadata` block, an opaque map of
+// labels the operator wants attached to the snapshot for later auditing.
+type SnapshotCreateRequest struct {
+	Repository         string
+	Snapshot           string
+	Indices            string
+	IncludeGlobalState *bool
+	Partial            *bool
+	IgnoreUnavailable  *bool
+	WaitForCompletion  bool
+	Metadata           map[string]any
+}
+
+// SnapshotCreateResult is the normalised view of a snapshot creation. The
+// shape mirrors what both ES and OS return on PUT /_snapshot/<repo>/<snap>.
+//
+// When WaitForCompletion=true, the cluster echoes a full Snapshot record
+// inside `snapshot:{...}` — Snapshot is populated and Accepted=true. When
+// WaitForCompletion=false (the default), the cluster only returns
+// `{"accepted":true}` and Snapshot is the zero value with State="STARTED";
+// the operator polls `snapshot list` to learn the final state.
+//
+// DryRun mirrors the operator's --dry-run flag — the cluster has no
+// native dry-run for snapshot creation, so dry-run is implemented client-
+// side as "validate + report what would have been sent".
+type SnapshotCreateResult struct {
+	Action            string   `json:"action"                       yaml:"action"`
+	DryRun            bool     `json:"dry_run"                      yaml:"dry_run"`
+	Repository        string   `json:"repository"                   yaml:"repository"`
+	Name              string   `json:"name"                         yaml:"name"`
+	Accepted          bool     `json:"accepted"                     yaml:"accepted"`
+	WaitForCompletion bool     `json:"wait_for_completion"          yaml:"wait_for_completion"`
+	Snapshot          Snapshot `json:"snapshot,omitempty"           yaml:"snapshot,omitempty"`
+}
+
+// SnapshotVerifyRequest is the input to POST /_snapshot/<repo>/_verify
+// — the cluster's repository connectivity probe. Repository is a literal
+// repo name; verify is single-repo by design (operators typically run
+// it just before a manual snapshot). Empty Repository is rejected by the
+// business layer up-front so the cluster doesn't see a request that would
+// 400 anyway.
+type SnapshotVerifyRequest struct {
+	Repository string
+}
+
+// SnapshotVerifyResult is the normalised view of a verify response. The
+// cluster returns the list of nodes that successfully connected to the
+// repository; an empty list with no error means "verified, but no nodes
+// answered" (rare and worth surfacing). When the repository is
+// misconfigured, the cluster returns a 4xx/5xx with a precise reason —
+// the adapter surfaces that as a wrapped error rather than encoding it
+// in this struct, mirroring how the rest of the codebase handles cluster
+// refusals.
+//
+// VerifiedNodes is a flat list of node identifiers (whatever the cluster
+// returned as the map key, typically the node UUID). Names mirrors the
+// `name` field nested under each node entry — kept as a parallel slice
+// so a JSON record stays small but operators can still read which
+// human-readable hostnames responded.
+type SnapshotVerifyResult struct {
+	Action        string   `json:"action"                  yaml:"action"`
+	Repository    string   `json:"repository"              yaml:"repository"`
+	VerifiedNodes []string `json:"verified_nodes"          yaml:"verified_nodes"`
+	Names         []string `json:"node_names,omitempty"    yaml:"node_names,omitempty"`
+}

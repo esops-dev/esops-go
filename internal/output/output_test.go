@@ -1647,3 +1647,132 @@ func TestSnapshots_rejectsUnknownFormat(t *testing.T) {
 		t.Fatal("expected error for unknown format")
 	}
 }
+
+func sampleSnapshotCreateAccepted() types.SnapshotCreateResult {
+	// Mirrors the cluster's response when wait_for_completion=false:
+	// `{"accepted":true}` with no nested snapshot block.
+	return types.SnapshotCreateResult{
+		Action: "create", Repository: "fs", Name: "nightly-2026-04-30",
+		Accepted: true, WaitForCompletion: false,
+		Snapshot: types.Snapshot{Repository: "fs", Name: "nightly-2026-04-30", State: "STARTED"},
+	}
+}
+
+func sampleSnapshotCreateCompleted() types.SnapshotCreateResult {
+	return types.SnapshotCreateResult{
+		Action: "create", Repository: "fs", Name: "nightly-2026-04-30",
+		Accepted: true, WaitForCompletion: true,
+		Snapshot: types.Snapshot{
+			Repository: "fs", Name: "nightly-2026-04-30",
+			State:            "SUCCESS",
+			ShardsTotal:      10,
+			ShardsSuccessful: 10,
+			DurationMillis:   90_000,
+			StartTimeMillis:  1714435200000,
+		},
+	}
+}
+
+func TestSnapshotCreate_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotCreate(&buf, sampleSnapshotCreateAccepted(), output.FormatJSON); err != nil {
+		t.Fatalf("SnapshotCreate: %v", err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, field := range []string{"action", "repository", "name", "accepted", "wait_for_completion"} {
+		if _, ok := row[field]; !ok {
+			t.Errorf("missing field %q: %+v", field, row)
+		}
+	}
+}
+
+func TestSnapshotCreate_tableShowsAcceptedFlag(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotCreate(&buf, sampleSnapshotCreateAccepted(), output.FormatTable); err != nil {
+		t.Fatalf("SnapshotCreate: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "REPOSITORY", "SNAPSHOT", "ACCEPTED", "WAIT", "STATE", "create", "fs", "nightly-2026-04-30", "STARTED"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotCreate_wideShowsShardsAndDuration(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotCreate(&buf, sampleSnapshotCreateCompleted(), output.FormatWide); err != nil {
+		t.Fatalf("SnapshotCreate: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"SHARDS", "DURATION", "10/10", "1m30s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotCreate_rejectsUnknownFormat(t *testing.T) {
+	if err := output.SnapshotCreate(&bytes.Buffer{}, sampleSnapshotCreateAccepted(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func sampleSnapshotVerify() types.SnapshotVerifyResult {
+	return types.SnapshotVerifyResult{
+		Action: "verify", Repository: "fs",
+		VerifiedNodes: []string{"node-id-1", "node-id-2"},
+		Names:         []string{"es01", "es02"},
+	}
+}
+
+func TestSnapshotVerify_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotVerify(&buf, sampleSnapshotVerify(), output.FormatJSON); err != nil {
+		t.Fatalf("SnapshotVerify: %v", err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, field := range []string{"action", "repository", "verified_nodes", "node_names"} {
+		if _, ok := row[field]; !ok {
+			t.Errorf("missing field %q: %+v", field, row)
+		}
+	}
+}
+
+func TestSnapshotVerify_tableShowsCount(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotVerify(&buf, sampleSnapshotVerify(), output.FormatTable); err != nil {
+		t.Fatalf("SnapshotVerify: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "REPOSITORY", "NODES", "verify", "fs", "2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotVerify_wideListsNodeIDsAndNames(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotVerify(&buf, sampleSnapshotVerify(), output.FormatWide); err != nil {
+		t.Fatalf("SnapshotVerify: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"node-id-1", "node-id-2", "es01", "es02"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotVerify_rejectsUnknownFormat(t *testing.T) {
+	if err := output.SnapshotVerify(&bytes.Buffer{}, sampleSnapshotVerify(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
