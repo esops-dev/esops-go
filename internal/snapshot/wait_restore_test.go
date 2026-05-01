@@ -63,13 +63,7 @@ func TestWaitForRestore_stopsWhenAllShardsDone(t *testing.T) {
 	if rec.calls != 3 {
 		t.Errorf("polls = %d, want 3", rec.calls)
 	}
-	if !got.AllDone {
-		// AllDone is set by the wire decoder, not the poller. The fake
-		// inspector returns the script verbatim, so AllDone reflects
-		// what we put in — confirm the last frame had it logically.
-		// The test's contract is "the poller stopped at DONE", which
-		// the call count proves.
-	}
+	_ = got
 }
 
 func TestWaitForRestore_waitsForAllTargetsToAppear(t *testing.T) {

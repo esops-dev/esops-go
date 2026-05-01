@@ -72,7 +72,7 @@ func SaveRestoreState(state RestoreState) error {
 // errors.Is check.
 func LoadRestoreState(contextName, repository, snapshot string) (RestoreState, error) {
 	path := RestoreStatePath(contextName, repository, snapshot)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is StateDir() + sanitised tuple, not operator input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return RestoreState{}, ErrNoState
@@ -171,8 +171,8 @@ func sanitiseStateKey(s string) string {
 		s = "default"
 	}
 	return strings.Map(func(r rune) rune {
-		switch {
-		case r == os.PathSeparator, r == '/', r == '\\', r == ':', r == ' ':
+		switch r {
+		case '/', '\\', ':', ' ':
 			return '_'
 		default:
 			return r
@@ -215,7 +215,7 @@ var ErrNoState = errors.New("no resume state found")
 
 func LoadCreateState(contextName, repository, snapshot string) (CreateState, error) {
 	path := CreateStatePath(contextName, repository, snapshot)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is StateDir() + sanitised tuple, not operator input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return CreateState{}, ErrNoState

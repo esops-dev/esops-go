@@ -31,7 +31,7 @@ func unmarshalSettings(data []byte, path string, out *map[string]any) error {
 // caller can still detect "operator passed the flag but the file had
 // nothing in it" by inspecting len.
 func loadKVMapFile(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the operator-supplied --metadata-file / --index-settings-file flag
 	if err != nil {
 		return nil, err
 	}
