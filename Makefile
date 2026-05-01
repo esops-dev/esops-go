@@ -15,7 +15,7 @@ GOBIN   := $(shell $(GO) env GOPATH)/bin
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-integration lint security update tidy clean release-snapshot certs certs-clean dev-up dev-down dev-logs dev-seed dev-seed-unassigned
+.PHONY: help build test test-integration lint security update tidy clean release-snapshot certs certs-clean dev-up dev-down dev-logs dev-seed dev-seed-unassigned dev-seed-snapshots
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -77,3 +77,7 @@ dev-seed: ## Seed sample data into both local dev clusters
 dev-seed-unassigned: ## Same as dev-seed, plus an over-replicated index so allocation-explain has something to chew on
 	./scripts/seed-dev.sh --url http://localhost:9200 --with-unassigned
 	./scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!' --with-unassigned
+
+dev-seed-snapshots: ## Same as dev-seed, plus a registered fs repo and two snapshots so `esops snapshot list` has data
+	./scripts/seed-dev.sh --url http://localhost:9200 --with-snapshots
+	./scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!' --with-snapshots

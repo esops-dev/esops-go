@@ -19,10 +19,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="$here/out"
 
-force=0
-if [[ "${1:-}" == "--force" ]]; then
-  force=1
-fi
+force=1
 
 expected=(ca.crt ca.key server.crt server.key client.crt client.key)
 if [[ $force -eq 0 ]]; then

@@ -1434,3 +1434,79 @@ type ISMExplainEntry struct {
 	Enabled  bool           `json:"enabled,omitempty"    yaml:"enabled,omitempty"`
 	Policy   map[string]any `json:"policy,omitempty"     yaml:"policy,omitempty"`
 }
+
+// SnapshotRepository is the neutral view of a single repository entry
+// from GET /_snapshot[/<repos>] on either dialect. Type is the cluster's
+// repository plugin name ("fs", "s3", "azure", "gcs", …); Settings holds
+// the type-specific configuration the cluster echoed back. Both products
+// expose the same envelope shape — but the keys inside Settings diverge
+// (e.g. ES "bucket"/"base_path" vs OS "bucket"/"base_path" with
+// occasional plugin-specific extras). We surface the cluster's keys
+// verbatim so an operator reading the JSON sees what is actually
+// configured rather than a normalised view that drops nuance.
+type SnapshotRepository struct {
+	Name     string         `json:"name"                yaml:"name"`
+	Type     string         `json:"type"                yaml:"type"`
+	Settings map[string]any `json:"settings,omitempty"  yaml:"settings,omitempty"`
+}
+
+// Snapshot is the neutral view of a single snapshot from
+// GET /_snapshot/<repo>/<snapshot>. Both ES and OS share the wire shape
+// for the fields below; product-specific extras (SLM policy on ES,
+// remote_store_index_shallow_copy on OS) are intentionally dropped from
+// the neutral view — `--output json/yaml` consumers who want them can
+// fall back to the cluster's raw API. Repository is populated by the
+// adapter so a flat snapshot list keeps "which repo is this in?"
+// answerable without joining client-side.
+type Snapshot struct {
+	Repository         string   `json:"repository"                yaml:"repository"`
+	Name               string   `json:"name"                      yaml:"name"`
+	UUID               string   `json:"uuid,omitempty"            yaml:"uuid,omitempty"`
+	State              string   `json:"state"                     yaml:"state"`
+	Indices            []string `json:"indices,omitempty"         yaml:"indices,omitempty"`
+	IncludeGlobalState bool     `json:"include_global_state"      yaml:"include_global_state"`
+	StartTimeMillis    int64    `json:"start_time_millis,omitempty"      yaml:"start_time_millis,omitempty"`
+	EndTimeMillis      int64    `json:"end_time_millis,omitempty"        yaml:"end_time_millis,omitempty"`
+	DurationMillis     int64    `json:"duration_millis,omitempty"        yaml:"duration_millis,omitempty"`
+	ShardsTotal        int      `json:"shards_total"              yaml:"shards_total"`
+	ShardsSuccessful   int      `json:"shards_successful"         yaml:"shards_successful"`
+	ShardsFailed       int      `json:"shards_failed"             yaml:"shards_failed"`
+	Version            string   `json:"version,omitempty"         yaml:"version,omitempty"`
+	Failures           []string `json:"failures,omitempty"        yaml:"failures,omitempty"`
+}
+
+// SnapshotSort is the sort key applied to SnapshotFilter results. Snapshot
+// listing endpoints honour server-side sort on ES but not on OS, so we
+// always sort client-side for identical behaviour across dialects.
+type SnapshotSort int
+
+const (
+	SnapshotSortStartTime SnapshotSort = iota // most recent first (default)
+	SnapshotSortName                          // alphabetical by snapshot name
+	SnapshotSortDuration                      // longest-running first
+)
+
+// SnapshotFilter narrows a SnapshotInspector.Snapshots call. Zero value
+// = "every snapshot in every repository, most recent first".
+//
+// Repository / Snapshot are forwarded to the cluster as path segments;
+// the empty string means "all" on each. State is enforced client-side
+// (case-insensitive match against the cluster's State field) so behaviour
+// is identical across dialects — neither cluster's raw endpoint accepts
+// a state filter directly. IgnoreUnavailable maps to
+// ?ignore_unavailable=true so a snapshot pattern that legitimately
+// matches nothing in a repo is a no-op rather than a 404.
+type SnapshotFilter struct {
+	Repository        string       // comma-separated repo names; "" = all repos
+	Snapshot          string       // comma-separated snapshot patterns; "" = "*"
+	State             string       // e.g. "SUCCESS"|"FAILED"|"IN_PROGRESS"; case-insensitive; "" = any
+	IgnoreUnavailable bool         // pass-through to the cluster
+	Sort              SnapshotSort // ordering applied after retrieval
+}
+
+// SnapshotRepositoryFilter narrows a SnapshotInspector.Repositories call.
+// Repository is comma-separated and forwarded as a path segment; empty
+// returns every registered repository.
+type SnapshotRepositoryFilter struct {
+	Repository string
+}

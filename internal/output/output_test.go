@@ -1485,3 +1485,165 @@ func TestISMExplain_wideShowsEnabledAndStepInfo(t *testing.T) {
 		t.Errorf("wide missing ENABLED / STEP_INFO column:\n%s", out)
 	}
 }
+
+
+func sampleSnapshotRepositories() []types.SnapshotRepository {
+	return []types.SnapshotRepository{
+		{Name: "fs", Type: "fs", Settings: map[string]any{"location": "/var/backups/es"}},
+		{Name: "s3", Type: "s3", Settings: map[string]any{"bucket": "es-prod-snaps", "base_path": "eu-west-1/"}},
+	}
+}
+
+func sampleSnapshotRows() []types.Snapshot {
+	return []types.Snapshot{
+		{Repository: "s3", Name: "nightly-2026-04-30", UUID: "uuid-a", State: "SUCCESS",
+			Indices: []string{"logs-000001", "logs-000002"},
+			StartTimeMillis: 1714435200000, EndTimeMillis: 1714435320000, DurationMillis: 120_000,
+			ShardsTotal: 10, ShardsSuccessful: 10},
+		{Repository: "s3", Name: "nightly-2026-04-29", State: "FAILED",
+			Indices: []string{"logs-000001"}, DurationMillis: 30_000,
+			ShardsTotal: 10, ShardsSuccessful: 9, ShardsFailed: 1,
+			Failures: []string{`{"index":"logs-000001","reason":"node left"}`}},
+	}
+}
+
+func TestSnapshotRepositories_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotRepositories(&buf, sampleSnapshotRepositories(), output.FormatJSON); err != nil {
+		t.Fatalf("SnapshotRepositories: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for _, field := range []string{"name", "type", "settings"} {
+		if _, ok := rows[0][field]; !ok {
+			t.Errorf("missing field %q: %+v", field, rows[0])
+		}
+	}
+}
+
+func TestSnapshotRepositories_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotRepositories(&buf, sampleSnapshotRepositories(), output.FormatTable); err != nil {
+		t.Fatalf("SnapshotRepositories: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "TYPE", "fs", "s3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotRepositories_wideIncludesSettingsPreview(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotRepositories(&buf, sampleSnapshotRepositories(), output.FormatWide); err != nil {
+		t.Fatalf("SnapshotRepositories: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"SETTINGS", "bucket=es-prod-snaps", "base_path=eu-west-1/", "location=/var/backups/es"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotRepositories_rejectsUnknownFormat(t *testing.T) {
+	if err := output.SnapshotRepositories(&bytes.Buffer{}, sampleSnapshotRepositories(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestSnapshots_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Snapshots(&buf, sampleSnapshotRows(), output.FormatJSON); err != nil {
+		t.Fatalf("Snapshots: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for _, field := range []string{"repository", "name", "state", "shards_total", "shards_successful", "shards_failed"} {
+		if _, ok := rows[0][field]; !ok {
+			t.Errorf("missing field %q: %+v", field, rows[0])
+		}
+	}
+	// omitempty on uuid for the failed row.
+	if _, ok := rows[1]["uuid"]; ok {
+		t.Errorf("failed row should not have uuid: %+v", rows[1])
+	}
+}
+
+func TestSnapshots_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Snapshots(&buf, sampleSnapshotRows(), output.FormatNDJSON); err != nil {
+		t.Fatalf("Snapshots: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), buf.String())
+	}
+	for i, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Errorf("line %d invalid JSON: %v", i, err)
+		}
+	}
+}
+
+func TestSnapshots_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Snapshots(&buf, sampleSnapshotRows(), output.FormatTable); err != nil {
+		t.Fatalf("Snapshots: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"REPOSITORY", "NAME", "STATE", "INDICES", "SHARDS", "DURATION",
+		"nightly-2026-04-30", "SUCCESS", "FAILED", "10/10", "9/10"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshots_wideIncludesUUIDAndStart(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Snapshots(&buf, sampleSnapshotRows(), output.FormatWide); err != nil {
+		t.Fatalf("Snapshots: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"UUID", "START", "FAILED", "uuid-a"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshots_inProgressDurationDash(t *testing.T) {
+	rows := []types.Snapshot{
+		{Repository: "s3", Name: "now-running", State: "IN_PROGRESS", DurationMillis: 0, ShardsTotal: 10},
+	}
+	var buf bytes.Buffer
+	if err := output.Snapshots(&buf, rows, output.FormatTable); err != nil {
+		t.Fatalf("Snapshots: %v", err)
+	}
+	if !strings.Contains(buf.String(), "now-running") {
+		t.Errorf("table missing now-running: %s", buf.String())
+	}
+	// DurationMillis=0 should render as "-", not "0s".
+	if strings.Contains(buf.String(), " 0s ") {
+		t.Errorf("zero duration should render as '-':\n%s", buf.String())
+	}
+}
+
+func TestSnapshots_rejectsUnknownFormat(t *testing.T) {
+	if err := output.Snapshots(&bytes.Buffer{}, sampleSnapshotRows(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}

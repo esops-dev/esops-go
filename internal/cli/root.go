@@ -16,6 +16,7 @@ import (
 	configcmd "github.com/dj-wasabi/esops-go/internal/cli/config"
 	indexcmd "github.com/dj-wasabi/esops-go/internal/cli/index"
 	"github.com/dj-wasabi/esops-go/internal/cli/ops"
+	snapshotcmd "github.com/dj-wasabi/esops-go/internal/cli/snapshot"
 	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/config"
 	"github.com/dj-wasabi/esops-go/internal/logging"
@@ -36,6 +37,7 @@ func Run(ctx context.Context, args []string) error {
 		Commands: []*cli.Command{
 			ops.Command(),
 			indexcmd.Command(),
+			snapshotcmd.Command(),
 			configcmd.Command(),
 		},
 	}
