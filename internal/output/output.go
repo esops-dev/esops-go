@@ -2406,6 +2406,36 @@ func settingsPreview(m map[string]any) string {
 	return strings.Join(parts, ",")
 }
 
+// SnapshotsStreamWriter is an incremental NDJSON writer for the snapshot
+// list surface. The CLI hands one of these to internal/snapshot.Stream
+// so each snapshot encodes to stdout the moment its repository's
+// response decodes — large fleets stop blocking on the slowest repo.
+//
+// Close is a no-op (the underlying io.Writer is owned by the caller);
+// the type exists so the streaming surface can grow per-format
+// behaviour later (e.g. table-streaming with a header row) without
+// rewriting every caller.
+type SnapshotsStreamWriter struct {
+	enc *json.Encoder
+}
+
+// NewSnapshotsStream constructs a stream writer for the requested
+// format. NDJSON is the only format with meaningful streaming today;
+// the constructor returns an error for any other format so the caller
+// (cli/snapshot/list.go) gets a clear "this format requires the buffered
+// path" rather than silently turning into a single-line dump.
+func NewSnapshotsStream(w io.Writer, f Format) (*SnapshotsStreamWriter, error) {
+	if f != FormatNDJSON {
+		return nil, fmt.Errorf("streaming is only supported for --output ndjson (got %q)", f)
+	}
+	return &SnapshotsStreamWriter{enc: json.NewEncoder(w)}, nil
+}
+
+// Write emits one snapshot as a single line of JSON.
+func (s *SnapshotsStreamWriter) Write(snap types.Snapshot) error {
+	return s.enc.Encode(snap)
+}
+
 // Snapshots renders a slice of Snapshot rows. Default table shows the
 // columns operators reach for during incident triage (repo, name, state,
 // duration, shard counts); wide adds UUID, indices count and start time.
@@ -2680,6 +2710,95 @@ func SnapshotPrune(w io.Writer, r types.SnapshotPruneResult, f Format) error {
 		return snapshotPruneTable(w, r, true)
 	case FormatTable, "":
 		return snapshotPruneTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// SnapshotRegister renders the outcome of `esops snapshot register`. Default
+// table is a one-line header; JSON/YAML emit the neutral
+// SnapshotRepositoryRegisterResult shape.
+func SnapshotRegister(w io.Writer, r types.SnapshotRepositoryRegisterResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tTYPE\tACK")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Repository),
+			dashIfEmpty(r.Type), r.Acknowledged,
+		)
+		return tw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// SnapshotDeregister mirrors SnapshotRegister for the deregister surface.
+func SnapshotDeregister(w io.Writer, r types.SnapshotRepositoryDeregisterResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tACK")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Repository), r.Acknowledged,
+		)
+		return tw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// SnapshotAnalyze renders the cluster's repository _analyze report. Default
+// table shows the operator-facing counts (blob count, concurrency, read
+// nodes); wide adds the coordinating node. JSON/YAML emit the neutral
+// shape.
+func SnapshotAnalyze(w io.Writer, r types.SnapshotAnalyzeResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "ACTION\tREPOSITORY\tBLOBS\tCONCURRENCY\tREAD_NODES\tEARLY\tSTATUS\tCOORDINATOR")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
+			r.Action, dashIfEmpty(r.Repository),
+			r.BlobCount, r.ConcurrencyLevels, r.ReadNodeCount, r.EarlyReadNodes,
+			dashIfEmpty(r.Status), dashIfEmpty(r.CoordinatingNode),
+		)
+		return tw.Flush()
+	case FormatTable, "":
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "ACTION\tREPOSITORY\tBLOBS\tCONCURRENCY\tREAD_NODES\tSTATUS")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\n",
+			r.Action, dashIfEmpty(r.Repository),
+			r.BlobCount, r.ConcurrencyLevels, r.ReadNodeCount,
+			dashIfEmpty(r.Status),
+		)
+		return tw.Flush()
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}

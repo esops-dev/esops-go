@@ -5,57 +5,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
 	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
+	"github.com/dj-wasabi/esops-go/internal/client/snapshotwire"
 	"github.com/dj-wasabi/esops-go/internal/types"
 )
 
-// snapshotRepoEntryWire mirrors a single value in the
-// GET /_snapshot[/<repos>] response. The cluster keys the envelope by
-// repository name; we decode the value side and surface Name from the
-// key. Settings is left as a free-form map because each repository plugin
-// (fs, s3, azure, gcs) ships its own set of keys — surfacing the cluster's
-// shape verbatim avoids a translation table that drifts with new plugin
-// versions.
-type snapshotRepoEntryWire struct {
-	Type     string         `json:"type"`
-	Settings map[string]any `json:"settings"`
-}
-
-// snapshotEntryWire mirrors a single object inside the `snapshots` array
-// of GET /_snapshot/<repo>/<pattern>. Both ES and OS share these fields;
-// product-specific extras (slm policy on ES, remote_store_index_shallow_copy
-// on OS) are intentionally not modeled here — `--output json/yaml`
-// consumers who need them can fall back to the cluster's raw API.
-type snapshotEntryWire struct {
-	Snapshot           string   `json:"snapshot"`
-	UUID               string   `json:"uuid"`
-	State              string   `json:"state"`
-	Indices            []string `json:"indices"`
-	IncludeGlobalState bool     `json:"include_global_state"`
-	StartTimeMillis    int64    `json:"start_time_in_millis"`
-	EndTimeMillis      int64    `json:"end_time_in_millis"`
-	DurationMillis     int64    `json:"duration_in_millis"`
-	Version            string   `json:"version"`
-	Failures           []json.RawMessage `json:"failures"`
-	Shards             struct {
-		Total      int `json:"total"`
-		Successful int `json:"successful"`
-		Failed     int `json:"failed"`
-	} `json:"shards"`
-}
-
-type snapshotsResponseWire struct {
-	Snapshots []snapshotEntryWire `json:"snapshots"`
-}
-
 // Repositories implements client.SnapshotInspector via
 // GET /_snapshot[/<repos>]. Empty Repository returns every registered
-// repo; non-empty is forwarded as a comma-separated path segment, which
+// repo; non-empty is forwarded as a comma-separated path segment which
 // the cluster honours as a multi-name lookup.
 func (c *Client) Repositories(ctx context.Context, filter types.SnapshotRepositoryFilter) ([]types.SnapshotRepository, error) {
 	gr := c.api.Snapshot.GetRepository
@@ -74,41 +40,30 @@ func (c *Client) Repositories(ctx context.Context, filter types.SnapshotReposito
 		return nil, err
 	}
 
-	var wire map[string]snapshotRepoEntryWire
+	var wire map[string]snapshotwire.RepoEntry
 	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot get_repository")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding snapshot get_repository response"), err)
 	}
-
-	out := make([]types.SnapshotRepository, 0, len(wire))
-	for name, r := range wire {
-		out = append(out, types.SnapshotRepository{
-			Name:     name,
-			Type:     r.Type,
-			Settings: r.Settings,
-		})
-	}
-	// Map iteration is unordered; sort for deterministic output so a
-	// captured JSON record matches across re-runs.
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return snapshotwire.RepositoriesFromWire(wire), nil
 }
 
-// Snapshots implements client.SnapshotInspector via
-// GET /_snapshot/<repo>/<pattern>. The cluster requires a literal repo
-// name in the path, so an empty/wildcard Repository fans out: list
-// repositories first, then GET per repo. Same fan-out a hand-rolled curl
-// loop would do — kept behind one capability call so callers see one
-// flat snapshot list regardless of how many repos answered.
+// Snapshots implements client.SnapshotInspector via the buffered fan-out
+// path. ES 8+ accepts a comma-separated repository list in the request
+// path so a multi-repo lookup can collapse to a single round-trip on
+// recent clusters; older clusters fall back to per-repo requests.
 //
-// Per-repo errors (a repo whose backing storage is unreachable returns
-// 500) are surfaced with the repo name in the wrapped message rather
-// than swallowed: a partial fleet view that hides a broken repo is
-// strictly worse than failing loud.
+// Per-repo errors are surfaced as a wrapped error rather than swallowed:
+// hiding a broken repo behind a partial fleet view is strictly worse
+// than failing loud. Callers who want partial-with-errors semantics use
+// SnapshotsStream instead.
 func (c *Client) Snapshots(ctx context.Context, filter types.SnapshotFilter) ([]types.Snapshot, error) {
 	repos, err := c.resolveRepoNames(ctx, filter.Repository)
 	if err != nil {
 		return nil, err
+	}
+	if len(repos) == 0 {
+		return []types.Snapshot{}, nil
 	}
 
 	pattern := filter.Snapshot
@@ -117,16 +72,100 @@ func (c *Client) Snapshots(ctx context.Context, filter types.SnapshotFilter) ([]
 	}
 
 	out := make([]types.Snapshot, 0)
+	if len(repos) > 1 {
+		entries, ok, err := c.snapshotsMultiRepo(ctx, repos, pattern, filter)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			for repo, list := range entries {
+				for _, e := range list {
+					out = append(out, snapshotwire.SnapshotFromWire(repo, e))
+				}
+			}
+			return out, nil
+		}
+		// Fall through to per-repo path: cluster echoed entries without
+		// repository tags (pre-ES 8.1) — issue per-repo requests so the
+		// caller's repo→snapshots mapping is correct.
+	}
+
 	for _, repo := range repos {
-		entries, err := c.snapshotsForRepo(ctx, repo, pattern, filter.IgnoreUnavailable)
+		entries, err := c.snapshotsForRepo(ctx, repo, pattern, filter)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
-			out = append(out, snapshotFromWire(repo, e))
+			out = append(out, snapshotwire.SnapshotFromWire(repo, e))
 		}
 	}
 	return out, nil
+}
+
+// SnapshotsStream implements client.SnapshotInspector. Resolves the
+// repository set, then fans the per-repo requests out concurrently with
+// a small worker pool — bandwidth-bound work against an S3-backed
+// repository easily takes 200-500ms each, so 4-way parallelism turns a
+// 20-repo fleet from 5s to 1s without overwhelming the cluster's master
+// node. Yields go through a serialised callback so the caller's writer
+// (NDJSON encoder) doesn't need its own mutex.
+//
+// Per-repo errors are reported via repoErr and iteration continues; one
+// S3 outage doesn't blank the rest of the fleet. The returned error is
+// non-nil only on a fatal failure (initial repo resolution, context
+// cancellation).
+func (c *Client) SnapshotsStream(ctx context.Context, filter types.SnapshotFilter, yield func(types.Snapshot) error, repoErr func(repo string, err error)) error {
+	repos, err := c.resolveRepoNames(ctx, filter.Repository)
+	if err != nil {
+		return err
+	}
+	if len(repos) == 0 {
+		return nil
+	}
+
+	pattern := filter.Snapshot
+	if pattern == "" {
+		pattern = "*"
+	}
+
+	// Bound the parallelism to a small constant rather than scaling with
+	// repo count: 4 concurrent S3 reads is plenty to mask latency, more
+	// would just hammer the cluster's master node. Single repo skips the
+	// worker pool entirely.
+	const fanOutConcurrency = 4
+
+	var (
+		mu sync.Mutex // serialises yield and repoErr
+	)
+
+	tasks := make([]func(context.Context) error, 0, len(repos))
+	for _, repo := range repos {
+		repo := repo
+		tasks = append(tasks, func(ctx context.Context) error {
+			entries, err := c.snapshotsForRepo(ctx, repo, pattern, filter)
+			if err != nil {
+				if repoErr != nil {
+					mu.Lock()
+					repoErr(repo, err)
+					mu.Unlock()
+				}
+				// Don't propagate — per-repo errors are reported, not
+				// fatal, so the fleet view continues.
+				return nil
+			}
+			for _, e := range entries {
+				snap := snapshotwire.SnapshotFromWire(repo, e)
+				mu.Lock()
+				err := yield(snap)
+				mu.Unlock()
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	return esopsclient.RunBounded(ctx, fanOutConcurrency, tasks)
 }
 
 // resolveRepoNames returns the literal list of repositories to query.
@@ -135,9 +174,8 @@ func (c *Client) Snapshots(ctx context.Context, filter types.SnapshotFilter) ([]
 // cluster to 404 on a typo rather than pre-validating client-side and
 // drifting from cluster behaviour.
 func (c *Client) resolveRepoNames(ctx context.Context, repository string) ([]string, error) {
-	repository = strings.TrimSpace(repository)
-	if repository != "" && repository != "*" {
-		return esopsclient.SplitCSV(repository), nil
+	if r := repository; r != "" && r != "*" {
+		return esopsclient.SplitCSV(r), nil
 	}
 	repos, err := c.Repositories(ctx, types.SnapshotRepositoryFilter{})
 	if err != nil {
@@ -150,12 +188,56 @@ func (c *Client) resolveRepoNames(ctx context.Context, repository string) ([]str
 	return names, nil
 }
 
-func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, ignoreUnavailable bool) ([]snapshotEntryWire, error) {
-	sg := c.api.Snapshot.Get
-	opts := []func(*esapi.SnapshotGetRequest){sg.WithContext(ctx)}
-	if ignoreUnavailable {
-		opts = append(opts, sg.WithIgnoreUnavailable(true))
+// snapshotsMultiRepo issues a single GET against the comma-joined repo
+// list and returns the per-repo split when the cluster (ES 8.1+) tags
+// each entry with its repository. ok=false means the cluster responded
+// with the older shape (no per-entry repo tag); the caller should fall
+// back to per-repo path requests rather than guess.
+func (c *Client) snapshotsMultiRepo(ctx context.Context, repos []string, pattern string, filter types.SnapshotFilter) (map[string][]snapshotwire.Entry, bool, error) {
+	type taggedEntry struct {
+		snapshotwire.Entry
+		Repository string `json:"repository"`
 	}
+	type taggedResponse struct {
+		Snapshots []taggedEntry `json:"snapshots"`
+	}
+
+	sg := c.api.Snapshot.Get
+	opts := snapshotsGetOptions(sg, ctx, filter)
+	resp, err := c.api.Snapshot.Get(joinNames(repos), esopsclient.SplitCSV(pattern), opts...)
+	if err != nil {
+		return nil, false, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("snapshot get repos="+joinNames(repos), resp.StatusCode, resp.Body); err != nil {
+		return nil, false, err
+	}
+
+	var tagged taggedResponse
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot get")
+	if err := json.NewDecoder(body).Decode(&tagged); err != nil {
+		return nil, false, errors.Join(errors.New("decoding snapshot get response"), err)
+	}
+
+	if len(tagged.Snapshots) == 0 {
+		return map[string][]snapshotwire.Entry{}, true, nil
+	}
+	for _, t := range tagged.Snapshots {
+		if t.Repository == "" {
+			return nil, false, nil
+		}
+	}
+	out := make(map[string][]snapshotwire.Entry, len(repos))
+	for _, t := range tagged.Snapshots {
+		out[t.Repository] = append(out[t.Repository], t.Entry)
+	}
+	return out, true, nil
+}
+
+func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, filter types.SnapshotFilter) ([]snapshotwire.Entry, error) {
+	sg := c.api.Snapshot.Get
+	opts := snapshotsGetOptions(sg, ctx, filter)
 	resp, err := c.api.Snapshot.Get(repo, esopsclient.SplitCSV(pattern), opts...)
 	if err != nil {
 		return nil, esopsclient.ClassifyTransport(err)
@@ -166,7 +248,7 @@ func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, ign
 		return nil, err
 	}
 
-	var wire snapshotsResponseWire
+	var wire snapshotwire.EntriesResponse
 	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot get")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding snapshot get response"), err)
@@ -174,22 +256,130 @@ func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, ign
 	return wire.Snapshots, nil
 }
 
-// snapshotCreateResponseWire mirrors the PUT /_snapshot/<repo>/<snap>
-// response. Two shapes share one decoder: when wait_for_completion=true
-// the cluster returns `{"snapshot": {<entry>}}`; when false it returns
-// `{"accepted": true}`. Both fields are tagged so a single decode
-// captures whichever the cluster sent.
-type snapshotCreateResponseWire struct {
-	Accepted bool               `json:"accepted"`
-	Snapshot *snapshotEntryWire `json:"snapshot"`
+// snapshotsGetOptions builds the upstream client's options slice from a
+// SnapshotFilter. Pulled out so the multi-repo and per-repo code paths
+// stay aligned on which knobs land where.
+func snapshotsGetOptions(sg esapi.SnapshotGet, ctx context.Context, filter types.SnapshotFilter) []func(*esapi.SnapshotGetRequest) {
+	opts := []func(*esapi.SnapshotGetRequest){sg.WithContext(ctx)}
+	if filter.IgnoreUnavailable {
+		opts = append(opts, sg.WithIgnoreUnavailable(true))
+	}
+	if filter.Slim {
+		opts = append(opts, sg.WithVerbose(false))
+	}
+	return opts
+}
+
+// joinNames builds a comma-separated path segment without the
+// `,`-from-strings.Join trip-up. ES (and OS) treat commas as the
+// multi-name separator and reject `%2C`-encoded forms.
+func joinNames(repos []string) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	out := repos[0]
+	for _, r := range repos[1:] {
+		out += "," + r
+	}
+	return out
+}
+
+// Recovery implements client.RecoveryInspector via
+// GET /<indices>/_recovery. Goes through Perform rather than the typed
+// client because the upstream's typed Indices.Recovery decodes into a
+// shape that doesn't carry the `source` block (snapshot repo/name/
+// index) we need for cross-restore disambiguation.
+func (c *Client) Recovery(ctx context.Context, req types.RecoveryRequest) (types.RecoveryReport, error) {
+	q := url.Values{}
+	if req.ActiveOnly {
+		q.Set("active_only", "true")
+	}
+	indices := strings.TrimSpace(req.Indices)
+	if indices == "" {
+		indices = "_all"
+	}
+	path := "/" + url.PathEscape(indices) + "/_recovery"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return types.RecoveryReport{}, err
+	}
+	resp, err := c.api.Perform(httpReq)
+	if err != nil {
+		return types.RecoveryReport{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == 404 {
+		// No matching index has any recovery state — for ?active_only
+		// that means "everything is settled". Surface as an empty,
+		// AllDone report so the polling caller stops immediately.
+		return types.RecoveryReport{AllDone: true, Indices: []types.IndexRecovery{}}, nil
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "recovery error"))
+		return types.RecoveryReport{}, esopsclient.ClassifyStatus("recovery indices="+indices, resp.StatusCode, body)
+	}
+
+	var wire snapshotwire.RecoveryEnvelope
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "recovery")
+	if err := json.NewDecoder(body).Decode(&wire); err != nil {
+		return types.RecoveryReport{}, errors.Join(errors.New("decoding recovery response"), err)
+	}
+	return snapshotwire.RecoveryReportFromWire(wire), nil
+}
+
+// SnapshotStatus implements client.SnapshotInspector via
+// GET /_snapshot/<repo>/<snap>/_status. The cluster wraps the single
+// snapshot in a `snapshots` array; we surface the first entry. A 404
+// translates to MissingFromCluster=true so the wait/resume machinery
+// can tell "still pending" apart from "the cluster forgot".
+func (c *Client) SnapshotStatus(ctx context.Context, req types.SnapshotStatusRequest) (types.SnapshotStatus, error) {
+	ss := c.api.Snapshot.Status
+	opts := []func(*esapi.SnapshotStatusRequest){
+		ss.WithContext(ctx),
+		ss.WithRepository(req.Repository),
+		ss.WithSnapshot(req.Snapshot),
+	}
+
+	resp, err := c.api.Snapshot.Status(opts...)
+	if err != nil {
+		return types.SnapshotStatus{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == 404 {
+		return types.SnapshotStatus{
+			Repository: req.Repository, Snapshot: req.Snapshot,
+			MissingFromCluster: true,
+		}, nil
+	}
+	if err := classifyResponse("snapshot status repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, resp.Body); err != nil {
+		return types.SnapshotStatus{}, err
+	}
+
+	var wire snapshotwire.StatusResponse
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot status")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotStatus{}, errors.Join(errors.New("decoding snapshot status response"), err)
+	}
+	if len(wire.Snapshots) == 0 {
+		return types.SnapshotStatus{
+			Repository: req.Repository, Snapshot: req.Snapshot,
+			MissingFromCluster: true,
+		}, nil
+	}
+	return snapshotwire.StatusFromWire(req.Repository, req.Snapshot, wire.Snapshots[0]), nil
 }
 
 // CreateSnapshot implements client.SnapshotCreator via
 // PUT /_snapshot/<repo>/<snapshot>. The body shape is the same on both
-// dialects, so the same decoder serves the OS adapter via the shared
-// helper below.
+// dialects, so the same wire helpers serve the OS adapter.
 func (c *Client) CreateSnapshot(ctx context.Context, req types.SnapshotCreateRequest) (types.SnapshotCreateResult, error) {
-	body, err := buildSnapshotCreateBody(req)
+	body, err := snapshotwire.BuildCreateBody(req)
 	if err != nil {
 		return types.SnapshotCreateResult{}, err
 	}
@@ -202,6 +392,9 @@ func (c *Client) CreateSnapshot(ctx context.Context, req types.SnapshotCreateReq
 	if req.WaitForCompletion {
 		opts = append(opts, cr.WithWaitForCompletion(true))
 	}
+	if req.MasterTimeout > 0 {
+		opts = append(opts, cr.WithMasterTimeout(req.MasterTimeout))
+	}
 
 	resp, err := c.api.Snapshot.Create(req.Repository, req.Snapshot, opts...)
 	if err != nil {
@@ -213,23 +406,12 @@ func (c *Client) CreateSnapshot(ctx context.Context, req types.SnapshotCreateReq
 		return types.SnapshotCreateResult{}, err
 	}
 
-	var wire snapshotCreateResponseWire
+	var wire snapshotwire.CreateResponse
 	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot create")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotCreateResult{}, errors.Join(errors.New("decoding snapshot create response"), err)
 	}
-
-	return snapshotCreateResultFromWire(req, wire), nil
-}
-
-// snapshotVerifyResponseWire mirrors POST /_snapshot/<repo>/_verify. The
-// cluster returns a `nodes` object keyed by node id; each value is an
-// object with a `name` field. Same shape on ES and OS — the OS adapter
-// decodes into the same struct via the shared helper below.
-type snapshotVerifyResponseWire struct {
-	Nodes map[string]struct {
-		Name string `json:"name"`
-	} `json:"nodes"`
+	return snapshotwire.CreateResultFromWire(req, wire), nil
 }
 
 // VerifyRepository implements client.SnapshotVerifier via
@@ -248,118 +430,65 @@ func (c *Client) VerifyRepository(ctx context.Context, req types.SnapshotVerifyR
 		return types.SnapshotVerifyResult{}, err
 	}
 
-	var wire snapshotVerifyResponseWire
+	var wire snapshotwire.VerifyResponse
 	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot verify")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotVerifyResult{}, errors.Join(errors.New("decoding snapshot verify response"), err)
 	}
-	return snapshotVerifyResultFromWire(req.Repository, wire), nil
+	return snapshotwire.VerifyResultFromWire(req.Repository, wire), nil
 }
 
-// buildSnapshotCreateBody renders the request body the cluster expects.
-// Empty fields are omitted entirely so the cluster falls back to its own
-// defaults — encoding `"indices": ""` would over-specify the request and
-// risks drift if a future cluster version interprets the empty pattern
-// differently from the omitted field.
-func buildSnapshotCreateBody(req types.SnapshotCreateRequest) ([]byte, error) {
-	body := make(map[string]any)
-	if indices := strings.TrimSpace(req.Indices); indices != "" {
-		body["indices"] = indices
+// AnalyzeRepository implements client.SnapshotVerifier via
+// POST /_snapshot/<repo>/_analyze. The upstream typed client doesn't
+// expose this endpoint, so we go through the low-level Perform path —
+// the request is small (no body, query params only) and the response
+// is straightforward to decode via the shared wire shape.
+func (c *Client) AnalyzeRepository(ctx context.Context, req types.SnapshotAnalyzeRequest) (types.SnapshotAnalyzeResult, error) {
+	q := buildAnalyzeQuery(req)
+	path := "/_snapshot/" + url.PathEscape(req.Repository) + "/_analyze"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
 	}
-	if req.IncludeGlobalState != nil {
-		body["include_global_state"] = *req.IncludeGlobalState
-	}
-	if req.Partial != nil {
-		body["partial"] = *req.Partial
-	}
-	if req.IgnoreUnavailable != nil {
-		body["ignore_unavailable"] = *req.IgnoreUnavailable
-	}
-	if len(req.Metadata) > 0 {
-		body["metadata"] = req.Metadata
-	}
-	return json.Marshal(body)
-}
 
-// snapshotCreateResultFromWire builds the neutral result. When
-// wait_for_completion was true the cluster returns the full snapshot
-// entry, so we route it through the same conversion helper used by
-// `snapshot list`. When false (the default), the cluster only returns
-// `accepted: true` and the caller polls list to learn the state.
-func snapshotCreateResultFromWire(req types.SnapshotCreateRequest, wire snapshotCreateResponseWire) types.SnapshotCreateResult {
-	out := types.SnapshotCreateResult{
-		Action:            "create",
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return types.SnapshotAnalyzeResult{}, err
+	}
+	resp, err := c.api.Perform(httpReq)
+	if err != nil {
+		return types.SnapshotAnalyzeResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == 404 || resp.StatusCode == 405 {
+		return types.SnapshotAnalyzeResult{}, errors.Join(esopsclient.ErrUnsupported, errors.New("repository _analyze is not available on this cluster (ES 7.4+ required)"))
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot analyze error"))
+		return types.SnapshotAnalyzeResult{}, esopsclient.ClassifyStatus("snapshot analyze repo="+req.Repository, resp.StatusCode, body)
+	}
+
+	var wire snapshotwire.AnalyzeResponse
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot analyze")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotAnalyzeResult{}, errors.Join(errors.New("decoding snapshot analyze response"), err)
+	}
+	return types.SnapshotAnalyzeResult{
+		Action:            "analyze",
 		Repository:        req.Repository,
-		Name:              req.Snapshot,
-		WaitForCompletion: req.WaitForCompletion,
-		Accepted:          wire.Accepted,
-	}
-	switch {
-	case wire.Snapshot != nil:
-		out.Snapshot = snapshotFromWire(req.Repository, *wire.Snapshot)
-		// The cluster returns the snapshot block only after the
-		// operation finished; treat that as acknowledgement so callers
-		// who synced on `Accepted` see a consistent signal across both
-		// wait modes.
-		out.Accepted = true
-	case req.WaitForCompletion:
-		// Defensive — the cluster always populates `snapshot` when
-		// wait_for_completion=true, but if a future version changes that
-		// we still surface the operator's intent on the captured record.
-		out.Snapshot = types.Snapshot{Repository: req.Repository, Name: req.Snapshot}
-	default:
-		// Async path: surface a placeholder state so a captured JSON
-		// record describes the queued operation without the operator
-		// having to remember "no snapshot block = STARTED".
-		out.Snapshot = types.Snapshot{Repository: req.Repository, Name: req.Snapshot, State: "STARTED"}
-	}
-	return out
-}
-
-// snapshotVerifyResultFromWire flattens the cluster's `nodes:{<id>:{name}}`
-// map into two parallel slices sorted by node id for deterministic output.
-func snapshotVerifyResultFromWire(repo string, wire snapshotVerifyResponseWire) types.SnapshotVerifyResult {
-	ids := make([]string, 0, len(wire.Nodes))
-	for id := range wire.Nodes {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	names := make([]string, 0, len(ids))
-	for _, id := range ids {
-		names = append(names, wire.Nodes[id].Name)
-	}
-	return types.SnapshotVerifyResult{
-		Action:        "verify",
-		Repository:    repo,
-		VerifiedNodes: ids,
-		Names:         names,
-	}
-}
-
-// snapshotRestoreResponseWire mirrors POST /_snapshot/<repo>/<snap>/_restore.
-// When wait_for_completion=true the cluster returns
-// `{"snapshot":{"snapshot":"<n>","indices":[...],"shards":{...}}}`. When false
-// it returns `{"accepted":true}`. Same shape as `create` plus the indices /
-// shards block — modelled separately because the field set after rename is
-// the post-restore index list, not the source-snapshot one.
-type snapshotRestoreResponseWire struct {
-	Accepted bool `json:"accepted"`
-	Snapshot *struct {
-		Snapshot string   `json:"snapshot"`
-		Indices  []string `json:"indices"`
-		Shards   struct {
-			Total      int `json:"total"`
-			Successful int `json:"successful"`
-			Failed     int `json:"failed"`
-		} `json:"shards"`
-	} `json:"snapshot"`
+		CoordinatingNode:  wire.Coordinating.NodeName,
+		BlobCount:         wire.BlobCount,
+		ConcurrencyLevels: wire.ConcurrencyLevels,
+		ReadNodeCount:     wire.ReadNodeCount,
+		EarlyReadNodes:    wire.EarlyReadNodes,
+		Status:            wire.Status,
+	}, nil
 }
 
 // RestoreSnapshot implements client.SnapshotRestorer via
-// POST /_snapshot/<repo>/<snap>/_restore. Body shape and query params are
-// identical on ES and OS, so the same body builder serves the OS adapter.
+// POST /_snapshot/<repo>/<snap>/_restore.
 func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreRequest) (types.SnapshotRestoreResult, error) {
-	body, err := buildSnapshotRestoreBody(req)
+	body, err := snapshotwire.BuildRestoreBody(req)
 	if err != nil {
 		return types.SnapshotRestoreResult{}, err
 	}
@@ -372,6 +501,9 @@ func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreR
 	if req.WaitForCompletion {
 		opts = append(opts, rs.WithWaitForCompletion(true))
 	}
+	if req.MasterTimeout > 0 {
+		opts = append(opts, rs.WithMasterTimeout(req.MasterTimeout))
+	}
 
 	resp, err := c.api.Snapshot.Restore(req.Repository, req.Snapshot, opts...)
 	if err != nil {
@@ -383,12 +515,12 @@ func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreR
 		return types.SnapshotRestoreResult{}, err
 	}
 
-	var wire snapshotRestoreResponseWire
+	var wire snapshotwire.RestoreResponse
 	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot restore")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotRestoreResult{}, errors.Join(errors.New("decoding snapshot restore response"), err)
 	}
-	return snapshotRestoreResultFromWire(req, wire), nil
+	return snapshotwire.RestoreResultFromWire(req, wire), nil
 }
 
 // DeleteSnapshots implements client.SnapshotPruner via
@@ -415,9 +547,7 @@ func (c *Client) DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRe
 		return types.SnapshotDeleteResult{}, err
 	}
 
-	var wire struct {
-		Acknowledged bool `json:"acknowledged"`
-	}
+	var wire snapshotwire.DeleteResponse
 	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot delete")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotDeleteResult{}, errors.Join(errors.New("decoding snapshot delete response"), err)
@@ -430,98 +560,111 @@ func (c *Client) DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRe
 	}, nil
 }
 
-// buildSnapshotRestoreBody renders the body the cluster expects. Empty fields
-// are omitted entirely so the cluster falls back to its own defaults — the
-// rename pair must be set together (the cluster rejects one without the
-// other), but that pre-flight is the business layer's job.
-func buildSnapshotRestoreBody(req types.SnapshotRestoreRequest) ([]byte, error) {
-	body := make(map[string]any)
-	if indices := strings.TrimSpace(req.Indices); indices != "" {
-		body["indices"] = indices
+// RegisterRepository implements client.SnapshotRepositoryManager via
+// PUT /_snapshot/<repo>. Body shape is identical on both dialects so the
+// adapter is a thin translation layer; settings are forwarded verbatim
+// to keep each repository plugin's full surface available.
+func (c *Client) RegisterRepository(ctx context.Context, req types.SnapshotRepositoryRegisterRequest) (types.SnapshotRepositoryRegisterResult, error) {
+	if req.Type == "" {
+		return types.SnapshotRepositoryRegisterResult{}, errors.New("snapshot register: --type is required")
 	}
-	if req.IncludeGlobalState != nil {
-		body["include_global_state"] = *req.IncludeGlobalState
+	body := map[string]any{"type": req.Type}
+	if len(req.Settings) > 0 {
+		body["settings"] = req.Settings
 	}
-	if req.Partial != nil {
-		body["partial"] = *req.Partial
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return types.SnapshotRepositoryRegisterResult{}, err
 	}
-	if req.IgnoreUnavailable != nil {
-		body["ignore_unavailable"] = *req.IgnoreUnavailable
+
+	cr := c.api.Snapshot.CreateRepository
+	opts := []func(*esapi.SnapshotCreateRepositoryRequest){
+		cr.WithContext(ctx),
 	}
-	if req.RenamePattern != "" {
-		body["rename_pattern"] = req.RenamePattern
+	if req.Verify != nil {
+		opts = append(opts, cr.WithVerify(*req.Verify))
 	}
-	if req.RenameReplacement != "" {
-		body["rename_replacement"] = req.RenameReplacement
+
+	resp, err := c.api.Snapshot.CreateRepository(req.Repository, bytes.NewReader(raw), opts...)
+	if err != nil {
+		return types.SnapshotRepositoryRegisterResult{}, esopsclient.ClassifyTransport(err)
 	}
-	if len(req.IndexSettings) > 0 {
-		body["index_settings"] = req.IndexSettings
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("snapshot register repo="+req.Repository, resp.StatusCode, resp.Body); err != nil {
+		return types.SnapshotRepositoryRegisterResult{}, err
 	}
-	if len(req.IgnoreIndexSettings) > 0 {
-		body["ignore_index_settings"] = req.IgnoreIndexSettings
+
+	var wire snapshotwire.DeleteResponse // {acknowledged:true} — same envelope
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot register")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotRepositoryRegisterResult{}, errors.Join(errors.New("decoding snapshot register response"), err)
 	}
-	return json.Marshal(body)
+	return types.SnapshotRepositoryRegisterResult{
+		Action:       "register",
+		Repository:   req.Repository,
+		Type:         req.Type,
+		Acknowledged: wire.Acknowledged,
+	}, nil
 }
 
-// snapshotRestoreResultFromWire builds the neutral result. Mirrors the create
-// helper: an `accepted: true` async response gets a placeholder snapshot block
-// so a captured JSON record stays interpretable on its own; a synchronous
-// response carries the cluster's per-restore index/shard counts.
-func snapshotRestoreResultFromWire(req types.SnapshotRestoreRequest, wire snapshotRestoreResponseWire) types.SnapshotRestoreResult {
-	out := types.SnapshotRestoreResult{
-		Action:            "restore",
-		Repository:        req.Repository,
-		Name:              req.Snapshot,
-		WaitForCompletion: req.WaitForCompletion,
-		Accepted:          wire.Accepted,
-		RenamePattern:     req.RenamePattern,
-		RenameReplacement: req.RenameReplacement,
+// DeregisterRepository implements client.SnapshotRepositoryManager via
+// DELETE /_snapshot/<repo>. The cluster refuses to delete a repository
+// that has in-progress snapshots — surfaced verbatim as a wrapped error
+// rather than swallowed, since "couldn't deregister because something
+// is still using it" is exactly the signal the operator needs.
+func (c *Client) DeregisterRepository(ctx context.Context, req types.SnapshotRepositoryDeregisterRequest) (types.SnapshotRepositoryDeregisterResult, error) {
+	dr := c.api.Snapshot.DeleteRepository
+	opts := []func(*esapi.SnapshotDeleteRepositoryRequest){dr.WithContext(ctx)}
+
+	resp, err := c.api.Snapshot.DeleteRepository([]string{req.Repository}, opts...)
+	if err != nil {
+		return types.SnapshotRepositoryDeregisterResult{}, esopsclient.ClassifyTransport(err)
 	}
-	if wire.Snapshot != nil {
-		out.Snapshot = types.SnapshotRestoreInfo{
-			Snapshot:         wire.Snapshot.Snapshot,
-			Indices:          wire.Snapshot.Indices,
-			ShardsTotal:      wire.Snapshot.Shards.Total,
-			ShardsSuccessful: wire.Snapshot.Shards.Successful,
-			ShardsFailed:     wire.Snapshot.Shards.Failed,
-		}
-		// The cluster echoes the snapshot block once it has acted on the
-		// restore — treat that as acknowledgement so callers syncing on
-		// `Accepted` see a consistent signal across both wait modes.
-		out.Accepted = true
-	} else {
-		out.Snapshot = types.SnapshotRestoreInfo{Snapshot: req.Snapshot}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("snapshot deregister repo="+req.Repository, resp.StatusCode, resp.Body); err != nil {
+		return types.SnapshotRepositoryDeregisterResult{}, err
 	}
-	return out
+
+	var wire snapshotwire.DeleteResponse
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot deregister")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotRepositoryDeregisterResult{}, errors.Join(errors.New("decoding snapshot deregister response"), err)
+	}
+	return types.SnapshotRepositoryDeregisterResult{
+		Action:       "deregister",
+		Repository:   req.Repository,
+		Acknowledged: wire.Acknowledged,
+	}, nil
 }
 
-// snapshotFromWire converts the ES wire shape into the neutral type.
-// Failures are surfaced as raw JSON strings so the cluster's per-failure
-// reasons (which carry the operator's most useful signal) survive the
-// translation without a per-version decoder. Used by both ES and OS
-// adapters since the wire shape for a snapshot entry is identical.
-func snapshotFromWire(repo string, e snapshotEntryWire) types.Snapshot {
-	out := types.Snapshot{
-		Repository:         repo,
-		Name:               e.Snapshot,
-		UUID:               e.UUID,
-		State:              e.State,
-		Indices:            e.Indices,
-		IncludeGlobalState: e.IncludeGlobalState,
-		StartTimeMillis:    e.StartTimeMillis,
-		EndTimeMillis:      e.EndTimeMillis,
-		DurationMillis:     e.DurationMillis,
-		ShardsTotal:        e.Shards.Total,
-		ShardsSuccessful:   e.Shards.Successful,
-		ShardsFailed:       e.Shards.Failed,
-		Version:            e.Version,
+// buildAnalyzeQuery renders the cluster's _analyze knobs as query params.
+// Empty/zero fields are omitted entirely so the cluster's defaults
+// remain the source of truth — encoding `?blob_count=0` would
+// over-specify the request.
+func buildAnalyzeQuery(req types.SnapshotAnalyzeRequest) url.Values {
+	q := url.Values{}
+	if req.BlobCount > 0 {
+		q.Set("blob_count", strconv.Itoa(req.BlobCount))
 	}
-	if len(e.Failures) > 0 {
-		failures := make([]string, 0, len(e.Failures))
-		for _, raw := range e.Failures {
-			failures = append(failures, string(raw))
-		}
-		out.Failures = failures
+	if req.Concurrency > 0 {
+		q.Set("concurrency", strconv.Itoa(req.Concurrency))
 	}
-	return out
+	if req.ReadNodeCount > 0 {
+		q.Set("read_node_count", strconv.Itoa(req.ReadNodeCount))
+	}
+	if req.EarlyReadNode > 0 {
+		q.Set("early_read_node_count", strconv.Itoa(req.EarlyReadNode))
+	}
+	if req.MaxBlobSize != "" {
+		q.Set("max_blob_size", req.MaxBlobSize)
+	}
+	if req.MaxTotalSize != "" {
+		q.Set("max_total_data_size", req.MaxTotalSize)
+	}
+	if req.Timeout > 0 {
+		q.Set("timeout", req.Timeout.String())
+	}
+	return q
 }

@@ -29,6 +29,33 @@ func (f *fakeSnapshotInspector) Snapshots(_ context.Context, filter types.Snapsh
 	return f.snaps, f.err
 }
 
+// SnapshotsStream simulates the adapter's bounded fan-out by yielding
+// each snapshot in order. Per-repo errors are passed through repoErr;
+// the global err is treated as fatal so existing failure tests keep
+// their semantics.
+func (f *fakeSnapshotInspector) SnapshotsStream(_ context.Context, filter types.SnapshotFilter, yield func(types.Snapshot) error, _ func(string, error)) error {
+	f.gotSnapFilter = filter
+	if f.err != nil {
+		return f.err
+	}
+	for _, s := range f.snaps {
+		if err := yield(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SnapshotStatus is a no-op stub for the fake inspector — the wait
+// machinery has its own dedicated fake; existing list/prune tests don't
+// exercise this path.
+func (f *fakeSnapshotInspector) SnapshotStatus(_ context.Context, req types.SnapshotStatusRequest) (types.SnapshotStatus, error) {
+	return types.SnapshotStatus{
+		Repository: req.Repository, Snapshot: req.Snapshot,
+		MissingFromCluster: true,
+	}, f.err
+}
+
 func sampleSnapshots() []types.Snapshot {
 	return []types.Snapshot{
 		// Most recent: a successful nightly snapshot in the s3 repo.

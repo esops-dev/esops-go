@@ -44,7 +44,7 @@ func GetILMPolicy(ctx context.Context, m client.ILMManager, name string) (types.
 	if n == "" {
 		return types.ILMPolicy{}, client.UsageError("--name is required")
 	}
-	if isPatternish(n) {
+	if client.IsPatternish(n) {
 		return types.ILMPolicy{}, client.UsageError("--name must be a literal policy name, not a pattern (got %q); use 'index ilm list --name %s' instead", n, n)
 	}
 	return m.GetPolicy(ctx, n)
@@ -195,7 +195,7 @@ func validateILMName(name string) error {
 	if n == "" {
 		return client.UsageError("--name is required")
 	}
-	if isPatternish(n) {
+	if client.IsPatternish(n) {
 		return client.UsageError("--name must be a literal policy name, not a pattern (got %q)", n)
 	}
 	return nil

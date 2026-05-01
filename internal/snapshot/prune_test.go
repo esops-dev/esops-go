@@ -3,6 +3,7 @@ package snapshot_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,7 @@ func TestPrune_olderThanDeletesAged(t *testing.T) {
 	ins := &fakeSnapshotInspector{snaps: pruneFleet(now)}
 	pr := &fakePruner{}
 	res, err := snapshot.Prune(context.Background(), ins, pr, snapshot.PruneOptions{
-		Repository: "fs", OlderThan: 30 * 24 * time.Hour, OlderThanRaw: "30d",
+		Repository: "fs", OlderThan: 30 * 24 * time.Hour,
 		AllowLargePrune: true,
 	})
 	if err != nil {
@@ -131,7 +132,7 @@ func TestPrune_keepLastAndOlderThanCompose(t *testing.T) {
 	ins := &fakeSnapshotInspector{snaps: pruneFleet(now)}
 	pr := &fakePruner{}
 	res, err := snapshot.Prune(context.Background(), ins, pr, snapshot.PruneOptions{
-		Repository: "fs", KeepLast: 2, OlderThan: 30 * 24 * time.Hour, OlderThanRaw: "30d",
+		Repository: "fs", KeepLast: 2, OlderThan: 30 * 24 * time.Hour,
 		AllowLargePrune: true,
 	})
 	if err != nil {
@@ -186,6 +187,38 @@ func TestPrune_dryRunDoesNotDelete(t *testing.T) {
 	}
 }
 
+func TestPrune_blastRadiusUsesEligibleNotCandidateCount(t *testing.T) {
+	// 6 successes + 90 fillers (non-success) under a state filter. The
+	// candidate set is 96 rows but only 6 are eligible. Deleting 4 of
+	// the 6 successes is 4/6 = 67% (trips), not 4/96 = 4% (the old
+	// math, which would have let the prune through silently).
+	now := time.Now()
+	rows := []types.Snapshot{
+		nightlyAt("ok-1", "SUCCESS", now.Add(-1*24*time.Hour)),
+		nightlyAt("ok-2", "SUCCESS", now.Add(-2*24*time.Hour)),
+		nightlyAt("ok-3", "SUCCESS", now.Add(-3*24*time.Hour)),
+		nightlyAt("ok-4", "SUCCESS", now.Add(-4*24*time.Hour)),
+		nightlyAt("ok-5", "SUCCESS", now.Add(-5*24*time.Hour)),
+		nightlyAt("ok-6", "SUCCESS", now.Add(-6*24*time.Hour)),
+	}
+	for i := 0; i < 90; i++ {
+		rows = append(rows, nightlyAt(fmt.Sprintf("fail-%d", i), "FAILED", now.Add(time.Duration(-i-7)*24*time.Hour)))
+	}
+	ins := &fakeSnapshotInspector{snaps: rows}
+	pr := &fakePruner{}
+	// keep-last 2 with --state success: keeps ok-1, ok-2; deletes ok-3..ok-6.
+	// 4 of 6 eligible = 67% — trips the guard.
+	_, err := snapshot.Prune(context.Background(), ins, pr, snapshot.PruneOptions{
+		Repository: "fs", KeepLast: 2, StateFilter: "success",
+	})
+	if !errors.Is(err, esopsclient.ErrBlastRadius) {
+		t.Errorf("err = %v, want ErrBlastRadius (state-pinned rows must be excluded from denominator)", err)
+	}
+	if len(pr.calls) != 0 {
+		t.Errorf("cluster contacted despite blast-radius refusal: %+v", pr.calls)
+	}
+}
+
 func TestPrune_blastRadiusGuardRefusesLargePrune(t *testing.T) {
 	now := time.Now()
 	ins := &fakeSnapshotInspector{snaps: pruneFleet(now)}
@@ -227,7 +260,7 @@ func TestPrune_inProgressSnapshotIsAlwaysKept(t *testing.T) {
 	ins := &fakeSnapshotInspector{snaps: rows}
 	pr := &fakePruner{}
 	res, err := snapshot.Prune(context.Background(), ins, pr, snapshot.PruneOptions{
-		Repository: "fs", OlderThan: 1 * time.Second, OlderThanRaw: "1s", AllowLargePrune: true,
+		Repository: "fs", OlderThan: 1 * time.Second, AllowLargePrune: true,
 	})
 	if err != nil {
 		t.Fatalf("Prune: %v", err)

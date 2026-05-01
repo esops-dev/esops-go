@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
@@ -32,6 +33,7 @@ type CreateOptions struct {
 	IgnoreUnavailable  *bool
 	WaitForCompletion  bool
 	Metadata           map[string]any
+	MasterTimeout      time.Duration
 	DryRun             bool
 }
 
@@ -78,6 +80,7 @@ func Create(ctx context.Context, c client.SnapshotCreator, opts CreateOptions) (
 		IgnoreUnavailable:  opts.IgnoreUnavailable,
 		WaitForCompletion:  opts.WaitForCompletion,
 		Metadata:           opts.Metadata,
+		MasterTimeout:      opts.MasterTimeout,
 	}
 	return c.CreateSnapshot(ctx, req)
 }
@@ -91,10 +94,10 @@ func validateCreateOptions(opts CreateOptions) error {
 	if snap == "" {
 		return client.UsageError("--snapshot is required")
 	}
-	if isSnapshotPatternish(repo) {
+	if client.IsPatternish(repo) {
 		return client.UsageError("--repository must be a literal name, not a pattern (got %q)", repo)
 	}
-	if isSnapshotPatternish(snap) {
+	if client.IsPatternish(snap) {
 		return client.UsageError("--snapshot must be a literal name, not a pattern (got %q)", snap)
 	}
 	if strings.ContainsAny(snap, " \t\n") {
@@ -104,8 +107,11 @@ func validateCreateOptions(opts CreateOptions) error {
 }
 
 // splitIndicesPreview renders the operator's --indices pattern as a
-// preview slice for dry-run output. Trims whitespace around each entry
-// because shell pipelines often pass `"a, b, c"`. Empty input returns
+// purely cosmetic preview slice for dry-run output: it splits on commas
+// and trims whitespace, mimicking the cluster's tokenisation closely
+// enough for an operator skimming the dry-run record. Wildcards and
+// date-math expressions stay as opaque tokens — the cluster's pattern
+// engine is the source of truth on the live path. Empty input returns
 // nil so the dry-run record reads cleanly ("indices were not specified
 // → cluster default").
 func splitIndicesPreview(indices string) []string {
@@ -121,15 +127,4 @@ func splitIndicesPreview(indices string) []string {
 		}
 	}
 	return out
-}
-
-// isSnapshotPatternish mirrors the index package's helper but is local
-// to this package so the snapshot business layer stays free of cross-
-// package dependencies on internal/index.
-func isSnapshotPatternish(s string) bool {
-	switch s {
-	case "*", "_all":
-		return true
-	}
-	return strings.ContainsAny(s, "*?")
 }

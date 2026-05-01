@@ -44,7 +44,7 @@ func GetTemplate(ctx context.Context, ti client.IndexTemplateInspector, name str
 	if n == "" {
 		return types.IndexTemplate{}, client.UsageError("--name is required")
 	}
-	if isPatternish(n) {
+	if client.IsPatternish(n) {
 		return types.IndexTemplate{}, client.UsageError("--name must be a literal template name, not a pattern (got %q); use 'index template list --name %s' instead", n, n)
 	}
 	return ti.GetTemplate(ctx, n)
@@ -154,7 +154,7 @@ func validateTemplateName(name string) error {
 	if n == "" {
 		return client.UsageError("--name is required")
 	}
-	if isPatternish(n) {
+	if client.IsPatternish(n) {
 		return client.UsageError("--name must be a literal template name, not a pattern (got %q)", n)
 	}
 	return nil

@@ -41,7 +41,7 @@ func GetISMPolicy(ctx context.Context, m client.ISMManager, id string) (types.IS
 	if n == "" {
 		return types.ISMPolicy{}, client.UsageError("--id is required")
 	}
-	if isPatternish(n) {
+	if client.IsPatternish(n) {
 		return types.ISMPolicy{}, client.UsageError("--id must be a literal policy id, not a pattern (got %q); use 'index ism list --id %s' instead", n, n)
 	}
 	return m.GetPolicy(ctx, n)
@@ -190,7 +190,7 @@ func validateISMID(id string) error {
 	if n == "" {
 		return client.UsageError("--id is required")
 	}
-	if isPatternish(n) {
+	if client.IsPatternish(n) {
 		return client.UsageError("--id must be a literal policy id, not a pattern (got %q)", n)
 	}
 	return nil

@@ -104,10 +104,10 @@ func validateShrinkOptions(opts ShrinkOptions) error {
 	if source == target {
 		return client.UsageError("--source and --target must differ (got %q for both)", source)
 	}
-	if isPatternish(source) {
+	if client.IsPatternish(source) {
 		return client.UsageError("--source must be a literal index name, not a pattern (got %q)", source)
 	}
-	if isPatternish(target) {
+	if client.IsPatternish(target) {
 		return client.UsageError("--target must be a literal index name, not a pattern (got %q)", target)
 	}
 	if opts.TargetShards < 0 {

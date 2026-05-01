@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -30,21 +31,30 @@ import (
 // explicit "" disables the filter.
 //
 // AllowLargePrune is the explicit opt-in for the §6 blast-radius limit:
-// refuse when retention would delete more than 50% of the candidate set
-// in one run. The threshold is shared with `index optimize`/`close`
-// blast-radius logic — same intent, same surface.
+// refuse when retention would delete more than 50% of the *eligible* set
+// in one run (rows pinned by the state filter are *not* counted in the
+// denominator — see Prune for the exact ratio). The threshold is shared
+// with `index optimize`/`close` blast-radius logic — same intent.
+//
+// ContinueOnMissing makes the prune resilient to a concurrent operator:
+// when the cluster's bulk DELETE 404s on one or more named snapshots
+// (someone else already removed them), retry the remaining names
+// individually rather than failing the whole run. The names that 404'd
+// land in SnapshotPruneResult.MissingSkipped so the operator's audit
+// log records what was already gone. Off by default — staleness should
+// be loud.
 //
 // DryRun does not contact the cluster. The plan is computed entirely from
 // the listing call; the result enumerates what would be deleted.
 type PruneOptions struct {
-	Repository      string
-	SnapshotPattern string
-	KeepLast        int
-	OlderThan       time.Duration
-	OlderThanRaw    string
-	StateFilter     string
-	AllowLargePrune bool
-	DryRun          bool
+	Repository        string
+	SnapshotPattern   string
+	KeepLast          int
+	OlderThan         time.Duration
+	StateFilter       string
+	AllowLargePrune   bool
+	ContinueOnMissing bool
+	DryRun            bool
 }
 
 // Prune is the business-layer entry point for `esops snapshot prune`. It
@@ -63,7 +73,7 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 	if repo == "" {
 		return types.SnapshotPruneResult{}, client.UsageError("--repository is required")
 	}
-	if isSnapshotPatternish(repo) {
+	if client.IsPatternish(repo) {
 		return types.SnapshotPruneResult{}, client.UsageError("--repository must be a literal name, not a pattern (got %q)", repo)
 	}
 	if opts.KeepLast == 0 && opts.OlderThan == 0 {
@@ -91,7 +101,7 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 	}
 
 	now := time.Now()
-	kept, deleted := planPrune(candidates, opts, now)
+	kept, deleted, eligible := planPrune(candidates, opts, now)
 
 	out := types.SnapshotPruneResult{
 		Action:          "prune",
@@ -101,20 +111,21 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 		Kept:            namesOf(kept),
 		Deleted:         namesOf(deleted),
 		KeepLast:        opts.KeepLast,
-		OlderThan:       opts.OlderThanRaw,
 		StateFilter:     state,
 		SnapshotPattern: opts.SnapshotPattern,
 	}
 
-	// Blast-radius guard (§6): refuse a prune that wipes more than half the
-	// repository in one run unless the operator opted in. Done after the plan
-	// is computed so a dry-run shows the operator the same threshold they
-	// would have hit live.
-	if !opts.AllowLargePrune && len(deleted) > 0 && len(candidates) > 0 {
-		ratio := float64(len(deleted)) / float64(len(candidates))
+	// Blast-radius guard (§6): refuse a prune that wipes more than half
+	// the *eligible* candidate set in one run. The eligible count
+	// excludes rows pinned by the state filter — a repo with 90 FAILED
+	// + 10 SUCCESS where we delete 6 SUCCESS reads as 6/10 (60%, trips
+	// the threshold), not 6/100 (the old denominator silently let
+	// large prunes through under a state filter).
+	if !opts.AllowLargePrune && len(deleted) > 0 && eligible > 0 {
+		ratio := float64(len(deleted)) / float64(eligible)
 		if ratio > 0.5 {
-			return out, fmt.Errorf("%w: prune would delete %d of %d snapshots (%.0f%%); pass --allow-large-prune to proceed",
-				client.ErrBlastRadius, len(deleted), len(candidates), ratio*100)
+			return out, fmt.Errorf("%w: prune would delete %d of %d eligible snapshots (%.0f%%); pass --allow-large-prune to proceed",
+				client.ErrBlastRadius, len(deleted), eligible, ratio*100)
 		}
 	}
 
@@ -126,11 +137,62 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 		Repository: repo,
 		Snapshots:  out.Deleted,
 	})
-	if err != nil {
+	if err == nil {
+		out.Acknowledged = res.Acknowledged
+		return out, nil
+	}
+
+	// --continue-on-missing salvages a partial run when another operator
+	// (or a concurrent SLM/snapshot-policy run) deleted some of the
+	// names we resolved. Bulk DELETE on ES/OS is all-or-nothing per
+	// request: a single 404 fails the whole batch. Retrying name-by-
+	// name lets the run finish with the names that actually existed.
+	if !opts.ContinueOnMissing || !errors.Is(err, client.ErrNotFound) {
 		return out, err
 	}
-	out.Acknowledged = res.Acknowledged
+
+	missing, finalErr := pruneIndividually(ctx, pr, repo, out.Deleted)
+	if len(missing) > 0 {
+		out.MissingSkipped = missing
+		// Trim Deleted to the names the cluster actually acked.
+		filtered := make([]string, 0, len(out.Deleted))
+		miss := make(map[string]struct{}, len(missing))
+		for _, n := range missing {
+			miss[n] = struct{}{}
+		}
+		for _, n := range out.Deleted {
+			if _, gone := miss[n]; !gone {
+				filtered = append(filtered, n)
+			}
+		}
+		out.Deleted = filtered
+	}
+	if finalErr != nil {
+		return out, finalErr
+	}
+	out.Acknowledged = true
 	return out, nil
+}
+
+// pruneIndividually issues a per-name DELETE for each snapshot the bulk
+// call refused. ErrNotFound becomes a "missing, skipped" entry; any
+// other error is fatal (a 401 or 500 still aborts so we don't silently
+// drift from the operator's intent).
+func pruneIndividually(ctx context.Context, pr client.SnapshotPruner, repo string, names []string) ([]string, error) {
+	missing := make([]string, 0)
+	for _, name := range names {
+		if _, err := pr.DeleteSnapshots(ctx, types.SnapshotDeleteRequest{
+			Repository: repo,
+			Snapshots:  []string{name},
+		}); err != nil {
+			if errors.Is(err, client.ErrNotFound) {
+				missing = append(missing, name)
+				continue
+			}
+			return missing, err
+		}
+	}
+	return missing, nil
 }
 
 // planPrune partitions the candidate set into the slices the cluster will
@@ -153,7 +215,11 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 // `--keep-last 7` without `--older-than` deletes everything past the 7th
 // most recent, and `--older-than 30d` without `--keep-last` deletes
 // everything older than 30 days.
-func planPrune(rows []types.Snapshot, opts PruneOptions, now time.Time) (kept, deleted []types.Snapshot) {
+//
+// eligible is the count of rows the state filter did not pin — i.e. the
+// denominator the blast-radius guard checks against. With no state
+// filter, eligible == len(rows).
+func planPrune(rows []types.Snapshot, opts PruneOptions, now time.Time) (kept, deleted []types.Snapshot, eligible int) {
 	state := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(opts.StateFilter)), " ", "_")
 
 	// Sort by start time descending so KeepLast is index-based.
@@ -174,11 +240,13 @@ func planPrune(rows []types.Snapshot, opts PruneOptions, now time.Time) (kept, d
 		// State filter pins the row to kept — even if it's older than the
 		// cut-off, an unsuccessful snapshot isn't subject to the keep-last
 		// rule (it never counted as a backup) so we leave it for the
-		// operator to delete deliberately.
+		// operator to delete deliberately. State-pinned rows are *not*
+		// counted in eligible — see the blast-radius math in Prune.
 		if state != "" && strings.ToLower(s.State) != state {
 			kept = append(kept, s)
 			continue
 		}
+		eligible++
 
 		// KeepLast window: pin the N most-recent eligible snapshots.
 		if opts.KeepLast > 0 && keepCount < opts.KeepLast {
@@ -207,7 +275,7 @@ func planPrune(rows []types.Snapshot, opts PruneOptions, now time.Time) (kept, d
 
 		deleted = append(deleted, s)
 	}
-	return kept, deleted
+	return kept, deleted, eligible
 }
 
 // ParseRetentionDuration parses the operator-facing `--older-than` value.

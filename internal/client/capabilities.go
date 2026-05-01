@@ -367,6 +367,28 @@ type ISMManager interface {
 type SnapshotInspector interface {
 	Repositories(ctx context.Context, filter types.SnapshotRepositoryFilter) ([]types.SnapshotRepository, error)
 	Snapshots(ctx context.Context, filter types.SnapshotFilter) ([]types.Snapshot, error)
+	// SnapshotStatus reads /_snapshot/<repo>/<name>/_status and returns
+	// the cluster's live progress view. Distinct from Snapshots()
+	// because /_status carries shard-level progress (started, init,
+	// done, failed) that the regular GET endpoint omits — exactly what
+	// a polling loop wants. Used by the wait/resume machinery on
+	// `snapshot create` so SIGINT and progress reporting share the same
+	// data path.
+	SnapshotStatus(ctx context.Context, req types.SnapshotStatusRequest) (types.SnapshotStatus, error)
+	// SnapshotsStream fans out across the resolved repository set and
+	// invokes yield for each parsed snapshot as it arrives. yield
+	// returning a non-nil error stops iteration and surfaces the error
+	// from the call. Honours the same CLAUDE.md §6 streaming contract as
+	// IndicesStream — `snapshot list --output ndjson` against a fleet
+	// with thousands of snapshots emits the first row before the cluster
+	// has finished sending.
+	//
+	// Per-repo errors (storage offline, auth denied on one repo) are
+	// reported through repoErr; iteration continues for every other
+	// resolved repository. The caller decides whether a per-repo error
+	// is fatal — partial-but-loud is the right default for a 20-repo
+	// fleet where one S3 bucket is having an outage.
+	SnapshotsStream(ctx context.Context, filter types.SnapshotFilter, yield func(types.Snapshot) error, repoErr func(repo string, err error)) error
 }
 
 // SnapshotCreator wraps PUT /_snapshot/<repo>/<snapshot> — the destructive
@@ -393,8 +415,55 @@ type SnapshotCreator interface {
 // returns `{nodes:{<id>:{name:...}}}`). Read-only from the operator's
 // perspective: the cluster talks to the repository's backing store but
 // no snapshot data is written.
+//
+// AnalyzeRepository wraps POST /_snapshot/<repo>/_analyze — the deeper
+// integrity check ES 7.4+ and OS 2.x expose. Writes a small set of test
+// blobs, reads them back from every node, then deletes them; surfaces
+// the cluster's per-blob report verbatim. Still read-from-the-operator's-
+// view in the sense that no user data is touched, but it does write
+// scratch blobs to the repository — labelled as a probe in the docs and
+// `--deep` in the CLI to mark the difference.
 type SnapshotVerifier interface {
 	VerifyRepository(ctx context.Context, req types.SnapshotVerifyRequest) (types.SnapshotVerifyResult, error)
+	AnalyzeRepository(ctx context.Context, req types.SnapshotAnalyzeRequest) (types.SnapshotAnalyzeResult, error)
+}
+
+// RecoveryInspector wraps GET /<indices>/_recovery — the cluster's
+// per-shard recovery progress endpoint. Both ES and OS expose the same
+// envelope (`{"<index>":{"shards":[...]}}`) and the per-shard fields
+// (`type`, `stage`, `primary`, `source`, `index.size.{...}`,
+// `index.files.{...}`) line up; one capability covers both.
+//
+// Used by `snapshot restore --wait` to surface per-shard progress
+// during a long restore. `_recovery` is also the right answer for
+// `index shrink` and routing-driven recoveries; we keep the capability
+// general so a future `index recovery` command lands without churning
+// the interface.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a missing index when the operator narrowed
+//     to a literal name that no longer exists)
+type RecoveryInspector interface {
+	Recovery(ctx context.Context, req types.RecoveryRequest) (types.RecoveryReport, error)
+}
+
+// SnapshotRepositoryManager wraps PUT/DELETE /_snapshot/<repo> — the
+// register/deregister surface for snapshot repositories. The body shape
+// (`type`, `settings`, `verify`) is identical on both dialects, so one
+// capability covers ES and OS.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 500 from the repository plugin when the
+//     backing store is unreachable, or a 400 on a malformed type)
+type SnapshotRepositoryManager interface {
+	RegisterRepository(ctx context.Context, req types.SnapshotRepositoryRegisterRequest) (types.SnapshotRepositoryRegisterResult, error)
+	DeregisterRepository(ctx context.Context, req types.SnapshotRepositoryDeregisterRequest) (types.SnapshotRepositoryDeregisterResult, error)
 }
 
 // SnapshotRestorer wraps POST /_snapshot/<repo>/<snap>/_restore — the
@@ -472,4 +541,6 @@ type Client struct {
 	SnapshotVerify    SnapshotVerifier
 	SnapshotRestore   SnapshotRestorer
 	SnapshotPrune     SnapshotPruner
+	SnapshotRepoMgr   SnapshotRepositoryManager
+	Recovery          RecoveryInspector
 }
