@@ -397,6 +397,48 @@ type SnapshotVerifier interface {
 	VerifyRepository(ctx context.Context, req types.SnapshotVerifyRequest) (types.SnapshotVerifyResult, error)
 }
 
+// SnapshotRestorer wraps POST /_snapshot/<repo>/<snap>/_restore — the
+// destructive surface that materialises a snapshot's indices back into the
+// cluster. The body shape (`indices`, `include_global_state`, `partial`,
+// `ignore_unavailable`, `rename_pattern`, `rename_replacement`,
+// `index_settings`, `ignore_index_settings`) is identical on both dialects,
+// so one capability covers ES and OS.
+//
+// The cluster has no native dry-run for restore; the business layer
+// implements --dry-run client-side as "validate + report what would be sent".
+// Implementations therefore only execute live calls.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 500 when the target index already exists
+//     and would be clobbered, or a 404 on a missing repo/snapshot)
+type SnapshotRestorer interface {
+	RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreRequest) (types.SnapshotRestoreResult, error)
+}
+
+// SnapshotPruner wraps DELETE /_snapshot/<repo>/<snap[,snap…]> — the
+// bulk-delete surface behind `snapshot prune`. The endpoint shape is identical
+// on both dialects (the cluster acks with `{acknowledged:true}`); the prune
+// retention math runs client-side in internal/snapshot, so the capability is
+// the small mechanical bit at the bottom.
+//
+// Implementations forward the literal snapshot list to the cluster as a
+// comma-separated path segment. Patterns are not accepted at this layer —
+// `snapshot prune` resolves them up-front so a captured `--dry-run` listing
+// is the same set the live run would delete.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 404 when a named snapshot has already been
+//     deleted, or a 500 when the repository's backing storage is offline)
+type SnapshotPruner interface {
+	DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -428,4 +470,6 @@ type Client struct {
 	Snapshot          SnapshotInspector
 	SnapshotCreate    SnapshotCreator
 	SnapshotVerify    SnapshotVerifier
+	SnapshotRestore   SnapshotRestorer
+	SnapshotPrune     SnapshotPruner
 }

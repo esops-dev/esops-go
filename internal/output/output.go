@@ -2591,3 +2591,119 @@ func snapshotVerifyTable(w io.Writer, r types.SnapshotVerifyResult, wide bool) e
 	}
 	return tw.Flush()
 }
+
+// SnapshotRestore renders the outcome of `esops snapshot restore`. Mirrors
+// SnapshotCreate so JSON/YAML consumers can treat the two commands
+// symmetrically. Wide adds the post-rename index list, shard counts and
+// the rename pair so a captured record describes the side-by-side restore
+// without needing to back-derive the rename intent.
+func SnapshotRestore(w io.Writer, r types.SnapshotRestoreResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return snapshotRestoreTable(w, r, true)
+	case FormatTable, "":
+		return snapshotRestoreTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotRestoreTable(w io.Writer, r types.SnapshotRestoreResult, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tSNAPSHOT\tACCEPTED\tWAIT\tINDICES\tSHARDS\tRENAME")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%t\t%t\t%d\t%s\t%s\n",
+			r.Action, r.DryRun,
+			dashIfEmpty(r.Repository), dashIfEmpty(r.Name),
+			r.Accepted, r.WaitForCompletion,
+			len(r.Snapshot.Indices),
+			snapshotRestoreShardsCell(r.Snapshot),
+			dashIfEmpty(snapshotRenameCell(r.RenamePattern, r.RenameReplacement)),
+		)
+	} else {
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tSNAPSHOT\tACCEPTED\tWAIT\tINDICES")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%t\t%t\t%d\n",
+			r.Action, r.DryRun,
+			dashIfEmpty(r.Repository), dashIfEmpty(r.Name),
+			r.Accepted, r.WaitForCompletion,
+			len(r.Snapshot.Indices),
+		)
+	}
+	return tw.Flush()
+}
+
+func snapshotRestoreShardsCell(s types.SnapshotRestoreInfo) string {
+	if s.ShardsTotal == 0 && s.ShardsSuccessful == 0 && s.ShardsFailed == 0 {
+		return "-"
+	}
+	out := fmt.Sprintf("%d/%d", s.ShardsSuccessful, s.ShardsTotal)
+	if s.ShardsFailed > 0 {
+		out += fmt.Sprintf(" (%d failed)", s.ShardsFailed)
+	}
+	return out
+}
+
+func snapshotRenameCell(pattern, replacement string) string {
+	if pattern == "" && replacement == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s→%s", pattern, replacement)
+}
+
+// SnapshotPrune renders the outcome of `esops snapshot prune`. Default table
+// is a one-line header (action, dry-run, repo, considered/kept/deleted
+// counts, acknowledged). Wide adds the comma-joined deleted list so the
+// operator sees exactly which snapshots were targeted without piping into
+// JSON; when the list is large the table cell will be long, but that's the
+// signal the operator wants and `-o ndjson` is one flag away.
+func SnapshotPrune(w io.Writer, r types.SnapshotPruneResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return snapshotPruneTable(w, r, true)
+	case FormatTable, "":
+		return snapshotPruneTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotPruneTable(w io.Writer, r types.SnapshotPruneResult, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tCONSIDERED\tKEPT\tDELETED\tACK\tDELETED_LIST")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%d\t%d\t%d\t%t\t%s\n",
+			r.Action, r.DryRun,
+			dashIfEmpty(r.Repository),
+			r.Considered, len(r.Kept), len(r.Deleted),
+			r.Acknowledged,
+			dashIfEmpty(strings.Join(r.Deleted, ",")),
+		)
+	} else {
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tCONSIDERED\tKEPT\tDELETED\tACK")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%d\t%d\t%d\t%t\n",
+			r.Action, r.DryRun,
+			dashIfEmpty(r.Repository),
+			r.Considered, len(r.Kept), len(r.Deleted),
+			r.Acknowledged,
+		)
+	}
+	return tw.Flush()
+}

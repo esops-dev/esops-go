@@ -11,11 +11,13 @@ import (
 func Command() *cli.Command {
 	return &cli.Command{
 		Name:  "snapshot",
-		Usage: "Inspect, create and verify snapshots and snapshot repositories",
+		Usage: "Inspect, create, verify, restore and prune snapshots and repositories",
 		Commands: []*cli.Command{
 			listCommand(),
 			createCommand(),
 			verifyCommand(),
+			restoreCommand(),
+			pruneCommand(),
 		},
 	}
 }
