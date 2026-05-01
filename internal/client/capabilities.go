@@ -508,6 +508,110 @@ type SnapshotPruner interface {
 	DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error)
 }
 
+// ClusterSettingsManager wraps GET/PUT /_cluster/settings — the
+// cluster-level settings surface behind `ops drain` and `ops uncordon`.
+// The capability is intentionally narrow: `ops drain` and `ops uncordon`
+// only need to read and modify `cluster.routing.allocation.exclude._name`,
+// so the surface here is a typed view over that single setting rather
+// than the full nested-vs-flat dance every other key would require.
+//
+// GetClusterSettings reads the persistent and transient exclude._name
+// lists; a missing key returns an empty slice rather than an error
+// (the cluster did not exclude any node — that is a valid state, not a
+// failure). Defaults are not surfaced: the exclude._name default is the
+// empty list and a default-only response is indistinguishable from
+// "nothing set", which is exactly what the empty-slice convention models.
+//
+// PutAllocationExclude installs the requested name list. An empty
+// Names slice clears the setting by sending JSON null on the wire —
+// the cluster removes the key rather than leaving an empty-string value
+// in /_cluster/settings (which it would honour as "exclude no nodes"
+// but keep visible on every subsequent GET).
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a 400 from the cluster when the setting
+//     name is misspelled — surfaced verbatim so the operator sees the
+//     cluster's own reason)
+type ClusterSettingsManager interface {
+	GetClusterSettings(ctx context.Context) (types.ClusterSettingsView, error)
+	PutAllocationExclude(ctx context.Context, req types.ClusterAllocationExcludeUpdate) (types.ClusterSettingsUpdateResult, error)
+}
+
+// VotingExclusionManager wraps /_cluster/voting_config_exclusions —
+// the cluster's "safely retire a master-eligible node" surface. The
+// cluster API has three operations and one notable shape constraint:
+//
+//   - POST /_cluster/voting_config_exclusions?node_names=a,b appends
+//     to the exclusion list. Idempotent on re-add.
+//   - DELETE /_cluster/voting_config_exclusions clears the entire
+//     list. There is no "remove one entry" endpoint; the only choice
+//     is keep-all or wipe-all, by design (the cluster expects the
+//     list to be transient cleanup state).
+//   - GET (via /_cluster/state/metadata/voting_config_exclusions)
+//     reads the list back as {node_id, node_name} pairs.
+//
+// The capability surfaces all three. `ops drain --also-exclude-voting`
+// uses Add; `ops uncordon --clear-voting` uses Clear; `ops drain
+// --list` uses Get.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 503 when the master can't reach quorum
+//     to commit the coordination metadata change)
+type VotingExclusionManager interface {
+	AddVotingExclusions(ctx context.Context, names []string) (types.VotingExclusionsResult, error)
+	ClearVotingExclusions(ctx context.Context) (types.VotingExclusionsResult, error)
+	GetVotingExclusions(ctx context.Context) ([]string, error)
+}
+
+// TasksInspector wraps GET /_tasks — the read-only listing surface for
+// in-flight transport tasks (reindex, force-merge, search, etc.). The
+// adapter normalises the cluster's `nodes.<id>.tasks.<task-id>{...}`
+// envelope into one []Task slice keyed by the cluster's composite
+// "<node_id>:<task_number>" task IDs.
+//
+// Filtering is server-side (the cluster does the actions/nodes/
+// parent-task narrowing); Detailed flips on the cluster's
+// ?detailed=true so the per-task Description field is populated.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the message
+type TasksInspector interface {
+	Tasks(ctx context.Context, filter types.TasksFilter) ([]types.Task, error)
+	// TasksStream walks the cluster's response and yields each task as
+	// it is decoded. yield returning a non-nil error stops iteration
+	// and surfaces the error from the call. Used by `ops tasks list
+	// --output ndjson` so a fleet running thousands of concurrent
+	// tasks doesn't have to buffer the full nested envelope before
+	// printing the first row.
+	//
+	// Implementations apply the same server-side filter as Tasks. Sort
+	// order is *not* normalised — the streaming path leaves rows in
+	// the cluster's iteration order; consumers that want a stable
+	// listing use Tasks (which buffers and sorts).
+	TasksStream(ctx context.Context, filter types.TasksFilter, yield func(types.Task) error) error
+}
+
+// TasksCanceller wraps POST /_tasks/<task_id>/_cancel and the bulk
+// /_tasks/_cancel?actions=… endpoint behind a single capability. The
+// adapter forwards either a literal TaskID or the filter set the
+// business layer assembled — the cluster's own refusal-to-cancel
+// (force_merge, snapshot, anything not flagged cancellable) surfaces
+// verbatim because the operator needs the cluster's own reason, not
+// our paraphrase.
+//
+// Errors mirror TasksInspector.
+type TasksCanceller interface {
+	CancelTasks(ctx context.Context, req types.TasksCancelRequest) (types.TasksCancelResult, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -543,4 +647,8 @@ type Client struct {
 	SnapshotPrune     SnapshotPruner
 	SnapshotRepoMgr   SnapshotRepositoryManager
 	Recovery          RecoveryInspector
+	ClusterSettings   ClusterSettingsManager
+	VotingExclusion   VotingExclusionManager
+	Tasks             TasksInspector
+	TasksCancel       TasksCanceller
 }

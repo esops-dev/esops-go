@@ -83,8 +83,8 @@ esops migrate cutover --alias idx --from idx-v1 --to idx-v2
 ## Commands
 
 ```
-ops         health · shards · allocation-explain · hot-threads
-            audit · rebalance · diag
+ops         health · nodes · shards · allocation-explain · hot-threads
+            audit · rebalance · drain · uncordon · tasks · diag
 migrate     plan · check · reindex · verify · cutover
 index       list · optimize · rollover · shrink · open · close
             aliases · settings · template · ilm (ES) · ism (OS)

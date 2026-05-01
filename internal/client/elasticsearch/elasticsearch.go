@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -617,20 +619,20 @@ func buildRolloverBody(c types.IndexRolloverConditions) ([]byte, error) {
 // into a local shape keeps the adapter boundary clean (no upstream types
 // leaking out) and makes the OS/ES contract trivially identical.
 type allocationExplainWire struct {
-	Index                  string                          `json:"index"`
-	Shard                  int                             `json:"shard"`
-	Primary                bool                            `json:"primary"`
-	CurrentState           string                          `json:"current_state"`
-	CurrentNode            *allocationNodeWire             `json:"current_node,omitempty"`
-	UnassignedInfo         *allocationUnassignedWire       `json:"unassigned_info,omitempty"`
-	CanAllocate            string                          `json:"can_allocate,omitempty"`
-	AllocateExplanation    string                          `json:"allocate_explanation,omitempty"`
-	CanRemainOnCurrentNode string                          `json:"can_remain_on_current_node,omitempty"`
-	CanRebalanceCluster    string                          `json:"can_rebalance_cluster,omitempty"`
-	MoveExplanation        string                          `json:"move_explanation,omitempty"`
-	RebalanceExplanation   string                          `json:"rebalance_explanation,omitempty"`
-	Note                   string                          `json:"note,omitempty"`
-	NodeAllocationDecisions []allocationNodeDecisionWire   `json:"node_allocation_decisions,omitempty"`
+	Index                   string                       `json:"index"`
+	Shard                   int                          `json:"shard"`
+	Primary                 bool                         `json:"primary"`
+	CurrentState            string                       `json:"current_state"`
+	CurrentNode             *allocationNodeWire          `json:"current_node,omitempty"`
+	UnassignedInfo          *allocationUnassignedWire    `json:"unassigned_info,omitempty"`
+	CanAllocate             string                       `json:"can_allocate,omitempty"`
+	AllocateExplanation     string                       `json:"allocate_explanation,omitempty"`
+	CanRemainOnCurrentNode  string                       `json:"can_remain_on_current_node,omitempty"`
+	CanRebalanceCluster     string                       `json:"can_rebalance_cluster,omitempty"`
+	MoveExplanation         string                       `json:"move_explanation,omitempty"`
+	RebalanceExplanation    string                       `json:"rebalance_explanation,omitempty"`
+	Note                    string                       `json:"note,omitempty"`
+	NodeAllocationDecisions []allocationNodeDecisionWire `json:"node_allocation_decisions,omitempty"`
 }
 
 type allocationNodeWire struct {
@@ -851,13 +853,13 @@ func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
 // view is acknowledged + explanations, and dragging the routing table
 // through the adapter would bloat the binary for no surfaced value.
 type rerouteResponseWire struct {
-	Acknowledged bool                         `json:"acknowledged"`
-	Explanations []rerouteExplanationWire     `json:"explanations,omitempty"`
+	Acknowledged bool                     `json:"acknowledged"`
+	Explanations []rerouteExplanationWire `json:"explanations,omitempty"`
 }
 
 type rerouteExplanationWire struct {
-	Command   string                  `json:"command"`
-	Decisions []rerouteDecisionWire   `json:"decisions,omitempty"`
+	Command   string                `json:"command"`
+	Decisions []rerouteDecisionWire `json:"decisions,omitempty"`
 }
 
 type rerouteDecisionWire struct {
@@ -972,10 +974,10 @@ func rerouteArgs(cmd types.RerouteCommand) (map[string]any, error) {
 		}, nil
 	case types.RerouteAllocateEmptyPrimary, types.RerouteAllocateStalePrimary:
 		return map[string]any{
-			"index":             cmd.Index,
-			"shard":             cmd.Shard,
-			"node":              cmd.ToNode,
-			"accept_data_loss":  cmd.AcceptDataLoss,
+			"index":            cmd.Index,
+			"shard":            cmd.Shard,
+			"node":             cmd.ToNode,
+			"accept_data_loss": cmd.AcceptDataLoss,
 		}, nil
 	case types.RerouteRetryFailed:
 		// Defensive: shouldn't reach here — the business layer routes
@@ -1052,8 +1054,8 @@ type securityUserWire struct {
 // names across records so the audit view shows "what patterns this role
 // touches" without exploding per-privilege detail at the table layer.
 type securityRoleWire struct {
-	Cluster  []string `json:"cluster"`
-	Indices  []struct {
+	Cluster []string `json:"cluster"`
+	Indices []struct {
 		Names []string `json:"names"`
 	} `json:"indices"`
 	Metadata struct {
@@ -1346,13 +1348,13 @@ func decodeStringOrSlice(raw json.RawMessage) []string {
 // render them as RFC3339 strings on the way out so the JSON schema
 // stays operator-readable.
 type apiKeyWire struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Username      string `json:"username"`
-	Realm         string `json:"realm"`
-	Invalidated   bool   `json:"invalidated"`
-	CreationMS    int64  `json:"creation"`
-	ExpirationMS  int64  `json:"expiration"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Username     string `json:"username"`
+	Realm        string `json:"realm"`
+	Invalidated  bool   `json:"invalidated"`
+	CreationMS   int64  `json:"creation"`
+	ExpirationMS int64  `json:"expiration"`
 }
 
 // fetchESAPIKeys reads /_security/api_key. The endpoint requires
@@ -1505,26 +1507,56 @@ func securityDisabledNote(body []byte) string {
 	return "security is disabled on this cluster"
 }
 
-// catNodesRow mirrors a /_cat/nodes?h=name,node.role row. node.role is
-// the comma-separated full-name role list (data, data_hot, ingest,
-// master, …) — distinct from the deprecated abbreviated `role` column
-// which packs the roles into single chars and would force us to maintain
-// a translation table per cluster version.
+// catNodesRow mirrors the /_cat/nodes columns esops surfaces. ES 9.x's
+// `node.role` column packs roles into single chars ("dim" for
+// data+ingest+master) — readable to a human, hostile to a parser, and
+// a translation table per cluster version. The full-name list lives in
+// `node.roles` (plural), which we request and prefer; node.role is a
+// best-effort fallback for older clusters that omit it.
+//
+// Disk and heap fields are strings on the wire (the cluster prepends a
+// unit suffix when `?bytes=` is omitted); we request bytes=b so the
+// values are bare integers and parse them as such.
 type catNodesRow struct {
-	Name string `json:"name"`
-	Role string `json:"node.role"`
+	Name            string `json:"name"`
+	Role            string `json:"node.role"`
+	Roles           string `json:"node.roles"`
+	IP              string `json:"ip"`
+	Version         string `json:"version"`
+	Master          string `json:"master"`
+	HeapPercent     string `json:"heap.percent"`
+	HeapCurrent     string `json:"heap.current"`
+	HeapMax         string `json:"heap.max"`
+	DiskUsed        string `json:"disk.used"`
+	DiskAvail       string `json:"disk.avail"`
+	DiskTotal       string `json:"disk.total"`
+	DiskUsedPercent string `json:"disk.used_percent"`
+	CPU             string `json:"cpu"`
+	Load1m          string `json:"load_1m"`
+	Uptime          string `json:"uptime"`
 }
 
 // Nodes implements client.NodeInspector via /_cat/nodes. We surface the
 // authoritative node→role map so the analysis layer can identify real
 // data nodes — including ones that hold zero shards, which is precisely
 // the case the analysis exists to catch.
+//
+// The column list is what `ops nodes` renders plus what shard-skew
+// analysis needs. bytes=b makes the disk/heap columns bare integers;
+// without it the cluster prepends a unit suffix that varies across
+// versions and forces a per-version parser.
 func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
 	cn := c.api.Cat.Nodes
 	resp, err := c.api.Cat.Nodes(
 		cn.WithContext(ctx),
 		cn.WithFormat("json"),
-		cn.WithH("name", "node.role"),
+		cn.WithBytes("b"),
+		cn.WithH(
+			"name", "node.role", "node.roles", "ip", "version", "master",
+			"heap.percent", "heap.current", "heap.max",
+			"disk.used", "disk.avail", "disk.total", "disk.used_percent",
+			"cpu", "load_1m", "uptime",
+		),
 	)
 	if err != nil {
 		return nil, esopsclient.ClassifyTransport(err)
@@ -1542,14 +1574,81 @@ func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
 
 	out := make([]types.Node, 0, len(rows))
 	for _, r := range rows {
-		roles := splitNodeRoles(r.Role)
+		// Prefer node.roles (full names: data, master, ingest, …); fall
+		// back to the abbreviated node.role on older clusters that omit
+		// the plural column.
+		roles := splitNodeRoles(r.Roles)
+		if len(roles) == 0 {
+			roles = abbreviatedRolesToFull(r.Role)
+		}
 		out = append(out, types.Node{
-			Name:       r.Name,
-			Roles:      roles,
-			IsDataNode: hasDataRole(roles),
+			Name:            r.Name,
+			Roles:           roles,
+			IsDataNode:      hasDataRole(roles),
+			IP:              r.IP,
+			Version:         r.Version,
+			Master:          r.Master == "*",
+			HeapPercent:     parseInt(r.HeapPercent),
+			HeapUsedBytes:   parseInt64(r.HeapCurrent),
+			HeapMaxBytes:    parseInt64(r.HeapMax),
+			DiskUsedBytes:   parseInt64(r.DiskUsed),
+			DiskAvailBytes:  parseInt64(r.DiskAvail),
+			DiskTotalBytes:  parseInt64(r.DiskTotal),
+			DiskUsedPercent: parsePercent(r.DiskUsedPercent),
+			CPUPercent:      parseInt(r.CPU),
+			Load1m:          r.Load1m,
+			Uptime:          r.Uptime,
 		})
 	}
 	return out, nil
+}
+
+// parseInt64 turns a /_cat/nodes byte string (rendered with bytes=b, so
+// "12345" not "12.3kb") into an int64. An empty cell — common for
+// coordinating-only nodes that have no disk to report — yields zero
+// rather than an error: this is best-effort enrichment for `ops nodes`
+// and a missing column is information, not a failure.
+func parseInt64(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// parseInt is the int sibling of parseInt64 for percent and uptime
+// counters that fit in 32 bits. Same lenient empty-cell semantics.
+func parseInt(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// parsePercent is parseInt's float-tolerant cousin. The disk percent
+// column is rendered as a float ("84.2") on some cluster versions and
+// as an int ("84") on others; we round to the nearest int either way.
+func parsePercent(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int(f + 0.5)
+	}
+	return 0
 }
 
 // splitNodeRoles parses /_cat/nodes node.role into a clean slice. The
@@ -1568,6 +1667,39 @@ func splitNodeRoles(s string) []string {
 			continue
 		}
 		out = append(out, p)
+	}
+	return out
+}
+
+// abbreviatedRolesToFull is a best-effort decode of the legacy single-
+// char `node.role` column (e.g. "dim" for data+ingest+master) into
+// full-name roles. ES 9.x packs every distinct role abbreviation into
+// the column ("cdfhilmrstw" on a stock single-node cluster); the
+// mapping below covers every char esops cares about for data-node
+// identification, plus the common non-data tiers so the user-facing
+// output reads cleanly. Used only when node.roles (plural) is absent.
+func abbreviatedRolesToFull(s string) []string {
+	if s == "" {
+		return nil
+	}
+	mapping := map[rune]string{
+		'd': "data",
+		'h': "data_hot",
+		'w': "data_warm",
+		'c': "data_cold",
+		's': "data_content",
+		'f': "data_frozen",
+		'm': "master",
+		'i': "ingest",
+		'l': "ml",
+		'r': "remote_cluster_client",
+		't': "transform",
+	}
+	out := make([]string, 0, len(s))
+	for _, r := range s {
+		if name, ok := mapping[r]; ok {
+			out = append(out, name)
+		}
 	}
 	return out
 }
@@ -2270,4 +2402,590 @@ func (c *Client) DeleteTemplate(ctx context.Context, req types.IndexTemplateDele
 		Name:         req.Name,
 		Acknowledged: wire.Acknowledged,
 	}, nil
+}
+
+// clusterSettingsWire mirrors the GET /_cluster/settings envelope. We
+// pass flat_settings=true so the cluster keys come back as
+// "cluster.routing.allocation.exclude._name" instead of a nested object
+// — flat is far simpler to extract one key from.
+type clusterSettingsWire struct {
+	Persistent map[string]any `json:"persistent"`
+	Transient  map[string]any `json:"transient"`
+}
+
+// GetClusterSettings implements client.ClusterSettingsManager. The
+// response shape is identical on both dialects when flat_settings=true;
+// a missing key in either scope means "no exclusion set" — surfaced as
+// an empty slice rather than an error.
+func (c *Client) GetClusterSettings(ctx context.Context) (types.ClusterSettingsView, error) {
+	gs := c.api.Cluster.GetSettings
+	resp, err := c.api.Cluster.GetSettings(
+		gs.WithContext(ctx),
+		gs.WithFlatSettings(true),
+	)
+	if err != nil {
+		return types.ClusterSettingsView{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cluster get_settings", resp.StatusCode, resp.Body); err != nil {
+		return types.ClusterSettingsView{}, err
+	}
+
+	var wire clusterSettingsWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.ClusterSettingsView{}, errors.Join(errors.New("decoding cluster settings response"), err)
+	}
+	return types.ClusterSettingsView{
+		PersistentExcludeName: parseAllocationExcludeName(wire.Persistent),
+		TransientExcludeName:  parseAllocationExcludeName(wire.Transient),
+	}, nil
+}
+
+// PutAllocationExclude implements client.ClusterSettingsManager. The
+// body is the minimal envelope the cluster needs: one scope, one key.
+// An empty Names slice serialises as JSON null, which the cluster
+// honours as "remove this key" — leaving an empty string would keep the
+// key visible in /_cluster/settings forever.
+func (c *Client) PutAllocationExclude(ctx context.Context, req types.ClusterAllocationExcludeUpdate) (types.ClusterSettingsUpdateResult, error) {
+	scope := "transient"
+	if req.Persistent {
+		scope = "persistent"
+	}
+
+	var value any // nil → JSON null → key removed
+	if len(req.Names) > 0 {
+		value = strings.Join(req.Names, ",")
+	}
+
+	body, err := json.Marshal(map[string]any{
+		scope: map[string]any{
+			"cluster.routing.allocation.exclude._name": value,
+		},
+	})
+	if err != nil {
+		return types.ClusterSettingsUpdateResult{}, fmt.Errorf("encoding cluster put_settings body: %w", err)
+	}
+
+	ps := c.api.Cluster.PutSettings
+	resp, err := c.api.Cluster.PutSettings(
+		bytes.NewReader(body),
+		ps.WithContext(ctx),
+		ps.WithFlatSettings(true),
+	)
+	if err != nil {
+		return types.ClusterSettingsUpdateResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cluster put_settings", resp.StatusCode, resp.Body); err != nil {
+		return types.ClusterSettingsUpdateResult{}, err
+	}
+
+	var wire struct {
+		Acknowledged bool `json:"acknowledged"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.ClusterSettingsUpdateResult{}, errors.Join(errors.New("decoding cluster put_settings response"), err)
+	}
+	return types.ClusterSettingsUpdateResult{Acknowledged: wire.Acknowledged}, nil
+}
+
+// parseAllocationExcludeName extracts
+// `cluster.routing.allocation.exclude._name` from a flat-settings map
+// and splits the comma-separated value into a clean slice. The cluster
+// always reports the value as a string when set; an empty / missing key
+// returns nil. Whitespace is trimmed because hand-edited cluster
+// settings have been seen carrying " es01 , es02 ".
+func parseAllocationExcludeName(m map[string]any) []string {
+	if m == nil {
+		return nil
+	}
+	raw, ok := m["cluster.routing.allocation.exclude._name"]
+	if !ok {
+		return nil
+	}
+	s, ok := raw.(string)
+	if !ok || s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// AddVotingExclusions implements client.VotingExclusionManager via
+// POST /_cluster/voting_config_exclusions. The node_names query
+// parameter takes a comma-separated list and the cluster appends
+// (de-duplicating against the existing list) — idempotent on re-add.
+//
+// The endpoint returns 200 with an empty body on success; we treat a
+// 2xx as Acknowledged=true regardless of body so a future cluster
+// version that adds payload fields doesn't break the call.
+func (c *Client) AddVotingExclusions(ctx context.Context, names []string) (types.VotingExclusionsResult, error) {
+	if len(names) == 0 {
+		return types.VotingExclusionsResult{}, fmt.Errorf("at least one node name is required")
+	}
+	pe := c.api.Cluster.PostVotingConfigExclusions
+	resp, err := c.api.Cluster.PostVotingConfigExclusions(
+		pe.WithContext(ctx),
+		pe.WithNodeNames(names...),
+	)
+	if err != nil {
+		return types.VotingExclusionsResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("voting_config_exclusions add", resp.StatusCode, resp.Body); err != nil {
+		return types.VotingExclusionsResult{}, err
+	}
+	return types.VotingExclusionsResult{Acknowledged: true}, nil
+}
+
+// ClearVotingExclusions implements client.VotingExclusionManager via
+// DELETE /_cluster/voting_config_exclusions. The cluster API only
+// supports clear-all — there is no per-node delete — so this wipes
+// every entry in the list.
+//
+// wait_for_removal=false is set explicitly because the calling path
+// (`ops uncordon --clear-voting`) is "I drained nodes but they're
+// staying / coming back": the nodes named in the exclusion list are
+// still in the cluster, so the cluster default (wait until the
+// excluded nodes leave the cluster) hangs until the master timeout
+// and 429s. The Elasticsearch error message itself recommends
+// wait_for_removal=false for this case.
+func (c *Client) ClearVotingExclusions(ctx context.Context) (types.VotingExclusionsResult, error) {
+	de := c.api.Cluster.DeleteVotingConfigExclusions
+	resp, err := c.api.Cluster.DeleteVotingConfigExclusions(
+		de.WithContext(ctx),
+		de.WithWaitForRemoval(false),
+	)
+	if err != nil {
+		return types.VotingExclusionsResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("voting_config_exclusions clear", resp.StatusCode, resp.Body); err != nil {
+		return types.VotingExclusionsResult{}, err
+	}
+	return types.VotingExclusionsResult{Acknowledged: true}, nil
+}
+
+// GetVotingExclusions reads the current list via
+// /_cluster/state/metadata/voting_config_exclusions with a tight
+// filter_path so the cluster doesn't ship the whole metadata blob (a
+// few hundred KB on a busy cluster). The response shape is
+// {metadata:{cluster_coordination:{voting_config_exclusions:[{node_id,
+// node_name}]}}} on every cluster version we target.
+func (c *Client) GetVotingExclusions(ctx context.Context) ([]string, error) {
+	cs := c.api.Cluster.State
+	resp, err := c.api.Cluster.State(
+		cs.WithContext(ctx),
+		cs.WithMetric("metadata"),
+		cs.WithFilterPath("metadata.cluster_coordination.voting_config_exclusions.node_name"),
+	)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cluster state voting_config_exclusions", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var wire struct {
+		Metadata struct {
+			ClusterCoordination struct {
+				VotingConfigExclusions []struct {
+					NodeName string `json:"node_name"`
+				} `json:"voting_config_exclusions"`
+			} `json:"cluster_coordination"`
+		} `json:"metadata"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return nil, errors.Join(errors.New("decoding cluster state voting_config_exclusions response"), err)
+	}
+	out := make([]string, 0, len(wire.Metadata.ClusterCoordination.VotingConfigExclusions))
+	for _, e := range wire.Metadata.ClusterCoordination.VotingConfigExclusions {
+		if e.NodeName != "" {
+			out = append(out, e.NodeName)
+		}
+	}
+	return out, nil
+}
+
+// taskWire mirrors a single entry from /_tasks?group_by=none. The map
+// key (the composite "<node_id>:<task_number>" task ID) is captured
+// separately by the decoder; the body fields below are common to ES and
+// OS so one shape covers both adapters' needs.
+type taskWire struct {
+	Node             string `json:"node"`
+	Type             string `json:"type"`
+	Action           string `json:"action"`
+	Description      string `json:"description"`
+	StartTimeMillis  int64  `json:"start_time_in_millis"`
+	RunningTimeNanos int64  `json:"running_time_in_nanos"`
+	Cancellable      bool   `json:"cancellable"`
+	Cancelled        bool   `json:"cancelled"`
+	ParentTaskID     string `json:"parent_task_id"`
+}
+
+// Tasks implements client.TasksInspector. The cluster's default grouping
+// (`nodes.<node_id>.tasks.<composite>`) is the only shape every dialect
+// version reports consistently — `group_by=none` returns a flat *array*
+// on ES/OS, which the typed client cannot decode and would cost us a
+// second wire shape to handle. The adapter walks the nested map and
+// collapses it into the row-per-task slice the renderer expects.
+func (c *Client) Tasks(ctx context.Context, filter types.TasksFilter) ([]types.Task, error) {
+	tl := c.api.Tasks.List
+	opts := []func(*esapi.TasksListRequest){tl.WithContext(ctx)}
+	if len(filter.Actions) > 0 {
+		opts = append(opts, tl.WithActions(filter.Actions...))
+	}
+	if len(filter.Nodes) > 0 {
+		opts = append(opts, tl.WithNodes(filter.Nodes...))
+	}
+	if filter.ParentTaskID != "" {
+		opts = append(opts, tl.WithParentTaskID(filter.ParentTaskID))
+	}
+	if filter.Detailed {
+		opts = append(opts, tl.WithDetailed(true))
+	}
+	resp, err := c.api.Tasks.List(opts...)
+	if err != nil {
+		return nil, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("tasks list", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var wire struct {
+		Nodes map[string]struct {
+			Tasks map[string]taskWire `json:"tasks"`
+		} `json:"nodes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return nil, errors.Join(errors.New("decoding tasks list response"), err)
+	}
+	flat := map[string]taskWire{}
+	for _, node := range wire.Nodes {
+		for id, t := range node.Tasks {
+			flat[id] = t
+		}
+	}
+	return tasksFromWire(flat), nil
+}
+
+// TasksStream implements client.TasksInspector. Walks the cluster's
+// nested `{nodes: {<id>: {tasks: {<composite>: {...}}}}}` envelope a
+// token at a time using json.Decoder, yielding each task as it is
+// decoded. The decoder honours the bounded reader (DefaultMaxResponseBytes)
+// so a misconfigured cluster returning a multi-hundred-MB body fails
+// loudly rather than silently exhausts memory.
+//
+// Sort order is left to the cluster — the operator using ndjson is
+// expected to pipe through `sort` or `jq` if they need a stable order;
+// the buffered Tasks() path is what guarantees alphabetic sort by ID.
+func (c *Client) TasksStream(ctx context.Context, filter types.TasksFilter, yield func(types.Task) error) error {
+	tl := c.api.Tasks.List
+	opts := []func(*esapi.TasksListRequest){tl.WithContext(ctx)}
+	if len(filter.Actions) > 0 {
+		opts = append(opts, tl.WithActions(filter.Actions...))
+	}
+	if len(filter.Nodes) > 0 {
+		opts = append(opts, tl.WithNodes(filter.Nodes...))
+	}
+	if filter.ParentTaskID != "" {
+		opts = append(opts, tl.WithParentTaskID(filter.ParentTaskID))
+	}
+	if filter.Detailed {
+		opts = append(opts, tl.WithDetailed(true))
+	}
+	resp, err := c.api.Tasks.List(opts...)
+	if err != nil {
+		return esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("tasks list (stream)", resp.StatusCode, resp.Body); err != nil {
+		return err
+	}
+
+	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "tasks list (stream)")
+	dec := json.NewDecoder(body)
+	return streamTasksObject(dec, yield)
+}
+
+// streamTasksObject walks the top-level response object, finds the
+// "nodes" key, and for each node's nested "tasks" map decodes one task
+// at a time and hands it to yield. Other top-level / per-node fields
+// are skipped via json.RawMessage so an unexpected field added by a
+// future cluster version doesn't break the stream.
+func streamTasksObject(dec *json.Decoder, yield func(types.Task) error) error {
+	if err := expectOpenBrace(dec); err != nil {
+		return err
+	}
+	for dec.More() {
+		key, err := readString(dec)
+		if err != nil {
+			return err
+		}
+		if key != "nodes" {
+			if err := skipValue(dec); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := streamTasksNodes(dec, yield); err != nil {
+			return err
+		}
+	}
+	// Consume the closing '}'. Errors here are decoder-internal — the
+	// JSON is malformed only if the cluster sent a truncated body, in
+	// which case the bounded reader has already surfaced it.
+	_, _ = dec.Token()
+	return nil
+}
+
+func streamTasksNodes(dec *json.Decoder, yield func(types.Task) error) error {
+	if err := expectOpenBrace(dec); err != nil {
+		return err
+	}
+	for dec.More() {
+		// Discard the node ID key.
+		if _, err := dec.Token(); err != nil {
+			return errors.Join(errors.New("decoding tasks node ID"), err)
+		}
+		if err := streamTasksOneNode(dec, yield); err != nil {
+			return err
+		}
+	}
+	_, _ = dec.Token()
+	return nil
+}
+
+func streamTasksOneNode(dec *json.Decoder, yield func(types.Task) error) error {
+	if err := expectOpenBrace(dec); err != nil {
+		return err
+	}
+	for dec.More() {
+		key, err := readString(dec)
+		if err != nil {
+			return err
+		}
+		if key != "tasks" {
+			if err := skipValue(dec); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := expectOpenBrace(dec); err != nil {
+			return err
+		}
+		for dec.More() {
+			id, err := readString(dec)
+			if err != nil {
+				return err
+			}
+			var t taskWire
+			if err := dec.Decode(&t); err != nil {
+				return errors.Join(errors.New("decoding tasks list (stream) row"), err)
+			}
+			task := types.Task{
+				ID:               id,
+				Node:             t.Node,
+				Type:             t.Type,
+				Action:           t.Action,
+				Description:      t.Description,
+				StartTimeMillis:  t.StartTimeMillis,
+				RunningTimeNanos: t.RunningTimeNanos,
+				Cancellable:      t.Cancellable,
+				Cancelled:        t.Cancelled,
+				ParentTaskID:     t.ParentTaskID,
+			}
+			if err := yield(task); err != nil {
+				return err
+			}
+		}
+		_, _ = dec.Token() // closing '}' of the tasks object
+	}
+	_, _ = dec.Token() // closing '}' of the per-node object
+	return nil
+}
+
+// expectOpenBrace reads the next token and asserts it is '{'. The
+// /_tasks envelope is nested objects all the way down — there are no
+// arrays in the response shape this stream walks — so a single
+// brace-asserting helper is sufficient. Mis-alignment surfaces a
+// loud error rather than letting the decoder drift.
+func expectOpenBrace(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errors.Join(errors.New("expected JSON '{' in tasks stream"), err)
+	}
+	d, ok := tok.(json.Delim)
+	if !ok || d != '{' {
+		return fmt.Errorf("tasks stream: expected JSON '{', got %v", tok)
+	}
+	return nil
+}
+
+// readString reads the next token and asserts it is a string.
+func readString(dec *json.Decoder) (string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "", errors.Join(errors.New("expected JSON string key in tasks stream"), err)
+	}
+	s, ok := tok.(string)
+	if !ok {
+		return "", fmt.Errorf("tasks stream: expected JSON string key, got %v", tok)
+	}
+	return s, nil
+}
+
+// skipValue consumes the next JSON value (object / array / scalar)
+// without parsing it. json.RawMessage is the cleanest way to advance
+// the decoder past an arbitrary value.
+func skipValue(dec *json.Decoder) error {
+	var skip json.RawMessage
+	if err := dec.Decode(&skip); err != nil {
+		return errors.Join(errors.New("skipping JSON value in tasks stream"), err)
+	}
+	return nil
+}
+
+// CancelTasks implements client.TasksCanceller. The cluster's
+// POST /_tasks/<id>/_cancel takes at most one ID per request and the
+// bulk POST /_tasks/_cancel takes a filter set instead — there is no
+// multi-ID variant. The adapter therefore expects at most one entry
+// in req.TaskIDs; the business layer fans out across multi-ID calls
+// and folds per-call results back together.
+func (c *Client) CancelTasks(ctx context.Context, req types.TasksCancelRequest) (types.TasksCancelResult, error) {
+	if len(req.TaskIDs) > 1 {
+		return types.TasksCancelResult{}, fmt.Errorf("elasticsearch tasks cancel: capability accepts at most one TaskIDs entry; got %d (business layer should fan out)", len(req.TaskIDs))
+	}
+	taskID := ""
+	if len(req.TaskIDs) == 1 {
+		taskID = req.TaskIDs[0]
+	}
+	tc := c.api.Tasks.Cancel
+	opts := []func(*esapi.TasksCancelRequest){tc.WithContext(ctx)}
+	if taskID != "" {
+		opts = append(opts, tc.WithTaskID(taskID))
+	}
+	if len(req.Filter.Actions) > 0 {
+		opts = append(opts, tc.WithActions(req.Filter.Actions...))
+	}
+	if len(req.Filter.Nodes) > 0 {
+		opts = append(opts, tc.WithNodes(req.Filter.Nodes...))
+	}
+	if req.Filter.ParentTaskID != "" {
+		opts = append(opts, tc.WithParentTaskID(req.Filter.ParentTaskID))
+	}
+	if req.WaitForCompletion {
+		opts = append(opts, tc.WithWaitForCompletion(true))
+	}
+	resp, err := c.api.Tasks.Cancel(opts...)
+	if err != nil {
+		return types.TasksCancelResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("tasks cancel", resp.StatusCode, resp.Body); err != nil {
+		return types.TasksCancelResult{}, err
+	}
+
+	var wire struct {
+		Nodes map[string]struct {
+			Tasks map[string]taskWire `json:"tasks"`
+		} `json:"nodes"`
+		NodeFailures []struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+			NodeID string `json:"node_id"`
+		} `json:"node_failures"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return types.TasksCancelResult{}, errors.Join(errors.New("decoding tasks cancel response"), err)
+	}
+
+	flat := map[string]taskWire{}
+	for _, node := range wire.Nodes {
+		for id, t := range node.Tasks {
+			flat[id] = t
+		}
+	}
+	failures := make([]string, 0, len(wire.NodeFailures))
+	for _, f := range wire.NodeFailures {
+		failures = append(failures, formatTaskNodeFailure(f.NodeID, f.Reason, f.Type))
+	}
+	out := types.TasksCancelResult{
+		Cancelled:         tasksFromWire(flat),
+		NodeFailures:      failures,
+		WaitForCompletion: req.WaitForCompletion,
+	}
+	if taskID != "" {
+		out.TaskIDs = []string{taskID}
+	}
+	return out, nil
+}
+
+// tasksFromWire flattens a "<node>:<id>" → wire map into a sorted slice
+// keyed by ID. Sorting is stable: a saved JSON capture compares equal
+// across runs even though the cluster's map iteration order doesn't.
+func tasksFromWire(in map[string]taskWire) []types.Task {
+	out := make([]types.Task, 0, len(in))
+	for id, t := range in {
+		out = append(out, types.Task{
+			ID:               id,
+			Node:             t.Node,
+			Type:             t.Type,
+			Action:           t.Action,
+			Description:      t.Description,
+			StartTimeMillis:  t.StartTimeMillis,
+			RunningTimeNanos: t.RunningTimeNanos,
+			Cancellable:      t.Cancellable,
+			Cancelled:        t.Cancelled,
+			ParentTaskID:     t.ParentTaskID,
+		})
+	}
+	sortTasksByID(out)
+	return out
+}
+
+// sortTasksByID is the stable-order sort shared by the list and cancel
+// renderers. Pulled out so the OS adapter (next to this in the package
+// graph but separate file) can reuse the same ordering — see opensearch
+// adapter's tasks helpers.
+func sortTasksByID(t []types.Task) {
+	sort.Slice(t, func(i, j int) bool { return t[i].ID < t[j].ID })
+}
+
+// formatTaskNodeFailure renders one node_failures entry as a single
+// "<node_id>: <reason>" line. Falls back to the cluster's exception
+// type when no reason is present (older ES versions emit just `type`),
+// and to "<unknown>" when even type is empty so an entry is never
+// invisibly dropped from the rendered list.
+func formatTaskNodeFailure(nodeID, reason, typ string) string {
+	prefix := nodeID
+	if prefix == "" {
+		prefix = "<unknown>"
+	}
+	switch {
+	case reason != "":
+		return fmt.Sprintf("%s: %s", prefix, reason)
+	case typ != "":
+		return fmt.Sprintf("%s: %s", prefix, typ)
+	default:
+		return prefix
+	}
 }

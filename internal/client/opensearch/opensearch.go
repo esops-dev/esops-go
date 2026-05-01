@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -1233,10 +1234,21 @@ func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
 // and prefer Roles. Older OS clusters that omit Roles fall through to
 // a best-effort parse of the abbreviated form so the data-node identity
 // stays accurate even on legacy versions.
+//
+// bytes=b is required so the disk/heap columns arrive as bare integers
+// rather than the cluster's human-readable suffix ("12.3kb"), which
+// varies subtly across versions and would force a per-version parser.
+// The full column list is what `ops nodes` renders.
 func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
 	req := &osapi.CatNodesReq{
 		Params: osapi.CatNodesParams{
-			H: []string{"name", "node.role", "node.roles"},
+			Bytes: "b",
+			H: []string{
+				"name", "node.role", "node.roles", "ip", "version", "master",
+				"heap.percent", "heap.current", "heap.max",
+				"disk.used", "disk.avail", "disk.total", "disk.used_percent",
+				"cpu", "load_1m", "uptime",
+			},
 		},
 	}
 	resp, err := c.api.Cat.Nodes(ctx, req)
@@ -1254,13 +1266,87 @@ func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
 		if len(roles) == 0 {
 			roles = abbreviatedRolesToFull(n.Role)
 		}
+		master := false
+		// Both clusters report '*' on the elected master row; OS also
+		// surfaces the cluster_manager column as the canonical name on
+		// 2.x+. Either flag is good enough — operators care about the
+		// boolean, not which column carried it.
+		if n.Master == "*" || n.ClusterManager == "*" {
+			master = true
+		}
 		out = append(out, types.Node{
-			Name:       n.Name,
-			Roles:      roles,
-			IsDataNode: hasDataRole(roles),
+			Name:            n.Name,
+			Roles:           roles,
+			IsDataNode:      hasDataRole(roles),
+			IP:              n.IP,
+			Version:         n.Version,
+			Master:          master,
+			HeapPercent:     intPtrValue(n.HeapPercent),
+			HeapUsedBytes:   parseInt64(deref(n.HeapCurrent)),
+			HeapMaxBytes:    parseInt64(deref(n.HeapMax)),
+			DiskUsedBytes:   parseInt64(deref(n.DiskUsed)),
+			DiskAvailBytes:  parseInt64(deref(n.DiskAvail)),
+			DiskTotalBytes:  parseInt64(deref(n.DiskTotal)),
+			DiskUsedPercent: parsePercent(deref(n.DiskUsedPercent)),
+			CPUPercent:      intPtrValue(n.CPU),
+			Load1m:          deref(n.Load1M),
+			Uptime:          deref(n.Uptime),
 		})
 	}
 	return out, nil
+}
+
+// deref unwraps a *string pointer, returning "" for nil. The OS
+// cat-nodes response models every optional column as *string; coordinating
+// nodes legitimately omit disk/heap fields, so a nil pointer is information
+// (no value) rather than an error.
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// intPtrValue is the int sibling of deref for the percent and CPU columns
+// that the OS client decodes directly into *int.
+func intPtrValue(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// parseInt64 turns a /_cat/nodes byte string (rendered with bytes=b, so
+// "12345" not "12.3kb") into an int64. An empty cell yields zero rather
+// than an error: this is best-effort enrichment for `ops nodes` and a
+// missing column is information, not a failure.
+func parseInt64(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// parsePercent is parseInt's float-tolerant cousin. The disk percent
+// column is rendered as a float ("84.2") on some cluster versions and
+// as an int ("84") on others; we round to the nearest int either way.
+func parsePercent(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int(f + 0.5)
+	}
+	return 0
 }
 
 // splitNodeRoles parses a /_cat/nodes "data,ingest,master"-style list
@@ -1961,4 +2047,414 @@ func (c *Client) DeleteTemplate(ctx context.Context, req types.IndexTemplateDele
 		Name:         req.Name,
 		Acknowledged: resp.Acknowledged,
 	}, nil
+}
+
+// GetClusterSettings implements client.ClusterSettingsManager. The
+// flat_settings query param flattens nested keys, so the exclude entry
+// arrives as "cluster.routing.allocation.exclude._name" — far easier to
+// reach for than the cluster's nested-object default.
+func (c *Client) GetClusterSettings(ctx context.Context) (types.ClusterSettingsView, error) {
+	flat := true
+	req := &osapi.ClusterGetSettingsReq{
+		Params: osapi.ClusterGetSettingsParams{
+			FlatSettings: &flat,
+		},
+	}
+	resp, err := c.api.Cluster.GetSettings(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.ClusterSettingsView{}, classifyResponseErr(err, status)
+	}
+
+	persistent, err := unmarshalSettingsScope(resp.Persistent)
+	if err != nil {
+		return types.ClusterSettingsView{}, err
+	}
+	transient, err := unmarshalSettingsScope(resp.Transient)
+	if err != nil {
+		return types.ClusterSettingsView{}, err
+	}
+	return types.ClusterSettingsView{
+		PersistentExcludeName: parseAllocationExcludeName(persistent),
+		TransientExcludeName:  parseAllocationExcludeName(transient),
+	}, nil
+}
+
+// PutAllocationExclude implements client.ClusterSettingsManager. Body
+// shape mirrors the ES adapter — one scope, one key, JSON null when
+// the slice is empty so the cluster removes the key rather than keep
+// an empty-string value visible in /_cluster/settings.
+func (c *Client) PutAllocationExclude(ctx context.Context, req types.ClusterAllocationExcludeUpdate) (types.ClusterSettingsUpdateResult, error) {
+	scope := "transient"
+	if req.Persistent {
+		scope = "persistent"
+	}
+
+	var value any
+	if len(req.Names) > 0 {
+		value = strings.Join(req.Names, ",")
+	}
+
+	body, err := json.Marshal(map[string]any{
+		scope: map[string]any{
+			"cluster.routing.allocation.exclude._name": value,
+		},
+	})
+	if err != nil {
+		return types.ClusterSettingsUpdateResult{}, fmt.Errorf("encoding cluster put_settings body: %w", err)
+	}
+
+	flat := true
+	osReq := osapi.ClusterPutSettingsReq{
+		Body: bytes.NewReader(body),
+		Params: osapi.ClusterPutSettingsParams{
+			FlatSettings: &flat,
+		},
+	}
+	resp, err := c.api.Cluster.PutSettings(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.ClusterSettingsUpdateResult{}, classifyResponseErr(err, status)
+	}
+	return types.ClusterSettingsUpdateResult{Acknowledged: resp.Acknowledged}, nil
+}
+
+// unmarshalSettingsScope decodes one scope (persistent or transient) of
+// /_cluster/settings into a flat map. flat_settings on the request
+// makes this a one-level json.RawMessage decode; an empty scope is the
+// most common shape and yields an empty (non-nil) map for the parser.
+func unmarshalSettingsScope(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 {
+		return map[string]any{}, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, errors.Join(errors.New("decoding cluster settings scope"), err)
+	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	return out, nil
+}
+
+// parseAllocationExcludeName mirrors the ES helper of the same name:
+// pulls cluster.routing.allocation.exclude._name out of a flat map and
+// splits the comma-separated value into a clean slice.
+func parseAllocationExcludeName(m map[string]any) []string {
+	if m == nil {
+		return nil
+	}
+	raw, ok := m["cluster.routing.allocation.exclude._name"]
+	if !ok {
+		return nil
+	}
+	s, ok := raw.(string)
+	if !ok || s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// AddVotingExclusions implements client.VotingExclusionManager via
+// POST /_cluster/voting_config_exclusions. The OS API takes a single
+// `node_names` query parameter (comma-separated); the cluster appends
+// to the existing list and de-duplicates, so the call is idempotent on
+// re-add.
+//
+// Both OS 1.x → 3.x expose the same endpoint and accept the same
+// query shape — `cluster_manager` terminology is purely cosmetic in
+// docs, the wire parameter is still `node_names`.
+func (c *Client) AddVotingExclusions(ctx context.Context, names []string) (types.VotingExclusionsResult, error) {
+	if len(names) == 0 {
+		return types.VotingExclusionsResult{}, fmt.Errorf("at least one node name is required")
+	}
+	osReq := osapi.ClusterPostVotingConfigExclusionsReq{
+		Params: osapi.ClusterPostVotingConfigExclusionsParams{
+			NodeNames: strings.Join(names, ","),
+		},
+	}
+	resp, err := c.api.Cluster.PostVotingConfigExclusions(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp)
+		}
+		return types.VotingExclusionsResult{}, classifyResponseErr(err, status)
+	}
+	return types.VotingExclusionsResult{Acknowledged: true}, nil
+}
+
+// ClearVotingExclusions implements client.VotingExclusionManager via
+// DELETE /_cluster/voting_config_exclusions. The cluster API only
+// supports clear-all (no per-node delete), so this wipes every entry
+// in the list.
+//
+// wait_for_removal=false is set explicitly because the calling path
+// (`ops uncordon --clear-voting`) is "I drained nodes but they're
+// staying / coming back": the nodes named in the exclusion list are
+// still in the cluster, so the cluster default (wait until the
+// excluded nodes leave the cluster) hangs until the master timeout
+// and 429s.
+func (c *Client) ClearVotingExclusions(ctx context.Context) (types.VotingExclusionsResult, error) {
+	waitFalse := false
+	osReq := osapi.ClusterDeleteVotingConfigExclusionsReq{
+		Params: osapi.ClusterDeleteVotingConfigExclusionsParams{
+			WaitForRemoval: &waitFalse,
+		},
+	}
+	resp, err := c.api.Cluster.DeleteVotingConfigExclusions(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp)
+		}
+		return types.VotingExclusionsResult{}, classifyResponseErr(err, status)
+	}
+	return types.VotingExclusionsResult{Acknowledged: true}, nil
+}
+
+// GetVotingExclusions reads the current list via /_cluster/state with
+// metric=metadata. The OS typed client decodes the
+// VotingConfigExclusions array into a strongly-typed slice already,
+// so we just walk it and project the names.
+//
+// filter_path narrows the response so the cluster doesn't ship the
+// whole metadata blob — important on a fleet where /_cluster/state
+// can be tens of MB.
+func (c *Client) GetVotingExclusions(ctx context.Context) ([]string, error) {
+	osReq := &osapi.ClusterStateReq{
+		Metrics: []string{"metadata"},
+		Params: osapi.ClusterStateParams{
+			FilterPath: []string{"metadata.cluster_coordination.voting_config_exclusions.node_name"},
+		},
+	}
+	resp, err := c.api.Cluster.State(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
+	}
+
+	excl := resp.Metadata.ClusterCoordination.VotingConfigExclusions
+	out := make([]string, 0, len(excl))
+	for _, e := range excl {
+		if e.NodeName != "" {
+			out = append(out, e.NodeName)
+		}
+	}
+	return out, nil
+}
+
+// Tasks implements client.TasksInspector. The default cluster
+// grouping (`nodes.<node_id>.tasks.<composite>`) is the only shape
+// every OS version reports as a map — `group_by=none` returns a flat
+// array the typed client can't decode (its `Tasks` field is typed as
+// map). The adapter walks the per-node `Tasks` map directly.
+func (c *Client) Tasks(ctx context.Context, filter types.TasksFilter) ([]types.Task, error) {
+	params := osapi.TasksListParams{
+		Actions:      filter.Actions,
+		Nodes:        filter.Nodes,
+		ParentTaskID: filter.ParentTaskID,
+	}
+	if filter.Detailed {
+		d := true
+		params.Detailed = &d
+	}
+	req := &osapi.TasksListReq{Params: params}
+	resp, err := c.api.Tasks.List(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
+	}
+	flat := map[string]osapi.TasksListTask{}
+	for _, node := range resp.Nodes {
+		for id, t := range node.Tasks {
+			flat[id] = t
+		}
+	}
+	return tasksFromListResp(flat), nil
+}
+
+// TasksStream implements client.TasksInspector. The opensearch-go
+// client does not expose a streaming JSON decoder for /_tasks (the
+// response is parsed into a typed struct in one shot), so the adapter
+// reuses the buffered List call and yields one task at a time. The
+// callback API still gives the renderer the streaming-friendly shape;
+// memory pressure is bounded by the cluster's own response size, the
+// same as the buffered Tasks() path.
+//
+// Sort order is left to map iteration so streaming consumers do not
+// pay for a sort they did not ask for; the buffered Tasks() path is
+// what guarantees alphabetic order by ID.
+func (c *Client) TasksStream(ctx context.Context, filter types.TasksFilter, yield func(types.Task) error) error {
+	params := osapi.TasksListParams{
+		Actions:      filter.Actions,
+		Nodes:        filter.Nodes,
+		ParentTaskID: filter.ParentTaskID,
+	}
+	if filter.Detailed {
+		d := true
+		params.Detailed = &d
+	}
+	req := &osapi.TasksListReq{Params: params}
+	resp, err := c.api.Tasks.List(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return classifyResponseErr(err, status)
+	}
+	for _, node := range resp.Nodes {
+		for id, t := range node.Tasks {
+			task := types.Task{
+				ID:               id,
+				Node:             t.Node,
+				Type:             t.Type,
+				Action:           t.Action,
+				Description:      t.Description,
+				StartTimeMillis:  t.StartTimeInMillis,
+				RunningTimeNanos: t.RunningTimeInNanos,
+				Cancellable:      t.Cancellable,
+				Cancelled:        t.Cancelled,
+				ParentTaskID:     t.ParentTaskID,
+			}
+			if err := yield(task); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// CancelTasks implements client.TasksCanceller. The OS typed cancel
+// response groups by node (Nodes:{<id>:{Tasks:{...}}}) regardless of
+// any group_by hint — the parameter is not honoured on the cancel
+// endpoint — so the adapter flattens the nested map client-side into
+// the same row-per-task slice the list path returns.
+//
+// At most one TaskIDs entry is honoured per call (the cluster's
+// /_tasks/<id>/_cancel endpoint takes a single ID); multi-ID requests
+// are fanned out by the business layer and folded back together.
+func (c *Client) CancelTasks(ctx context.Context, req types.TasksCancelRequest) (types.TasksCancelResult, error) {
+	if len(req.TaskIDs) > 1 {
+		return types.TasksCancelResult{}, fmt.Errorf("opensearch tasks cancel: capability accepts at most one TaskIDs entry; got %d (business layer should fan out)", len(req.TaskIDs))
+	}
+	taskID := ""
+	if len(req.TaskIDs) == 1 {
+		taskID = req.TaskIDs[0]
+	}
+	params := osapi.TasksCancelParams{
+		Actions:      req.Filter.Actions,
+		Nodes:        req.Filter.Nodes,
+		ParentTaskID: req.Filter.ParentTaskID,
+	}
+	if req.WaitForCompletion {
+		w := true
+		params.WaitForCompletion = &w
+	}
+	osReq := osapi.TasksCancelReq{TaskID: taskID, Params: params}
+	resp, err := c.api.Tasks.Cancel(ctx, osReq)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return types.TasksCancelResult{}, classifyResponseErr(err, status)
+	}
+
+	flat := make([]types.Task, 0)
+	for _, node := range resp.Nodes {
+		for id, t := range node.Tasks {
+			flat = append(flat, types.Task{
+				ID:               id,
+				Node:             t.Node,
+				Type:             t.Type,
+				Action:           t.Action,
+				StartTimeMillis:  t.StartTimeInMillis,
+				RunningTimeNanos: int64(t.RunningTimeInNanos),
+				Cancellable:      t.Cancellable,
+				Cancelled:        t.Cancelled,
+			})
+		}
+	}
+	sort.Slice(flat, func(i, j int) bool { return flat[i].ID < flat[j].ID })
+
+	failures := make([]string, 0, len(resp.NodeFailures))
+	for _, f := range resp.NodeFailures {
+		failures = append(failures, formatNodeFailure(f))
+	}
+	out := types.TasksCancelResult{
+		Cancelled:         flat,
+		NodeFailures:      failures,
+		WaitForCompletion: req.WaitForCompletion,
+	}
+	if taskID != "" {
+		out.TaskIDs = []string{taskID}
+	}
+	return out, nil
+}
+
+// tasksFromListResp turns the typed map[id]TasksListTask into a sorted
+// row-per-task slice. Sorting is stable so a saved JSON capture compares
+// equal across runs even though Go's map iteration order doesn't.
+func tasksFromListResp(in map[string]osapi.TasksListTask) []types.Task {
+	out := make([]types.Task, 0, len(in))
+	for id, t := range in {
+		out = append(out, types.Task{
+			ID:               id,
+			Node:             t.Node,
+			Type:             t.Type,
+			Action:           t.Action,
+			Description:      t.Description,
+			StartTimeMillis:  t.StartTimeInMillis,
+			RunningTimeNanos: t.RunningTimeInNanos,
+			Cancellable:      t.Cancellable,
+			Cancelled:        t.Cancelled,
+			ParentTaskID:     t.ParentTaskID,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// formatNodeFailure renders the typed FailuresCause as the same
+// "<node_id>: <reason>" string the ES adapter produces, so a captured
+// TasksCancelResult.NodeFailures slice reads identically across
+// dialects. Falls back to the cluster's exception type when no reason
+// is present, and to "<unknown>" when even type is empty so an entry
+// is never invisibly dropped from the rendered list.
+func formatNodeFailure(f osapi.FailuresCause) string {
+	prefix := f.NodeID
+	if prefix == "" {
+		prefix = "<unknown>"
+	}
+	switch {
+	case f.Reason != "":
+		return fmt.Sprintf("%s: %s", prefix, f.Reason)
+	case f.Type != "":
+		return fmt.Sprintf("%s: %s", prefix, f.Type)
+	default:
+		return prefix
+	}
 }

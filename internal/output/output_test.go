@@ -1486,7 +1486,6 @@ func TestISMExplain_wideShowsEnabledAndStepInfo(t *testing.T) {
 	}
 }
 
-
 func sampleSnapshotRepositories() []types.SnapshotRepository {
 	return []types.SnapshotRepository{
 		{Name: "fs", Type: "fs", Settings: map[string]any{"location": "/var/backups/es"}},
@@ -1497,7 +1496,7 @@ func sampleSnapshotRepositories() []types.SnapshotRepository {
 func sampleSnapshotRows() []types.Snapshot {
 	return []types.Snapshot{
 		{Repository: "s3", Name: "nightly-2026-04-30", UUID: "uuid-a", State: "SUCCESS",
-			Indices: []string{"logs-000001", "logs-000002"},
+			Indices:         []string{"logs-000001", "logs-000002"},
 			StartTimeMillis: 1714435200000, EndTimeMillis: 1714435320000, DurationMillis: 120_000,
 			ShardsTotal: 10, ShardsSuccessful: 10},
 		{Repository: "s3", Name: "nightly-2026-04-29", State: "FAILED",
@@ -1773,6 +1772,517 @@ func TestSnapshotVerify_wideListsNodeIDsAndNames(t *testing.T) {
 
 func TestSnapshotVerify_rejectsUnknownFormat(t *testing.T) {
 	if err := output.SnapshotVerify(&bytes.Buffer{}, sampleSnapshotVerify(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func sampleNodes() []types.Node {
+	return []types.Node{
+		{
+			Name:            "es01",
+			Roles:           []string{"data", "master"},
+			IsDataNode:      true,
+			IP:              "10.0.0.1",
+			Version:         "9.0.0",
+			Master:          true,
+			HeapPercent:     42,
+			HeapUsedBytes:   2 * 1024 * 1024 * 1024,
+			HeapMaxBytes:    8 * 1024 * 1024 * 1024,
+			DiskUsedBytes:   100 * 1024 * 1024 * 1024,
+			DiskAvailBytes:  900 * 1024 * 1024 * 1024,
+			DiskUsedPercent: 10,
+			CPUPercent:      4,
+			Load1m:          "0.5",
+			Uptime:          "3d",
+		},
+		{
+			Name:       "es02",
+			Roles:      []string{"data"},
+			IsDataNode: true,
+			Version:    "9.0.0",
+		},
+	}
+}
+
+func TestNodes_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Nodes(&buf, sampleNodes(), output.FormatTable); err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "ROLES", "VERSION", "HEAP%", "DISK_USED", "es01", "es02", "9.0.0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodes_wideAddsMasterFlagAndIP(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Nodes(&buf, sampleNodes(), output.FormatWide); err != nil {
+		t.Fatalf("Nodes wide: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"MASTER", "IP", "10.0.0.1", "CPU", "LOAD_1M", "UPTIME"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodes_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Nodes(&buf, sampleNodes(), output.FormatJSON); err != nil {
+		t.Fatalf("Nodes json: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	if rows[0]["name"] != "es01" || rows[0]["version"] != "9.0.0" {
+		t.Errorf("name/version dropped: %+v", rows[0])
+	}
+	// omitempty: empty heap fields on es02 should not appear in JSON
+	if _, ok := rows[1]["heap_used_bytes"]; ok {
+		t.Errorf("zero heap_used_bytes should be omitted: %+v", rows[1])
+	}
+}
+
+func TestNodes_yamlIsValid(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Nodes(&buf, sampleNodes(), output.FormatYAML); err != nil {
+		t.Fatalf("Nodes yaml: %v", err)
+	}
+	var rows []map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid YAML: %v\noutput: %s", err, buf.String())
+	}
+}
+
+func TestNodes_ndjsonOneRecordPerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Nodes(&buf, sampleNodes(), output.FormatNDJSON); err != nil {
+		t.Fatalf("Nodes ndjson: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Errorf("ndjson lines = %d, want 2:\n%s", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Errorf("invalid JSON line %q: %v", line, err)
+		}
+	}
+}
+
+func TestNodes_rejectsUnknownFormat(t *testing.T) {
+	if err := output.Nodes(&bytes.Buffer{}, sampleNodes(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func sampleDrainResult() types.NodeDrainResult {
+	return types.NodeDrainResult{
+		NodeNames:       []string{"es01"},
+		Acknowledged:    true,
+		Persistent:      false,
+		AlreadyExcluded: nil,
+		Before:          []string{},
+		After:           []string{"es01"},
+		Waited:          true,
+		ShardsRemaining: 0,
+	}
+}
+
+func TestNodeDrain_tableShowsHeaderAndScope(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.NodeDrain(&buf, sampleDrainResult(), output.FormatTable); err != nil {
+		t.Fatalf("NodeDrain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "NODES", "SCOPE", "drain", "es01", "transient", "EXCLUDE._NAME", "after:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodeDrain_persistentScopeRendered(t *testing.T) {
+	r := sampleDrainResult()
+	r.Persistent = true
+	var buf bytes.Buffer
+	if err := output.NodeDrain(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("NodeDrain: %v", err)
+	}
+	if !strings.Contains(buf.String(), "persistent") {
+		t.Errorf("table should mention persistent scope:\n%s", buf.String())
+	}
+}
+
+func TestNodeDrain_multiNodeShowsPerNodeBreakdown(t *testing.T) {
+	r := sampleDrainResult()
+	r.NodeNames = []string{"es01", "es02"}
+	r.PerNodeShardsRemaining = map[string]int{"es01": 3, "es02": 0}
+	r.ShardsRemaining = 3
+	r.Before = []string{}
+	r.After = []string{"es01", "es02"}
+
+	var buf bytes.Buffer
+	if err := output.NodeDrain(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("NodeDrain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NODE", "SHARDS_LEFT", "es01", "es02", "3", "es01,es02"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("multi-node table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodeDrain_votingExclusionsRendered(t *testing.T) {
+	r := sampleDrainResult()
+	r.VotingExclusionAcked = true
+	r.VotingExclusionsAdded = []string{"es01"}
+
+	var buf bytes.Buffer
+	if err := output.NodeDrain(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("NodeDrain: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"VOTING_CONFIG_EXCLUSIONS", "added:", "acknowledged: true"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("voting section missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodeDrain_jsonRoundTrips(t *testing.T) {
+	r := sampleDrainResult()
+	r.NodeNames = []string{"es01", "es02"}
+	var buf bytes.Buffer
+	if err := output.NodeDrain(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("NodeDrain json: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	names, ok := got["node_names"].([]any)
+	if !ok || len(names) != 2 || names[0] != "es01" || names[1] != "es02" {
+		t.Errorf("node_names = %v, want [es01 es02]", got["node_names"])
+	}
+}
+
+func TestNodeDrain_rejectsUnknownFormat(t *testing.T) {
+	if err := output.NodeDrain(&bytes.Buffer{}, sampleDrainResult(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestNodeUncordon_tableShowsHeader(t *testing.T) {
+	r := types.NodeUncordonResult{
+		NodeNames:    []string{"es01"},
+		Acknowledged: true,
+		NotInList:    nil,
+		Before:       []string{"es01"},
+		After:        []string{},
+	}
+	var buf bytes.Buffer
+	if err := output.NodeUncordon(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("NodeUncordon: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "uncordon", "es01", "NOT_IN_LIST", "EXCLUDE._NAME", "before:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodeUncordon_clearVotingRendered(t *testing.T) {
+	r := types.NodeUncordonResult{
+		Acknowledged:            true,
+		VotingExclusionsCleared: true,
+		VotingExclusionAcked:    true,
+	}
+	var buf bytes.Buffer
+	if err := output.NodeUncordon(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("NodeUncordon: %v", err)
+	}
+	if !strings.Contains(buf.String(), "VOTING_CLEARED") {
+		t.Errorf("VOTING_CLEARED column missing:\n%s", buf.String())
+	}
+}
+
+func TestNodeUncordon_jsonRoundTrips(t *testing.T) {
+	r := types.NodeUncordonResult{NodeNames: []string{"es01"}}
+	var buf bytes.Buffer
+	if err := output.NodeUncordon(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("NodeUncordon json: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	names, ok := got["node_names"].([]any)
+	if !ok || len(names) != 1 || names[0] != "es01" {
+		t.Errorf("node_names = %v, want [es01]", got["node_names"])
+	}
+}
+
+func TestNodeUncordon_rejectsUnknownFormat(t *testing.T) {
+	if err := output.NodeUncordon(&bytes.Buffer{}, types.NodeUncordonResult{}, output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestNodeDrainList_tableShowsBothScopes(t *testing.T) {
+	r := types.NodeDrainListResult{
+		PersistentExcluded: []string{"es10"},
+		TransientExcluded:  []string{"es01", "es02"},
+		VotingExcluded:     []string{"es03"},
+	}
+	var buf bytes.Buffer
+	if err := output.NodeDrainList(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("NodeDrainList: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ALLOCATION_EXCLUDE", "persistent:", "transient:", "VOTING_CONFIG_EXCLUSIONS", "es01", "es02", "es03", "es10"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNodeDrainList_emptyListsRenderAsDash(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.NodeDrainList(&buf, types.NodeDrainListResult{}, output.FormatTable); err != nil {
+		t.Fatalf("NodeDrainList: %v", err)
+	}
+	out := buf.String()
+	// Three "-" placeholders, one per section, so the sections are
+	// always present and grep-able.
+	if strings.Count(out, "-") < 3 {
+		t.Errorf("empty-list rendering should show three dashes:\n%s", out)
+	}
+}
+
+func TestNodeDrainList_jsonRoundTrips(t *testing.T) {
+	r := types.NodeDrainListResult{TransientExcluded: []string{"es01"}}
+	var buf bytes.Buffer
+	if err := output.NodeDrainList(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("NodeDrainList json: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if names, _ := got["transient_excluded"].([]any); len(names) != 1 || names[0] != "es01" {
+		t.Errorf("transient_excluded = %v, want [es01]", got["transient_excluded"])
+	}
+}
+
+func TestNodeDrainList_rejectsUnknownFormat(t *testing.T) {
+	if err := output.NodeDrainList(&bytes.Buffer{}, types.NodeDrainListResult{}, output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func sampleTasks() []types.Task {
+	return []types.Task{
+		{
+			ID:               "nodeA:1",
+			Node:             "nodeA",
+			Type:             "transport",
+			Action:           "indices:data/write/reindex",
+			Description:      "reindex from logs-2024 to logs-2025",
+			RunningTimeNanos: 90 * int64(1_000_000_000), // 90s
+			Cancellable:      true,
+			ParentTaskID:     "nodeA:0",
+		},
+		{
+			ID:               "nodeB:5",
+			Node:             "nodeB",
+			Type:             "transport",
+			Action:           "indices:admin/forcemerge",
+			RunningTimeNanos: 45 * int64(1_000_000_000),
+			Cancellable:      false,
+		},
+	}
+}
+
+func TestTasks_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Tasks(&buf, sampleTasks(), output.FormatJSON); err != nil {
+		t.Fatalf("Tasks: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	if rows[0]["id"] != "nodeA:1" || rows[0]["action"] != "indices:data/write/reindex" {
+		t.Errorf("rows[0] = %v, want id=nodeA:1 action=…/reindex", rows[0])
+	}
+}
+
+func TestTasks_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Tasks(&buf, sampleTasks(), output.FormatNDJSON); err != nil {
+		t.Fatalf("Tasks: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+	for _, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Errorf("line not valid JSON: %v (%q)", err, line)
+		}
+	}
+}
+
+func TestTasks_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Tasks(&buf, sampleTasks(), output.FormatTable); err != nil {
+		t.Fatalf("Tasks: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ID", "ACTION", "RUNNING", "CANCELLABLE", "nodeA:1", "indices:data/write/reindex"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTasks_wideAddsParentAndDescription(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Tasks(&buf, sampleTasks(), output.FormatWide); err != nil {
+		t.Fatalf("Tasks: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"PARENT", "DESCRIPTION", "nodeA:0", "reindex from logs-2024"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTasks_rejectsUnknownFormat(t *testing.T) {
+	if err := output.Tasks(&bytes.Buffer{}, sampleTasks(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func TestTasksCancel_tableHeader(t *testing.T) {
+	r := types.TasksCancelResult{
+		Action:    "cancel",
+		TaskIDs:   []string{"nodeA:1"},
+		Cancelled: []types.Task{{ID: "nodeA:1", Action: "indices:data/write/reindex", Cancellable: true}},
+	}
+	var buf bytes.Buffer
+	if err := output.TasksCancel(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("TasksCancel: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ACTION", "TARGET", "DRY_RUN", "WAIT", "CANCELLED", "NODE_FAILURES", "nodeA:1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTasksCancel_filterTargetRendersAsFilter(t *testing.T) {
+	r := types.TasksCancelResult{Action: "cancel"}
+	var buf bytes.Buffer
+	if err := output.TasksCancel(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("TasksCancel: %v", err)
+	}
+	if !strings.Contains(buf.String(), "filter") {
+		t.Errorf("expected TARGET=filter when no task ID, got:\n%s", buf.String())
+	}
+}
+
+func TestTasksCancel_nodeFailuresSection(t *testing.T) {
+	r := types.TasksCancelResult{
+		Action:       "cancel",
+		TaskIDs:      []string{"nodeA:1"},
+		NodeFailures: []string{"nodeB: master not available"},
+	}
+	var buf bytes.Buffer
+	if err := output.TasksCancel(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("TasksCancel: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "NODE_FAILURES") || !strings.Contains(out, "master not available") {
+		t.Errorf("expected node-failure section in output:\n%s", out)
+	}
+}
+
+func TestTasksCancel_jsonRoundTrips(t *testing.T) {
+	r := types.TasksCancelResult{
+		Action:    "cancel",
+		DryRun:    true,
+		TaskIDs:   []string{"nodeA:1"},
+		Cancelled: []types.Task{{ID: "nodeA:1", Action: "indices:data/write/reindex"}},
+	}
+	var buf bytes.Buffer
+	if err := output.TasksCancel(&buf, r, output.FormatJSON); err != nil {
+		t.Fatalf("TasksCancel: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	ids, _ := got["task_ids"].([]any)
+	if got["dry_run"] != true || len(ids) != 1 || ids[0] != "nodeA:1" {
+		t.Errorf("got %+v, want dry_run=true task_ids=[nodeA:1]", got)
+	}
+}
+
+func TestTasksCancel_multiIDTargetCellJoinsForSmallSet(t *testing.T) {
+	r := types.TasksCancelResult{
+		Action:  "cancel",
+		TaskIDs: []string{"n1:1", "n2:2", "n3:3"},
+	}
+	var buf bytes.Buffer
+	if err := output.TasksCancel(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("TasksCancel: %v", err)
+	}
+	if !strings.Contains(buf.String(), "n1:1,n2:2,n3:3") {
+		t.Errorf("expected joined IDs in TARGET cell, got:\n%s", buf.String())
+	}
+}
+
+func TestTasksCancel_multiIDTargetCellCountsForLargeSet(t *testing.T) {
+	r := types.TasksCancelResult{
+		Action:  "cancel",
+		TaskIDs: []string{"n1:1", "n2:2", "n3:3", "n4:4", "n5:5"},
+	}
+	var buf bytes.Buffer
+	if err := output.TasksCancel(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("TasksCancel: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "5 ids") {
+		t.Errorf("expected '5 ids' summary in TARGET cell when >3, got:\n%s", out)
+	}
+	// The full slice still appears in JSON output but we deliberately
+	// keep the table column narrow.
+	if strings.Contains(out, "n1:1,n2:2") {
+		t.Errorf("table should NOT inline the full ID list when >3, got:\n%s", out)
+	}
+}
+
+func TestTasksCancel_rejectsUnknownFormat(t *testing.T) {
+	if err := output.TasksCancel(&bytes.Buffer{}, types.TasksCancelResult{}, output.Format("bogus")); err == nil {
 		t.Fatal("expected error for unknown format")
 	}
 }
