@@ -1,6 +1,7 @@
 package opensearch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -167,6 +168,155 @@ func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, ign
 		return nil, errors.Join(errors.New("decoding snapshot get response"), err)
 	}
 	return wire.Snapshots, nil
+}
+
+// snapshotCreateResponseWire mirrors the PUT /_snapshot/<repo>/<snap>
+// response on OpenSearch — same envelope as Elasticsearch. Two shapes
+// share one decoder: when wait_for_completion=true the cluster returns
+// `{"snapshot": {<entry>}}`; when false it returns `{"accepted": true}`.
+type snapshotCreateResponseWire struct {
+	Accepted bool               `json:"accepted"`
+	Snapshot *snapshotEntryWire `json:"snapshot"`
+}
+
+// CreateSnapshot implements client.SnapshotCreator via
+// PUT /_snapshot/<repo>/<snapshot>. Goes through raw HTTP (rather than
+// the typed osapi.SnapshotCreate) because the typed client's request
+// shape forces the body through a struct that doesn't carry the
+// `metadata` block — round-tripping a free-form metadata map is
+// straightforward over HTTP.
+func (c *Client) CreateSnapshot(ctx context.Context, req types.SnapshotCreateRequest) (types.SnapshotCreateResult, error) {
+	body, err := buildSnapshotCreateBody(req)
+	if err != nil {
+		return types.SnapshotCreateResult{}, err
+	}
+
+	path := fmt.Sprintf("/_snapshot/%s/%s", url.PathEscape(req.Repository), url.PathEscape(req.Snapshot))
+	if req.WaitForCompletion {
+		path += "?wait_for_completion=true"
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, path, bytes.NewReader(body))
+	if err != nil {
+		return types.SnapshotCreateResult{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return types.SnapshotCreateResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot create error"))
+		return types.SnapshotCreateResult{}, esopsclient.ClassifyStatus("snapshot create repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
+	}
+
+	var wire snapshotCreateResponseWire
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot create")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotCreateResult{}, errors.Join(errors.New("decoding snapshot create response"), err)
+	}
+	return snapshotCreateResultFromWire(req, wire), nil
+}
+
+// snapshotVerifyResponseWire mirrors POST /_snapshot/<repo>/_verify on
+// OpenSearch. The cluster returns a `nodes` object keyed by node id; each
+// value carries a `name` field. Same shape as Elasticsearch.
+type snapshotVerifyResponseWire struct {
+	Nodes map[string]struct {
+		Name string `json:"name"`
+	} `json:"nodes"`
+}
+
+// VerifyRepository implements client.SnapshotVerifier via
+// POST /_snapshot/<repo>/_verify.
+func (c *Client) VerifyRepository(ctx context.Context, req types.SnapshotVerifyRequest) (types.SnapshotVerifyResult, error) {
+	path := fmt.Sprintf("/_snapshot/%s/_verify", url.PathEscape(req.Repository))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return types.SnapshotVerifyResult{}, err
+	}
+
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return types.SnapshotVerifyResult{}, esopsclient.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot verify error"))
+		return types.SnapshotVerifyResult{}, esopsclient.ClassifyStatus("snapshot verify repo="+req.Repository, resp.StatusCode, errBody)
+	}
+
+	var wire snapshotVerifyResponseWire
+	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot verify")
+	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
+		return types.SnapshotVerifyResult{}, errors.Join(errors.New("decoding snapshot verify response"), err)
+	}
+	return snapshotVerifyResultFromWire(req.Repository, wire), nil
+}
+
+// buildSnapshotCreateBody renders the request body. Mirrors the ES
+// adapter's helper (the body shape is identical between dialects);
+// duplicated rather than shared because the wire struct is package-private.
+func buildSnapshotCreateBody(req types.SnapshotCreateRequest) ([]byte, error) {
+	body := make(map[string]any)
+	if indices := strings.TrimSpace(req.Indices); indices != "" {
+		body["indices"] = indices
+	}
+	if req.IncludeGlobalState != nil {
+		body["include_global_state"] = *req.IncludeGlobalState
+	}
+	if req.Partial != nil {
+		body["partial"] = *req.Partial
+	}
+	if req.IgnoreUnavailable != nil {
+		body["ignore_unavailable"] = *req.IgnoreUnavailable
+	}
+	if len(req.Metadata) > 0 {
+		body["metadata"] = req.Metadata
+	}
+	return json.Marshal(body)
+}
+
+func snapshotCreateResultFromWire(req types.SnapshotCreateRequest, wire snapshotCreateResponseWire) types.SnapshotCreateResult {
+	out := types.SnapshotCreateResult{
+		Action:            "create",
+		Repository:        req.Repository,
+		Name:              req.Snapshot,
+		WaitForCompletion: req.WaitForCompletion,
+		Accepted:          wire.Accepted,
+	}
+	switch {
+	case wire.Snapshot != nil:
+		out.Snapshot = snapshotFromWire(req.Repository, *wire.Snapshot)
+		out.Accepted = true
+	case req.WaitForCompletion:
+		out.Snapshot = types.Snapshot{Repository: req.Repository, Name: req.Snapshot}
+	default:
+		out.Snapshot = types.Snapshot{Repository: req.Repository, Name: req.Snapshot, State: "STARTED"}
+	}
+	return out
+}
+
+func snapshotVerifyResultFromWire(repo string, wire snapshotVerifyResponseWire) types.SnapshotVerifyResult {
+	ids := make([]string, 0, len(wire.Nodes))
+	for id := range wire.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		names = append(names, wire.Nodes[id].Name)
+	}
+	return types.SnapshotVerifyResult{
+		Action:        "verify",
+		Repository:    repo,
+		VerifiedNodes: ids,
+		Names:         names,
+	}
 }
 
 // snapshotFromWire mirrors the ES adapter's helper. Kept as a private

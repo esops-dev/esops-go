@@ -369,6 +369,34 @@ type SnapshotInspector interface {
 	Snapshots(ctx context.Context, filter types.SnapshotFilter) ([]types.Snapshot, error)
 }
 
+// SnapshotCreator wraps PUT /_snapshot/<repo>/<snapshot> — the destructive
+// half of the snapshot surface. The body shape (`indices`,
+// `include_global_state`, `partial`, `ignore_unavailable`, `metadata`)
+// is identical on both dialects, so one capability covers ES and OS.
+//
+// The cluster has no native dry-run for snapshot creation; the business
+// layer implements --dry-run client-side as "validate + report what
+// would be sent". Implementations therefore only execute live calls.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 404 when the repo doesn't exist, or a
+//     400 when an existing snapshot name is reused)
+type SnapshotCreator interface {
+	CreateSnapshot(ctx context.Context, req types.SnapshotCreateRequest) (types.SnapshotCreateResult, error)
+}
+
+// SnapshotVerifier wraps POST /_snapshot/<repo>/_verify — the repository
+// connectivity probe both dialects expose with the same shape (no body,
+// returns `{nodes:{<id>:{name:...}}}`). Read-only from the operator's
+// perspective: the cluster talks to the repository's backing store but
+// no snapshot data is written.
+type SnapshotVerifier interface {
+	VerifyRepository(ctx context.Context, req types.SnapshotVerifyRequest) (types.SnapshotVerifyResult, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -398,4 +426,6 @@ type Client struct {
 	ILM               ILMManager
 	ISM               ISMManager
 	Snapshot          SnapshotInspector
+	SnapshotCreate    SnapshotCreator
+	SnapshotVerify    SnapshotVerifier
 }

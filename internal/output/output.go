@@ -2484,3 +2484,110 @@ func humanDuration(ms int64) string {
 	}
 	return d.String()
 }
+
+// SnapshotCreate renders the outcome of `esops snapshot create`. Default
+// table is a one-line header (action, dry-run, repository, snapshot,
+// accepted, wait-for-completion, state). Wide adds shard counts and
+// duration when the cluster returned a populated snapshot block. JSON/
+// YAML emit the neutral SnapshotCreateResult shape directly.
+func SnapshotCreate(w io.Writer, r types.SnapshotCreateResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return snapshotCreateTable(w, r, true)
+	case FormatTable, "":
+		return snapshotCreateTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotCreateTable(w io.Writer, r types.SnapshotCreateResult, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tSNAPSHOT\tACCEPTED\tWAIT\tSTATE\tSHARDS\tDURATION")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%t\t%t\t%s\t%s\t%s\n",
+			r.Action, r.DryRun,
+			dashIfEmpty(r.Repository), dashIfEmpty(r.Name),
+			r.Accepted, r.WaitForCompletion,
+			dashIfEmpty(r.Snapshot.State),
+			snapshotShardsCell(r.Snapshot),
+			humanDuration(r.Snapshot.DurationMillis),
+		)
+	} else {
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tREPOSITORY\tSNAPSHOT\tACCEPTED\tWAIT\tSTATE")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%t\t%t\t%s\n",
+			r.Action, r.DryRun,
+			dashIfEmpty(r.Repository), dashIfEmpty(r.Name),
+			r.Accepted, r.WaitForCompletion,
+			dashIfEmpty(r.Snapshot.State),
+		)
+	}
+	return tw.Flush()
+}
+
+// snapshotShardsCell formats the cluster's per-snapshot shard counters
+// as "successful/total" with a trailing failure marker when non-zero.
+// Returns "-" when the cluster did not echo a snapshot block (the async
+// path with wait_for_completion=false).
+func snapshotShardsCell(s types.Snapshot) string {
+	if s.ShardsTotal == 0 && s.ShardsSuccessful == 0 && s.ShardsFailed == 0 {
+		return "-"
+	}
+	out := fmt.Sprintf("%d/%d", s.ShardsSuccessful, s.ShardsTotal)
+	if s.ShardsFailed > 0 {
+		out += fmt.Sprintf(" (%d failed)", s.ShardsFailed)
+	}
+	return out
+}
+
+// SnapshotVerify renders the outcome of `esops snapshot verify`. Default
+// table shows the repository and the count of nodes that connected;
+// wide expands the per-node identifiers and names so an operator can see
+// which node failed when the count is below the cluster size. JSON/YAML
+// emit the neutral SnapshotVerifyResult shape directly.
+func SnapshotVerify(w io.Writer, r types.SnapshotVerifyResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return snapshotVerifyTable(w, r, true)
+	case FormatTable, "":
+		return snapshotVerifyTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotVerifyTable(w io.Writer, r types.SnapshotVerifyResult, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ACTION\tREPOSITORY\tNODES\tNODE_NAMES\tNODE_IDS")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
+			r.Action, dashIfEmpty(r.Repository), len(r.VerifiedNodes),
+			dashIfEmpty(strings.Join(r.Names, ",")),
+			dashIfEmpty(strings.Join(r.VerifiedNodes, ",")),
+		)
+	} else {
+		_, _ = fmt.Fprintln(tw, "ACTION\tREPOSITORY\tNODES")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n",
+			r.Action, dashIfEmpty(r.Repository), len(r.VerifiedNodes),
+		)
+	}
+	return tw.Flush()
+}
