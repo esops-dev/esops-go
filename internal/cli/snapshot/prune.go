@@ -53,7 +53,11 @@ Mutates cluster state. Against a prod-protected context,
 			},
 			&cli.BoolFlag{
 				Name:  "allow-large-prune",
-				Usage: "Required when retention would delete more than 50% of the candidate set in one run",
+				Usage: "Required when retention would delete more than 50% of the eligible set in one run",
+			},
+			&cli.BoolFlag{
+				Name:  "continue-on-missing",
+				Usage: "When the bulk DELETE 404s on one or more names (concurrent operator), retry remaining names individually and report the missing ones in the audit trail",
 			},
 		},
 		Action: runPrune,
@@ -76,20 +80,26 @@ func runPrune(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	opts := esopssnapshot.PruneOptions{
-		Repository:      cmd.String("repository"),
-		SnapshotPattern: cmd.String("snapshot"),
-		KeepLast:        cmd.Int("keep-last"),
-		OlderThan:       olderThan,
-		OlderThanRaw:    olderThanRaw,
-		StateFilter:     cmd.String("state"),
-		AllowLargePrune: cmd.Bool("allow-large-prune"),
-		DryRun:          cmd.Bool("dry-run"),
+		Repository:        cmd.String("repository"),
+		SnapshotPattern:   cmd.String("snapshot"),
+		KeepLast:          cmd.Int("keep-last"),
+		OlderThan:         olderThan,
+		StateFilter:       cmd.String("state"),
+		AllowLargePrune:   cmd.Bool("allow-large-prune"),
+		ContinueOnMissing: cmd.Bool("continue-on-missing"),
+		DryRun:            cmd.Bool("dry-run"),
 	}
 
 	result, err := esopssnapshot.Prune(ctx, s.Client.Snapshot, s.Client.SnapshotPrune, opts)
 	if err != nil {
 		return err
 	}
+	// Echo the operator's --older-than spelling back into the result so a
+	// captured JSON record reads "30d" rather than the canonical
+	// "720h0m0s" form Go's time.Duration would print. Display-only — the
+	// retention math used the parsed duration, so the round-trip is
+	// information-preserving for the operator's audit log.
+	result.OlderThan = olderThanRaw
 
 	s.Log("snapshot.prune",
 		"repository", result.Repository,

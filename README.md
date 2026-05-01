@@ -88,7 +88,7 @@ ops         health · shards · allocation-explain · hot-threads
 migrate     plan · check · reindex · verify · cutover
 index       list · optimize · rollover · shrink · open · close
             aliases · settings · template · ilm (ES) · ism (OS)
-snapshot    list · create · verify · restore · prune
+snapshot    list · create · verify · restore · prune · register · deregister
 config      use-context · get-contexts · view
 ```
 

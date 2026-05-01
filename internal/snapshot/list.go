@@ -102,3 +102,22 @@ func List(ctx context.Context, c client.SnapshotInspector, f types.SnapshotFilte
 	}
 	return out, nil
 }
+
+// Stream invokes yield for each snapshot in the resolved set as it
+// arrives. Sort is *not* applied — streaming and sorting are mutually
+// exclusive (sorting requires the full set in memory, which defeats the
+// streaming promise). State filtering is applied so the operator's
+// `--state` flag still works under `--output ndjson`.
+//
+// Per-repo errors land in repoErr; iteration over the rest of the fleet
+// continues. The returned error is non-nil only on a fatal failure
+// (initial repo resolution, context cancellation, yield error).
+func Stream(ctx context.Context, c client.SnapshotInspector, f types.SnapshotFilter, yield func(types.Snapshot) error, repoErr func(repo string, err error)) error {
+	wantState := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(f.State)), " ", "_")
+	return c.SnapshotsStream(ctx, f, func(s types.Snapshot) error {
+		if wantState != "" && strings.ToLower(s.State) != wantState {
+			return nil
+		}
+		return yield(s)
+	}, repoErr)
+}

@@ -2,7 +2,11 @@ package snapshot
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/dj-wasabi/esops-go/internal/client"
 	"github.com/dj-wasabi/esops-go/internal/types"
@@ -30,9 +34,16 @@ import (
 // IgnoreIndexSettings drops settings from the snapshot's stored index
 // metadata so the cluster falls back to its own defaults on the new index.
 //
-// DryRun is the global flag — when true the cluster is not contacted and
-// the function returns a synthetic Accepted=true reflecting what would
-// have been sent. The cluster has no native dry-run for restore.
+// MasterTimeout maps to ?master_timeout on the cluster endpoint. Zero
+// leaves the cluster default (30s); long-running master state operations
+// on busy clusters routinely need 1m+.
+//
+// DryRun is the global flag — when true the cluster is not contacted. The
+// dry-run path runs a *collision pre-flight* via the SnapshotInspector:
+// it resolves the snapshot's index list, applies the rename, and reports
+// any existing-index collisions in the result so the operator sees them
+// before the live run trips the cluster's 500. The cluster has no native
+// dry-run for restore so this is implemented client-side.
 type RestoreOptions struct {
 	Repository          string
 	Snapshot            string
@@ -45,6 +56,7 @@ type RestoreOptions struct {
 	IndexSettings       map[string]any
 	IgnoreIndexSettings []string
 	WaitForCompletion   bool
+	MasterTimeout       time.Duration
 	DryRun              bool
 }
 
@@ -56,17 +68,28 @@ type RestoreOptions struct {
 //     replacement (or vice versa) trips the cluster's terse 500 with a
 //     message that doesn't tell the operator which half is missing.
 //
-// The cluster's own 500 ("[idx] already exists") on a restore that would
-// clobber an existing index is the canonical error and we surface it
-// verbatim — pre-flighting "would this restore clash?" would require a
-// second round-trip and still race with concurrent index creation.
+// On --dry-run, when a SnapshotInspector and IndexInspector are both
+// available, this function pre-flights the index-collision check so the
+// operator sees what would conflict before the live run. On a live run
+// the cluster's own 500 ("[idx] already exists") is surfaced verbatim —
+// pre-flighting always races with concurrent index creation, so the
+// pre-flight is dry-run-only.
 func Restore(ctx context.Context, c client.SnapshotRestorer, opts RestoreOptions) (types.SnapshotRestoreResult, error) {
+	return RestoreWithPreflight(ctx, c, nil, nil, opts)
+}
+
+// RestoreWithPreflight is the full entry point used when the caller has a
+// SnapshotInspector and IndexInspector to hand: --dry-run consults them
+// to compute the post-rename index list and warn about collisions before
+// the operator hits enter on the live command. ins or idx may be nil; in
+// that case the dry-run path falls back to the cosmetic preview.
+func RestoreWithPreflight(ctx context.Context, c client.SnapshotRestorer, ins client.SnapshotInspector, idx client.IndexInspector, opts RestoreOptions) (types.SnapshotRestoreResult, error) {
 	if err := validateRestoreOptions(opts); err != nil {
 		return types.SnapshotRestoreResult{}, err
 	}
 
 	if opts.DryRun {
-		return types.SnapshotRestoreResult{
+		out := types.SnapshotRestoreResult{
 			Action:            "restore",
 			DryRun:            true,
 			Repository:        opts.Repository,
@@ -79,7 +102,27 @@ func Restore(ctx context.Context, c client.SnapshotRestorer, opts RestoreOptions
 				Snapshot: opts.Snapshot,
 				Indices:  splitIndicesPreview(opts.Indices),
 			},
-		}, nil
+		}
+		// Best-effort collision pre-flight. Failures here are wrapped in
+		// the result rather than surfaced as a fatal error: the operator
+		// asked for a dry-run, not a live operation, and reporting "I
+		// couldn't check, but the live run might collide" is more useful
+		// than refusing to dry-run.
+		if ins != nil && idx != nil {
+			collisions, err := preflightRestoreCollisions(ctx, ins, idx, opts)
+			switch {
+			case err != nil:
+				out.Snapshot.PreflightWarning = "preflight skipped: " + err.Error()
+			case len(collisions.Collided) > 0:
+				out.Snapshot.Indices = collisions.Targets
+				out.Snapshot.Collisions = collisions.Collided
+				return out, fmt.Errorf("%w: restore would clobber %d existing index/indices: %s",
+					client.ErrDryRunBlocker, len(collisions.Collided), strings.Join(collisions.Collided, ", "))
+			default:
+				out.Snapshot.Indices = collisions.Targets
+			}
+		}
+		return out, nil
 	}
 
 	req := types.SnapshotRestoreRequest{
@@ -94,6 +137,7 @@ func Restore(ctx context.Context, c client.SnapshotRestorer, opts RestoreOptions
 		IndexSettings:       opts.IndexSettings,
 		IgnoreIndexSettings: opts.IgnoreIndexSettings,
 		WaitForCompletion:   opts.WaitForCompletion,
+		MasterTimeout:       opts.MasterTimeout,
 	}
 	return c.RestoreSnapshot(ctx, req)
 }
@@ -107,10 +151,10 @@ func validateRestoreOptions(opts RestoreOptions) error {
 	if snap == "" {
 		return client.UsageError("--snapshot is required")
 	}
-	if isSnapshotPatternish(repo) {
+	if client.IsPatternish(repo) {
 		return client.UsageError("--repository must be a literal name, not a pattern (got %q)", repo)
 	}
-	if isSnapshotPatternish(snap) {
+	if client.IsPatternish(snap) {
 		return client.UsageError("--snapshot must be a literal name, not a pattern (got %q)", snap)
 	}
 	pat := strings.TrimSpace(opts.RenamePattern)
@@ -118,5 +162,129 @@ func validateRestoreOptions(opts RestoreOptions) error {
 	if (pat == "") != (repl == "") {
 		return client.UsageError("--rename-pattern and --rename-replacement must be set together")
 	}
+	if pat != "" {
+		if _, err := regexp.Compile(pat); err != nil {
+			return client.UsageError("--rename-pattern is not a valid regex: %v", err)
+		}
+	}
 	return nil
+}
+
+// applyRestoreRename produces the post-rename target index list for a
+// restore. Returns the input slice unchanged when the rename pair is
+// empty. Compilation errors on the pattern surface verbatim — the
+// validator already rejected unparseable patterns up-front, so a
+// compile failure here means an internal-API misuse (the function is
+// also used by the wait/resume path which doesn't run the validator).
+func applyRestoreRename(sourceIndices []string, pattern, replacement string) ([]string, error) {
+	if pattern == "" {
+		out := make([]string, len(sourceIndices))
+		copy(out, sourceIndices)
+		return out, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("rename pattern: %w", err)
+	}
+	out := make([]string, 0, len(sourceIndices))
+	for _, n := range sourceIndices {
+		out = append(out, re.ReplaceAllString(n, replacement))
+	}
+	return out, nil
+}
+
+// preflightOutcome captures what the pre-flight learned about a dry-run
+// restore: Targets is the post-rename index list (intersected with the
+// operator's --indices filter), Collided is the subset that already
+// exists in the cluster.
+type preflightOutcome struct {
+	Targets  []string
+	Collided []string
+}
+
+// preflightRestoreCollisions resolves the snapshot's index list, applies
+// the operator's --indices filter and rename pair, then asks the cluster
+// which of the resulting names already exist. Returns the post-rename
+// list plus the subset that would collide on a live run.
+//
+// Two round-trips: one to read the snapshot's stored index list, one
+// /_cat/indices to discover what's currently live. Both are cheap on
+// healthy clusters and the dry-run shouldn't be a hot path anyway.
+func preflightRestoreCollisions(ctx context.Context, ins client.SnapshotInspector, idx client.IndexInspector, opts RestoreOptions) (preflightOutcome, error) {
+	rows, err := ins.Snapshots(ctx, types.SnapshotFilter{
+		Repository: opts.Repository,
+		Snapshot:   opts.Snapshot,
+	})
+	if err != nil {
+		return preflightOutcome{}, err
+	}
+	var sourceIndices []string
+	for _, r := range rows {
+		if r.Name == opts.Snapshot {
+			sourceIndices = append(sourceIndices, r.Indices...)
+			break
+		}
+	}
+	if len(sourceIndices) == 0 {
+		// Older clusters return the snapshot via a different key; if we
+		// can't find it, bail out without warning so the dry-run isn't
+		// noisy. The live run will surface the cluster's own diagnosis.
+		return preflightOutcome{}, errors.New("snapshot not found or has no indices recorded")
+	}
+
+	// Apply --indices filter (cosmetic match — patterns and date math
+	// stay opaque, same as the live cluster behaviour we can't perfectly
+	// emulate client-side; mismatches just leave more in the target).
+	if filt := strings.TrimSpace(opts.Indices); filt != "" {
+		want := splitIndicesPreview(filt)
+		wantSet := make(map[string]struct{}, len(want))
+		for _, w := range want {
+			wantSet[w] = struct{}{}
+		}
+		filtered := sourceIndices[:0]
+		for _, n := range sourceIndices {
+			// Keep names whose literal form is mentioned. A pattern like
+			// `logs-*` matches no literal name in the source list, so the
+			// pre-flight conservatively passes everything through — the
+			// dry-run output makes the over-inclusion visible.
+			if _, ok := wantSet[n]; ok {
+				filtered = append(filtered, n)
+			}
+		}
+		if len(filtered) > 0 {
+			sourceIndices = filtered
+		}
+	}
+
+	// Apply rename pair.
+	targets, err := applyRestoreRename(sourceIndices, opts.RenamePattern, opts.RenameReplacement)
+	if err != nil {
+		return preflightOutcome{}, err
+	}
+
+	// Look up which targets already exist. /_cat/indices accepts a
+	// comma-separated list and a missing-index case returns 404, so we
+	// query open and closed states in one shot via the inspector's slim
+	// helper — the response is just (name, status) tuples.
+	existing, err := idx.IndicesNamesStatus(ctx, types.IndexFilter{Index: strings.Join(targets, ",")})
+	if err != nil {
+		// 404 on every target → nothing exists, no collisions. Other
+		// errors propagate.
+		if errors.Is(err, client.ErrNotFound) {
+			return preflightOutcome{Targets: targets}, nil
+		}
+		return preflightOutcome{}, err
+	}
+
+	exists := make(map[string]struct{}, len(existing))
+	for _, e := range existing {
+		exists[e.Name] = struct{}{}
+	}
+	collided := make([]string, 0)
+	for _, t := range targets {
+		if _, ok := exists[t]; ok {
+			collided = append(collided, t)
+		}
+	}
+	return preflightOutcome{Targets: targets, Collided: collided}, nil
 }

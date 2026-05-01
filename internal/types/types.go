@@ -3,7 +3,10 @@
 // types are the boundary that keeps the rest of the codebase dialect-agnostic.
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Dialect identifies which product answered a cluster probe.
 type Dialect string
@@ -1471,8 +1474,13 @@ type Snapshot struct {
 	ShardsTotal        int      `json:"shards_total"              yaml:"shards_total"`
 	ShardsSuccessful   int      `json:"shards_successful"         yaml:"shards_successful"`
 	ShardsFailed       int      `json:"shards_failed"             yaml:"shards_failed"`
-	Version            string   `json:"version,omitempty"         yaml:"version,omitempty"`
-	Failures           []string `json:"failures,omitempty"        yaml:"failures,omitempty"`
+	Version            string            `json:"version,omitempty"         yaml:"version,omitempty"`
+	// Failures carries the cluster's per-shard failure objects verbatim
+	// so `--output json` consumers can drill in with jq (e.g.
+	// `.failures[].reason`) instead of receiving JSON-encoded strings
+	// they have to re-parse. Each entry is the raw JSON object the
+	// cluster returned in the snapshot's `failures` array.
+	Failures []json.RawMessage `json:"failures,omitempty"        yaml:"failures,omitempty"`
 }
 
 // SnapshotSort is the sort key applied to SnapshotFilter results. Snapshot
@@ -1502,6 +1510,16 @@ type SnapshotFilter struct {
 	State             string       // e.g. "SUCCESS"|"FAILED"|"IN_PROGRESS"; case-insensitive; "" = any
 	IgnoreUnavailable bool         // pass-through to the cluster
 	Sort              SnapshotSort // ordering applied after retrieval
+	// Slim asks the cluster for the lightweight per-snapshot envelope:
+	// `?verbose=false` on ES 7.15+ and OS 2.x. The cluster drops indices,
+	// per-shard counters, failures, and start/end times — saves an order
+	// of magnitude of bandwidth on repositories with thousands of
+	// snapshots, where the default table view doesn't render those fields
+	// anyway. Default false (cluster default = verbose) so existing
+	// callers don't silently lose fields. On older clusters the flag is
+	// silently ignored — adapters may downgrade to verbose without
+	// erroring.
+	Slim bool
 }
 
 // SnapshotRepositoryFilter narrows a SnapshotInspector.Repositories call.
@@ -1542,6 +1560,10 @@ type SnapshotCreateRequest struct {
 	IgnoreUnavailable  *bool
 	WaitForCompletion  bool
 	Metadata           map[string]any
+	// MasterTimeout maps to ?master_timeout on the create endpoint.
+	// Empty leaves the cluster default (30s) alone; long-running master
+	// state operations on busy clusters routinely need 1m+.
+	MasterTimeout time.Duration
 }
 
 // SnapshotCreateResult is the normalised view of a snapshot creation. The
@@ -1627,6 +1649,7 @@ type SnapshotRestoreRequest struct {
 	IndexSettings       map[string]any
 	IgnoreIndexSettings []string
 	WaitForCompletion   bool
+	MasterTimeout       time.Duration // ?master_timeout
 }
 
 // SnapshotRestoreInfo is the per-snapshot record echoed by the cluster on
@@ -1642,6 +1665,18 @@ type SnapshotRestoreInfo struct {
 	ShardsTotal      int      `json:"shards_total,omitempty"      yaml:"shards_total,omitempty"`
 	ShardsSuccessful int      `json:"shards_successful,omitempty" yaml:"shards_successful,omitempty"`
 	ShardsFailed     int      `json:"shards_failed,omitempty"     yaml:"shards_failed,omitempty"`
+	// Collisions is the post-rename index list intersected with the
+	// cluster's currently-live indices — populated only by the dry-run
+	// pre-flight. A non-empty list is what trips the dry-run blocker;
+	// the operator either picks a different rename pair or removes the
+	// existing index (deliberately) before re-running live.
+	Collisions []string `json:"collisions,omitempty"        yaml:"collisions,omitempty"`
+	// PreflightWarning is set when the dry-run pre-flight couldn't
+	// complete (the snapshot didn't decode cleanly, /_cat/indices was
+	// unreachable, etc.). The dry-run still returns Accepted=true; this
+	// field tells the operator the collision check is *unreliable* for
+	// this run, not that the run itself is broken.
+	PreflightWarning string `json:"preflight_warning,omitempty"  yaml:"preflight_warning,omitempty"`
 }
 
 // SnapshotRestoreResult is the normalised view of a snapshot restore. Action /
@@ -1710,4 +1745,177 @@ type SnapshotPruneResult struct {
 	OlderThan       string   `json:"older_than,omitempty"         yaml:"older_than,omitempty"`
 	StateFilter     string   `json:"state_filter,omitempty"       yaml:"state_filter,omitempty"`
 	SnapshotPattern string   `json:"snapshot_pattern,omitempty"   yaml:"snapshot_pattern,omitempty"`
+	// MissingSkipped is non-nil when --continue-on-missing was set and
+	// the cluster's bulk-delete returned 404 for some of the names. The
+	// remaining names are retried individually and the missing ones land
+	// here so the operator's audit log records what was already gone.
+	MissingSkipped []string `json:"missing_skipped,omitempty"     yaml:"missing_skipped,omitempty"`
+}
+
+// RecoveryRequest narrows a RecoveryInspector.Recovery call. Indices is a
+// comma-separated list (or empty for cluster-wide). ActiveOnly maps to
+// `?active_only=true` so the cluster only echoes shards that are
+// currently recovering — what the restore poller wants. Setting it to
+// false yields the full history (DONE shards included), useful for
+// post-hoc inspection.
+type RecoveryRequest struct {
+	Indices    string
+	ActiveOnly bool
+}
+
+// RecoveryReport is the neutral view of GET /<indices>/_recovery. The
+// cluster keys the response by index name; we surface a flat list of
+// IndexRecovery entries with the index name lifted into the struct so
+// the caller doesn't have to walk a map. AllDone is a derived flag —
+// true when every shard across every index reaches stage DONE — for
+// the polling loop's "stop polling" decision.
+type RecoveryReport struct {
+	Indices []IndexRecovery `json:"indices"   yaml:"indices"`
+	AllDone bool            `json:"all_done"  yaml:"all_done"`
+}
+
+// IndexRecovery is the per-index recovery view. Shards is the slice of
+// per-shard records the cluster echoes; for snapshot restores the
+// `type` field is "SNAPSHOT" and the `source` block carries the
+// (repository, snapshot, index) tuple the shard is reading from.
+type IndexRecovery struct {
+	Index  string          `json:"index"   yaml:"index"`
+	Shards []ShardRecovery `json:"shards"  yaml:"shards"`
+}
+
+// ShardRecovery is one row inside `<index>.shards` in the cluster's
+// /_recovery response. Stage walks INIT → INDEX → TRANSLOG →
+// FINALIZE → DONE on a shard being restored from a snapshot. Bytes
+// and Files percentages drive the operator-facing progress display;
+// Source identifies which snapshot the shard is reading from so an
+// operator polling a multi-snapshot recovery can see which of N
+// concurrent restores each shard belongs to.
+type ShardRecovery struct {
+	ID              int    `json:"id"                          yaml:"id"`
+	Type            string `json:"type"                        yaml:"type"`
+	Stage           string `json:"stage"                       yaml:"stage"`
+	Primary         bool   `json:"primary"                     yaml:"primary"`
+	Source          string `json:"source,omitempty"            yaml:"source,omitempty"`
+	BytesPercent    string `json:"bytes_percent,omitempty"     yaml:"bytes_percent,omitempty"`
+	FilesPercent    string `json:"files_percent,omitempty"     yaml:"files_percent,omitempty"`
+	BytesTotal      int64  `json:"bytes_total,omitempty"       yaml:"bytes_total,omitempty"`
+	BytesRecovered  int64  `json:"bytes_recovered,omitempty"   yaml:"bytes_recovered,omitempty"`
+	FilesTotal      int    `json:"files_total,omitempty"       yaml:"files_total,omitempty"`
+	FilesRecovered  int    `json:"files_recovered,omitempty"   yaml:"files_recovered,omitempty"`
+}
+
+// SnapshotStatusRequest is the input to GET /_snapshot/<repo>/<snap>/_status.
+// Both Repository and Snapshot are literal names — patterns are not
+// honoured by /_status. Used by the wait/resume machinery on `snapshot
+// create` so progress reporting and SIGINT-then-cancel share one data
+// path.
+type SnapshotStatusRequest struct {
+	Repository string
+	Snapshot   string
+}
+
+// SnapshotStatus is the normalised view of /_snapshot/<repo>/<snap>/_status.
+// State is the cluster's enum (STARTED, IN_PROGRESS, SUCCESS, FAILED,
+// ABORTED, MISSING). The Shards counters come from `shards_stats` —
+// finer-grained than the regular Snapshot record's per-shard total/
+// successful/failed because they include init/started/done splits the
+// progress UI wants.
+//
+// MissingFromCluster is true when the cluster has no record of the
+// snapshot (404 on /_status). Distinguished from the zero value so a
+// resume can tell "still pending" apart from "the cluster forgot".
+type SnapshotStatus struct {
+	Repository         string `json:"repository"           yaml:"repository"`
+	Snapshot           string `json:"snapshot"             yaml:"snapshot"`
+	State              string `json:"state"                yaml:"state"`
+	IncludeGlobalState bool   `json:"include_global_state" yaml:"include_global_state"`
+	StartTimeMillis    int64  `json:"start_time_millis,omitempty"  yaml:"start_time_millis,omitempty"`
+	DurationMillis     int64  `json:"duration_millis,omitempty"    yaml:"duration_millis,omitempty"`
+	ShardsTotal        int    `json:"shards_total"         yaml:"shards_total"`
+	ShardsInit         int    `json:"shards_init"          yaml:"shards_init"`
+	ShardsStarted      int    `json:"shards_started"       yaml:"shards_started"`
+	ShardsDone         int    `json:"shards_done"          yaml:"shards_done"`
+	ShardsFailed       int    `json:"shards_failed"        yaml:"shards_failed"`
+	MissingFromCluster bool   `json:"missing_from_cluster,omitempty" yaml:"missing_from_cluster,omitempty"`
+}
+
+// SnapshotAnalyzeRequest is the input to POST /_snapshot/<repo>/_analyze.
+// Repository is a literal repo name. The remaining knobs map to the
+// cluster's query params and let an operator scale the probe up for a
+// production-sized repository (default settings target a small fs repo
+// and complete in seconds; an S3 repo wants higher BlobCount to exercise
+// the consistency surface).
+//
+// Both dialects expose the same query-param names; ES 7.4+ and OS 2.x
+// have stable support. Older clusters return 405 — the adapter
+// translates that to ErrUnsupported so the operator sees "your cluster
+// doesn't support _analyze" rather than the cluster's terse 405.
+type SnapshotAnalyzeRequest struct {
+	Repository    string
+	BlobCount     int           // ?blob_count, default 100 server-side
+	Concurrency   int           // ?concurrency, default 10
+	ReadNodeCount int           // ?read_node_count, default 10
+	EarlyReadNode int           // ?early_read_node_count, default 2
+	MaxBlobSize   string        // ?max_blob_size, e.g. "10MB"
+	MaxTotalSize  string        // ?max_total_data_size, e.g. "1GB"
+	Timeout       time.Duration // ?timeout
+}
+
+// SnapshotAnalyzeResult is the normalised view of a deep verify. Surfaces
+// the cluster's per-blob report verbatim — operators triage repository
+// problems by comparing the test counts against a known-good baseline,
+// and rephrasing the cluster's vocabulary would obscure the signal.
+type SnapshotAnalyzeResult struct {
+	Action            string `json:"action"                          yaml:"action"`
+	Repository        string `json:"repository"                      yaml:"repository"`
+	CoordinatingNode  string `json:"coordinating_node,omitempty"     yaml:"coordinating_node,omitempty"`
+	BlobCount         int    `json:"blob_count"                      yaml:"blob_count"`
+	ConcurrencyLevels int    `json:"concurrency"                     yaml:"concurrency"`
+	ReadNodeCount     int    `json:"read_node_count"                 yaml:"read_node_count"`
+	EarlyReadNodes    int    `json:"early_read_node_count"           yaml:"early_read_node_count"`
+	Status            string `json:"status,omitempty"                yaml:"status,omitempty"`
+}
+
+// SnapshotRepositoryRegisterRequest is the input to PUT /_snapshot/<repo>.
+// Type is the cluster-side repository plugin (`fs`, `s3`, `azure`, `gcs`,
+// …). Settings is the type-specific configuration map; we forward it
+// verbatim so each plugin's full surface stays available without a
+// translation table that drifts with new versions. Verify (default true
+// at the cluster) maps to ?verify=false to skip the post-register node
+// connectivity check — useful when registering a repository whose
+// backing store isn't yet online and the operator wants the registration
+// itself to land first.
+type SnapshotRepositoryRegisterRequest struct {
+	Repository string
+	Type       string
+	Settings   map[string]any
+	Verify     *bool
+}
+
+// SnapshotRepositoryRegisterResult mirrors the cluster's
+// `{acknowledged:true}` echo. Action is "register" so a captured JSON
+// record is symmetric with the create/restore/delete results.
+type SnapshotRepositoryRegisterResult struct {
+	Action       string `json:"action"        yaml:"action"`
+	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
+	Repository   string `json:"repository"    yaml:"repository"`
+	Type         string `json:"type"          yaml:"type"`
+	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// SnapshotRepositoryDeregisterRequest is the input to DELETE /_snapshot/<repo>.
+// Repository is a literal repo name; deregister does not accept patterns —
+// the cluster's own behaviour here is to refuse a wildcard, mirrored at
+// the business layer so the operator gets a clear error up-front.
+type SnapshotRepositoryDeregisterRequest struct {
+	Repository string
+}
+
+// SnapshotRepositoryDeregisterResult mirrors the cluster's
+// `{acknowledged:true}` echo. Action is "deregister".
+type SnapshotRepositoryDeregisterResult struct {
+	Action       string `json:"action"        yaml:"action"`
+	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
+	Repository   string `json:"repository"    yaml:"repository"`
+	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
 }

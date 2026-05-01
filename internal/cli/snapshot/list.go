@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/urfave/cli/v3"
@@ -26,6 +27,20 @@ func listCommand() *cli.Command {
 With --repository <name|pattern>, lists snapshots in matching repos.
 Use --all to fan out across every repository.
 
+By default the repository listing redacts known-secret keys
+(access_key, secret_key, etc.) from the settings cell. Pass
+--show-secrets to include the raw values; useful for reproducing a
+config and dangerous to feed into shell history or shared captures.
+
+--slim asks the cluster for the lightweight snapshot envelope
+(?verbose=false on ES 7.15+/OS 2.x). Drops indices, per-shard counters
+and failures from each row — saves an order of magnitude of bandwidth
+on repositories with thousands of snapshots and is a no-op on the
+default table view, which doesn't render those fields.
+
+--output ndjson streams each snapshot as soon as its repository
+responds: large fleets stop blocking on the slowest repository.
+
 Read-only and safe to run against a prod-protected context at any time.`,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -42,7 +57,7 @@ Read-only and safe to run against a prod-protected context at any time.`,
 			},
 			&cli.StringFlag{
 				Name:  "sort",
-				Usage: "Sort snapshots by: start_time (default), name, duration",
+				Usage: "Sort snapshots by: start_time (default), name, duration. Ignored on --output ndjson (streaming preserves arrival order).",
 				Value: "start_time",
 			},
 			&cli.BoolFlag{
@@ -52,6 +67,14 @@ Read-only and safe to run against a prod-protected context at any time.`,
 			&cli.BoolFlag{
 				Name:  "ignore-unavailable",
 				Usage: "Pass ignore_unavailable=true so a missing-snapshot pattern is a no-op rather than a 404",
+			},
+			&cli.BoolFlag{
+				Name:  "slim",
+				Usage: "Ask the cluster for the lightweight envelope (verbose=false). ES 7.15+ / OS 2.x.",
+			},
+			&cli.BoolFlag{
+				Name:  "show-secrets",
+				Usage: "Print repository settings verbatim including credential keys (default: redacted)",
 			},
 		},
 		Action: runList,
@@ -83,10 +106,13 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 	return runSnapshotsList(ctx, cmd, s, repository, snapshotPattern)
 }
 
-func runRepositoriesList(ctx context.Context, _ *cli.Command, s cmdsetup.Setup) error {
+func runRepositoriesList(ctx context.Context, cmd *cli.Command, s cmdsetup.Setup) error {
 	rows, err := esopssnapshot.ListRepositories(ctx, s.Client.Snapshot, types.SnapshotRepositoryFilter{})
 	if err != nil {
 		return err
+	}
+	if !cmd.Bool("show-secrets") {
+		rows = esopssnapshot.RedactRepositorySettings(rows)
 	}
 	s.Log("snapshot.list.repositories", "repositories", len(rows))
 	return output.SnapshotRepositories(os.Stdout, rows, s.Format)
@@ -109,6 +135,11 @@ func runSnapshotsList(ctx context.Context, cmd *cli.Command, s cmdsetup.Setup, r
 		State:             cmd.String("state"),
 		Sort:              sortKey,
 		IgnoreUnavailable: cmd.Bool("ignore-unavailable"),
+		Slim:              cmd.Bool("slim"),
+	}
+
+	if s.Format == output.FormatNDJSON {
+		return runSnapshotsListStream(ctx, s, filter)
 	}
 
 	rows, err := esopssnapshot.List(ctx, s.Client.Snapshot, filter)
@@ -117,4 +148,33 @@ func runSnapshotsList(ctx context.Context, cmd *cli.Command, s cmdsetup.Setup, r
 	}
 	s.Log("snapshot.list", "snapshots", len(rows), "repository", repository)
 	return output.Snapshots(os.Stdout, rows, s.Format)
+}
+
+// runSnapshotsListStream is the NDJSON-streaming path: each snapshot
+// encodes to stdout as soon as its repository's response decodes.
+// Per-repo errors land on stderr (one warn line per repo) so a 20-repo
+// fleet with one S3 outage still surfaces the rest of the inventory.
+// The first per-repo error becomes the command's exit code so a CI
+// pipeline doesn't silently miss a broken repository.
+func runSnapshotsListStream(ctx context.Context, s cmdsetup.Setup, filter types.SnapshotFilter) error {
+	stream, err := output.NewSnapshotsStream(os.Stdout, s.Format)
+	if err != nil {
+		return err
+	}
+
+	var repoErrs []string
+	streamErr := esopssnapshot.Stream(ctx, s.Client.Snapshot, filter, func(snap types.Snapshot) error {
+		return stream.Write(snap)
+	}, func(repo string, err error) {
+		fmt.Fprintf(os.Stderr, "snapshot list: repo %q: %v\n", repo, err)
+		repoErrs = append(repoErrs, repo)
+	})
+	if streamErr != nil {
+		return streamErr
+	}
+	s.Log("snapshot.list.stream", "repository", filter.Repository, "repo_errors", len(repoErrs))
+	if len(repoErrs) > 0 {
+		return fmt.Errorf("snapshot list: %d repo(s) failed: %v", len(repoErrs), repoErrs)
+	}
+	return nil
 }

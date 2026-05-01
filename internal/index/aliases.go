@@ -173,10 +173,10 @@ func validateAliasIdentity(alias, index string) error {
 	if i == "" {
 		return client.UsageError("--index is required (a single literal index name)")
 	}
-	if isPatternish(a) {
+	if client.IsPatternish(a) {
 		return client.UsageError("--alias must be a literal name, not a pattern (got %q)", a)
 	}
-	if isPatternish(i) {
+	if client.IsPatternish(i) {
 		return client.UsageError("--index must be a literal name, not a pattern (got %q)", i)
 	}
 	return nil

@@ -11,9 +11,12 @@ import (
 )
 
 type fakeVerifier struct {
-	calls []types.SnapshotVerifyRequest
-	resp  types.SnapshotVerifyResult
-	err   error
+	calls        []types.SnapshotVerifyRequest
+	analyzeCalls []types.SnapshotAnalyzeRequest
+	resp         types.SnapshotVerifyResult
+	analyze      types.SnapshotAnalyzeResult
+	err          error
+	analyzeErr   error
 }
 
 func (f *fakeVerifier) VerifyRepository(_ context.Context, req types.SnapshotVerifyRequest) (types.SnapshotVerifyResult, error) {
@@ -22,6 +25,18 @@ func (f *fakeVerifier) VerifyRepository(_ context.Context, req types.SnapshotVer
 		return types.SnapshotVerifyResult{}, f.err
 	}
 	r := f.resp
+	if r.Repository == "" {
+		r.Repository = req.Repository
+	}
+	return r, nil
+}
+
+func (f *fakeVerifier) AnalyzeRepository(_ context.Context, req types.SnapshotAnalyzeRequest) (types.SnapshotAnalyzeResult, error) {
+	f.analyzeCalls = append(f.analyzeCalls, req)
+	if f.analyzeErr != nil {
+		return types.SnapshotAnalyzeResult{}, f.analyzeErr
+	}
+	r := f.analyze
 	if r.Repository == "" {
 		r.Repository = req.Repository
 	}

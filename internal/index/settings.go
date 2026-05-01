@@ -116,7 +116,7 @@ func UpdateSettings(ctx context.Context, su client.IndexSettingsUpdater, opts Se
 	if strings.TrimSpace(opts.Index) == "" {
 		return types.IndexSettingsUpdateResult{}, client.UsageError("--index is required")
 	}
-	if isPatternish(opts.Index) && !strings.ContainsAny(opts.Index, "?,") {
+	if client.IsPatternish(opts.Index) && !strings.ContainsAny(opts.Index, "?,") {
 		// '*' alone is the all-indices form — refused outright. A
 		// pattern with a glob (e.g. "logs-*") is allowed since that's
 		// the standard rotation use case.

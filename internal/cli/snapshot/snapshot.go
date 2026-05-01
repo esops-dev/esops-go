@@ -18,6 +18,8 @@ func Command() *cli.Command {
 			verifyCommand(),
 			restoreCommand(),
 			pruneCommand(),
+			registerCommand(),
+			deregisterCommand(),
 		},
 	}
 }

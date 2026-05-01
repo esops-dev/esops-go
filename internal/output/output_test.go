@@ -1503,7 +1503,7 @@ func sampleSnapshotRows() []types.Snapshot {
 		{Repository: "s3", Name: "nightly-2026-04-29", State: "FAILED",
 			Indices: []string{"logs-000001"}, DurationMillis: 30_000,
 			ShardsTotal: 10, ShardsSuccessful: 9, ShardsFailed: 1,
-			Failures: []string{`{"index":"logs-000001","reason":"node left"}`}},
+			Failures: []json.RawMessage{json.RawMessage(`{"index":"logs-000001","reason":"node left"}`)}},
 	}
 }
 
