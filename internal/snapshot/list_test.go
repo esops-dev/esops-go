@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/snapshot"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeSnapshotInspector mimics the adapter return: a flat list of

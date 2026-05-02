@@ -6,10 +6,10 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
-	esopsindex "github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/output"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	esopsindex "github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // ilmCommand is the parent for `esops index ilm <list|get|put|delete|

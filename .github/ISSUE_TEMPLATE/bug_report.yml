@@ -9,7 +9,7 @@ body:
         Thanks for taking the time to file a bug report.
 
         **Security issues:** please do **not** report them here. Use
-        the private channel described in [SECURITY.md](https://github.com/dj-wasabi/esops-go/blob/main/SECURITY.md).
+        the private channel described in [SECURITY.md](https://github.com/esops-dev/esops-go/blob/main/SECURITY.md).
 
   - type: checkboxes
     id: preflight

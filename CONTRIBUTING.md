@@ -34,7 +34,7 @@ discuss before writing the code.
 ## Quickstart
 
 ```sh
-git clone https://github.com/dj-wasabi/esops-go
+git clone https://github.com/esops-dev/esops-go
 cd esops-go
 make build
 ./bin/esops --help
@@ -74,6 +74,10 @@ Test layout:
 - **Contract tests** in `internal/client/` run identical assertions
   against both ES and OS implementations. This is how dialect drift
   gets caught before users see it.
+- **Import-graph tests** in `internal/importguard/` enforce the
+  public/private boundary: `pkg/...` may not import `internal/...`,
+  and `internal/clientutil` may only be imported by the ES/OS adapters.
+  These guard the surface that any future module consumes.
 - **Integration tests** are gated by `//go:build integration` and use
   `testcontainers-go`. The CI fast-path runs ES latest and OS latest;
   the nightly runs the full version matrix.
@@ -97,12 +101,21 @@ header and assert it never appears in any log sink.
 ### Architectural rules to know before you start
 
 - `cmd/esops/main.go` contains no logic. Wiring only.
-- Nothing outside `internal/client/` may import the upstream ES or OS
-  client packages. Domain types live in `internal/types` and have no
-  dialect-specific fields.
+- `pkg/` is the public API consumed by external modules. Promote with
+  discipline; treat additions as semver commitments. `pkg/...` may not
+  import `internal/...` — CI enforces this.
+- Nothing outside `internal/client/` and `internal/clientutil/` may
+  import the upstream ES or OS client packages. Domain types live in
+  `pkg/types` and have no dialect-specific fields.
 - Business logic depends on small capability interfaces in
-  `internal/client/capabilities.go`. There is no god `Client`
-  interface — please don't introduce one.
+  `pkg/client/capabilities.go`. There is no god `Client` interface —
+  please don't introduce one. The read/mutate split (read-only
+  inspectors vs mutating writers) is the contract that lets external
+  read-only consumers stay read-only by construction; keep it.
+- `internal/clientutil` is HTTP plumbing private to the ES/OS
+  adapters. Don't import it from business logic — if you need HTTP
+  error classification, that's a missing capability, not a missing
+  import.
 - Every command Action begins with `cmdsetup.Prepare(ctx, cmd, destructive)`.
   It loads config, resolves the context, applies CLI overrides, enforces
   the protection tier, parses `--output`, and builds a connected client.

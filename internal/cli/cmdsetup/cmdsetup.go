@@ -14,11 +14,11 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/cluster"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/logging"
-	"github.com/dj-wasabi/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/cluster"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/logging"
+	"github.com/esops-dev/esops-go/internal/output"
 )
 
 // ErrProtected is returned when a destructive operation targets a

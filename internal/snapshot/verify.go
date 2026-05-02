@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // VerifyOptions are the knobs the CLI layer hands to Verify. Repository

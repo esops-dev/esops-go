@@ -1,5 +1,5 @@
 BINARY  := esops
-PKG     := github.com/dj-wasabi/esops-go
+PKG     := github.com/esops-dev/esops-go
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)

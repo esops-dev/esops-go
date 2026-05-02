@@ -11,8 +11,9 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
-	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/clientutil"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // ilmPolicyEntryWire mirrors one entry in the GET /_ilm/policy[/<name>]
@@ -44,7 +45,7 @@ func (c *Client) ListPolicies(ctx context.Context, names []string) ([]types.ILMP
 
 	resp, err := c.api.ILM.GetLifecycle(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -53,7 +54,7 @@ func (c *Client) ListPolicies(ctx context.Context, names []string) ([]types.ILMP
 	}
 
 	var wire map[string]ilmPolicyEntryWire
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ilm get_lifecycle")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "ilm get_lifecycle")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding ilm get_lifecycle response"), err)
 	}
@@ -101,7 +102,7 @@ func (c *Client) PutPolicy(ctx context.Context, req types.ILMPolicyPutRequest) (
 
 	resp, err := c.api.ILM.PutLifecycle(bytes.NewReader(req.Body), req.Name, opts...)
 	if err != nil {
-		return types.ILMPolicyPutResult{}, esopsclient.ClassifyTransport(err)
+		return types.ILMPolicyPutResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -131,7 +132,7 @@ func (c *Client) DeletePolicy(ctx context.Context, req types.ILMPolicyDeleteRequ
 	dl := c.api.ILM.DeleteLifecycle
 	resp, err := c.api.ILM.DeleteLifecycle(req.Name, dl.WithContext(ctx))
 	if err != nil {
-		return types.ILMPolicyDeleteResult{}, esopsclient.ClassifyTransport(err)
+		return types.ILMPolicyDeleteResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -189,7 +190,7 @@ func (c *Client) ExplainPolicy(ctx context.Context, req types.ILMExplainRequest)
 
 	resp, err := c.api.ILM.ExplainLifecycle(index, opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -200,7 +201,7 @@ func (c *Client) ExplainPolicy(ctx context.Context, req types.ILMExplainRequest)
 	var wire struct {
 		Indices map[string]ilmExplainEntryWire `json:"indices"`
 	}
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ilm explain_lifecycle")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "ilm explain_lifecycle")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding ilm explain_lifecycle response"), err)
 	}
@@ -248,14 +249,14 @@ func (c *Client) ExplainPolicyStream(ctx context.Context, req types.ILMExplainRe
 	}
 	resp, err := c.api.ILM.ExplainLifecycle(index, opts...)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if err := classifyResponse("ilm explain_lifecycle (stream)", resp.StatusCode, resp.Body); err != nil {
 		return err
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ilm explain_lifecycle (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "ilm explain_lifecycle (stream)")
 	dec := json.NewDecoder(body)
 	if err := streamObjectKey(dec, "indices", "ilm explain_lifecycle (stream)"); err != nil {
 		return err

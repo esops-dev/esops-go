@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeIndexInspector records the filter it was called with and returns a

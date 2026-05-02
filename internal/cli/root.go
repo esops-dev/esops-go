@@ -12,15 +12,15 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/cli/completion"
-	configcmd "github.com/dj-wasabi/esops-go/internal/cli/config"
-	indexcmd "github.com/dj-wasabi/esops-go/internal/cli/index"
-	"github.com/dj-wasabi/esops-go/internal/cli/ops"
-	snapshotcmd "github.com/dj-wasabi/esops-go/internal/cli/snapshot"
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/logging"
-	"github.com/dj-wasabi/esops-go/internal/version"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
+	configcmd "github.com/esops-dev/esops-go/internal/cli/config"
+	indexcmd "github.com/esops-dev/esops-go/internal/cli/index"
+	"github.com/esops-dev/esops-go/internal/cli/ops"
+	snapshotcmd "github.com/esops-dev/esops-go/internal/cli/snapshot"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/logging"
+	"github.com/esops-dev/esops-go/internal/version"
 )
 
 // Run builds and executes the root command. Errors bubble up to main,

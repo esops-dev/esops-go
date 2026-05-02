@@ -1,9 +1,11 @@
-package client
+package clientutil
 
 import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/esops-dev/esops-go/pkg/client"
 )
 
 // DefaultMaxResponseBytes is the default cap for cluster response
@@ -80,5 +82,5 @@ func (b *BoundedReader) Read(p []byte) (int, error) {
 }
 
 func (b *BoundedReader) tooLargeErr() error {
-	return fmt.Errorf("%w: %s response exceeded %d bytes", ErrResponseTooLarge, b.op, b.max)
+	return fmt.Errorf("%w: %s response exceeded %d bytes", client.ErrResponseTooLarge, b.op, b.max)
 }

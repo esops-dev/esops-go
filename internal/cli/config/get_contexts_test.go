@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	esopsconfig "github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/output"
+	esopsconfig "github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/output"
 )
 
 func TestSortedNames_alphabetical(t *testing.T) {

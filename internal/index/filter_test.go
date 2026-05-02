@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 func TestParseSort_knownValues(t *testing.T) {

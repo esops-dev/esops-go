@@ -19,9 +19,10 @@ import (
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
-	"github.com/dj-wasabi/esops-go/internal/auth"
-	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/auth"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/clientutil"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // Client is an ES-backed implementation of the esops client capabilities.
@@ -88,7 +89,7 @@ func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper
 func (c *Client) Health(ctx context.Context) (types.ClusterHealth, error) {
 	resp, err := c.api.Cluster.Health(c.api.Cluster.Health.WithContext(ctx))
 	if err != nil {
-		return types.ClusterHealth{}, esopsclient.ClassifyTransport(err)
+		return types.ClusterHealth{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -148,7 +149,7 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 
 	resp, err := c.api.Cat.Shards(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -165,17 +166,17 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 	for _, r := range rows {
 		out = append(out, types.Shard{
 			Index:             r.Index,
-			Shard:             esopsclient.AtoiOrZero(r.Shard),
+			Shard:             clientutil.AtoiOrZero(r.Shard),
 			Primary:           r.Prirep == "p",
 			State:             r.State,
-			Docs:              esopsclient.Atoi64Ptr(r.Docs),
-			StoreBytes:        esopsclient.Atoi64Ptr(r.Store),
-			Node:              esopsclient.DerefString(r.Node),
-			IP:                esopsclient.DerefString(r.IP),
-			UnassignedReason:  esopsclient.DerefString(r.UnassignedReason),
-			UnassignedAt:      esopsclient.DerefString(r.UnassignedAt),
-			UnassignedFor:     esopsclient.DerefString(r.UnassignedFor),
-			UnassignedDetails: esopsclient.DerefString(r.UnassignedDetails),
+			Docs:              clientutil.Atoi64Ptr(r.Docs),
+			StoreBytes:        clientutil.Atoi64Ptr(r.Store),
+			Node:              clientutil.DerefString(r.Node),
+			IP:                clientutil.DerefString(r.IP),
+			UnassignedReason:  clientutil.DerefString(r.UnassignedReason),
+			UnassignedAt:      clientutil.DerefString(r.UnassignedAt),
+			UnassignedFor:     clientutil.DerefString(r.UnassignedFor),
+			UnassignedDetails: clientutil.DerefString(r.UnassignedDetails),
 		})
 	}
 	return out, nil
@@ -236,7 +237,7 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 
 	resp, err := c.api.Cat.Indices(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -245,7 +246,7 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 	}
 
 	var rows []catIndicesRow
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat indices")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat indices")
 	if err := json.NewDecoder(body).Decode(&rows); err != nil {
 		return nil, errors.Join(errors.New("decoding cat indices response"), err)
 	}
@@ -257,13 +258,13 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 			UUID:               r.UUID,
 			Health:             r.Health,
 			Status:             r.Status,
-			Primaries:          esopsclient.AtoiOrZero(esopsclient.DerefString(r.Pri)),
-			Replicas:           esopsclient.AtoiOrZero(esopsclient.DerefString(r.Rep)),
-			DocsCount:          esopsclient.Atoi64Ptr(r.DocsCount),
-			DocsDeleted:        esopsclient.Atoi64Ptr(r.DocsDeleted),
-			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
-			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PriStoreSize),
-			CreationDateMillis: esopsclient.Atoi64Ptr(r.CreationDate),
+			Primaries:          clientutil.AtoiOrZero(clientutil.DerefString(r.Pri)),
+			Replicas:           clientutil.AtoiOrZero(clientutil.DerefString(r.Rep)),
+			DocsCount:          clientutil.Atoi64Ptr(r.DocsCount),
+			DocsDeleted:        clientutil.Atoi64Ptr(r.DocsDeleted),
+			StoreBytes:         clientutil.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  clientutil.Atoi64Ptr(r.PriStoreSize),
+			CreationDateMillis: clientutil.Atoi64Ptr(r.CreationDate),
 		})
 	}
 	return out, nil
@@ -292,7 +293,7 @@ func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yi
 	}
 	resp, err := c.api.Cat.Indices(opts...)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -300,7 +301,7 @@ func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yi
 		return err
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat indices (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat indices (stream)")
 	dec := json.NewDecoder(body)
 	// Consume the leading '['.
 	if tok, err := dec.Token(); err != nil {
@@ -318,13 +319,13 @@ func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yi
 			UUID:               r.UUID,
 			Health:             r.Health,
 			Status:             r.Status,
-			Primaries:          esopsclient.AtoiOrZero(esopsclient.DerefString(r.Pri)),
-			Replicas:           esopsclient.AtoiOrZero(esopsclient.DerefString(r.Rep)),
-			DocsCount:          esopsclient.Atoi64Ptr(r.DocsCount),
-			DocsDeleted:        esopsclient.Atoi64Ptr(r.DocsDeleted),
-			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
-			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PriStoreSize),
-			CreationDateMillis: esopsclient.Atoi64Ptr(r.CreationDate),
+			Primaries:          clientutil.AtoiOrZero(clientutil.DerefString(r.Pri)),
+			Replicas:           clientutil.AtoiOrZero(clientutil.DerefString(r.Rep)),
+			DocsCount:          clientutil.Atoi64Ptr(r.DocsCount),
+			DocsDeleted:        clientutil.Atoi64Ptr(r.DocsDeleted),
+			StoreBytes:         clientutil.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  clientutil.Atoi64Ptr(r.PriStoreSize),
+			CreationDateMillis: clientutil.Atoi64Ptr(r.CreationDate),
 		}
 		if err := yield(ix); err != nil {
 			return err
@@ -355,7 +356,7 @@ func (c *Client) IndicesNamesStatus(ctx context.Context, filter types.IndexFilte
 	}
 	resp, err := c.api.Cat.Indices(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -366,7 +367,7 @@ func (c *Client) IndicesNamesStatus(ctx context.Context, filter types.IndexFilte
 		Index  string `json:"index"`
 		Status string `json:"status"`
 	}
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat indices (slim)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat indices (slim)")
 	if err := json.NewDecoder(body).Decode(&rows); err != nil {
 		return nil, errors.Join(errors.New("decoding cat indices (slim) response"), err)
 	}
@@ -402,7 +403,7 @@ func (c *Client) OpenIndex(ctx context.Context, req types.IndexStateChangeReques
 
 	resp, err := c.api.Indices.Open(indices, opts...)
 	if err != nil {
-		return types.IndexStateChange{}, esopsclient.ClassifyTransport(err)
+		return types.IndexStateChange{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -435,7 +436,7 @@ func (c *Client) CloseIndex(ctx context.Context, req types.IndexStateChangeReque
 
 	resp, err := c.api.Indices.Close(indices, opts...)
 	if err != nil {
-		return types.IndexStateChange{}, esopsclient.ClassifyTransport(err)
+		return types.IndexStateChange{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -500,7 +501,7 @@ func (c *Client) ForceMerge(ctx context.Context, req types.IndexOptimizeRequest)
 
 	resp, err := c.api.Indices.Forcemerge(opts...)
 	if err != nil {
-		return types.IndexOptimizeResult{}, esopsclient.ClassifyTransport(err)
+		return types.IndexOptimizeResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -567,7 +568,7 @@ func (c *Client) Rollover(ctx context.Context, req types.IndexRolloverRequest) (
 
 	resp, err := c.api.Indices.Rollover(req.Alias, opts...)
 	if err != nil {
-		return types.IndexRolloverResult{}, esopsclient.ClassifyTransport(err)
+		return types.IndexRolloverResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -695,7 +696,7 @@ func (c *Client) AllocationExplain(ctx context.Context, req types.AllocationExpl
 
 	resp, err := c.api.Cluster.AllocationExplain(opts...)
 	if err != nil {
-		return types.AllocationExplanation{}, esopsclient.ClassifyTransport(err)
+		return types.AllocationExplanation{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -797,7 +798,7 @@ func (c *Client) HotThreads(ctx context.Context, req types.HotThreadsRequest) (t
 
 	resp, err := c.api.Nodes.HotThreads(opts...)
 	if err != nil {
-		return types.HotThreads{}, esopsclient.ClassifyTransport(err)
+		return types.HotThreads{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -830,7 +831,7 @@ func (c *Client) DoGET(ctx context.Context, path string) ([]byte, int, error) {
 	}
 	resp, err := c.api.Perform(req)
 	if err != nil {
-		return nil, 0, esopsclient.ClassifyTransport(err)
+		return nil, 0, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -903,7 +904,7 @@ func (c *Client) Reroute(ctx context.Context, req types.RerouteRequest) (types.R
 
 	resp, err := c.api.Cluster.Reroute(opts...)
 	if err != nil {
-		return types.RerouteResult{}, esopsclient.ClassifyTransport(err)
+		return types.RerouteResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1028,10 +1029,10 @@ func classifyResponse(op string, status int, body io.Reader) error {
 		return nil
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return esopsclient.ClassifyStatus(op, status, nil)
+		return clientutil.ClassifyStatus(op, status, nil)
 	}
 	raw, _ := io.ReadAll(body)
-	return esopsclient.ClassifyStatus(op, status, raw)
+	return clientutil.ClassifyStatus(op, status, raw)
 }
 
 // securityUserWire mirrors an entry in GET /_security/user. The endpoint
@@ -1114,7 +1115,7 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 		mNote    string
 		kNote    string
 	)
-	err = esopsclient.RunParallel(
+	err = clientutil.RunParallel(
 		func() error {
 			r, e := c.fetchESRoles(ctx)
 			roles = r
@@ -1153,19 +1154,19 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 func (c *Client) fetchESUsers(ctx context.Context) ([]types.SecurityUser, string, bool, error) {
 	resp, err := c.api.Security.GetUser(c.api.Security.GetUser.WithContext(ctx))
 	if err != nil {
-		return nil, "", false, esopsclient.ClassifyTransport(err)
+		return nil, "", false, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, "", false, esopsclient.ClassifyStatus("security get user", resp.StatusCode, nil)
+		return nil, "", false, clientutil.ClassifyStatus("security get user", resp.StatusCode, nil)
 	}
 	if resp.StatusCode >= 400 {
 		raw, _ := io.ReadAll(resp.Body)
 		if isSecurityDisabledBody(raw) {
 			return nil, securityDisabledNote(raw), true, nil
 		}
-		return nil, "", false, esopsclient.ClassifyStatus("security get user", resp.StatusCode, raw)
+		return nil, "", false, clientutil.ClassifyStatus("security get user", resp.StatusCode, raw)
 	}
 
 	var raw map[string]securityUserWire
@@ -1193,7 +1194,7 @@ func (c *Client) fetchESUsers(ctx context.Context) ([]types.SecurityUser, string
 func (c *Client) fetchESRoles(ctx context.Context) ([]types.SecurityRole, error) {
 	resp, err := c.api.Security.GetRole(c.api.Security.GetRole.WithContext(ctx))
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1216,7 +1217,7 @@ func (c *Client) fetchESRoles(ctx context.Context) ([]types.SecurityRole, error)
 			Name:              name,
 			Reserved:          r.Metadata.Reserved,
 			ClusterPrivileges: r.Cluster,
-			IndexPatterns:     esopsclient.UniqueStrings(patterns),
+			IndexPatterns:     clientutil.UniqueStrings(patterns),
 		})
 	}
 	return out, nil
@@ -1324,7 +1325,7 @@ func flattenRoleMappingRules(rules json.RawMessage) (users, backendRoles, hosts 
 		}
 	}
 	walk(rules)
-	return esopsclient.UniqueStrings(users), esopsclient.UniqueStrings(backendRoles), esopsclient.UniqueStrings(hosts)
+	return clientutil.UniqueStrings(users), clientutil.UniqueStrings(backendRoles), clientutil.UniqueStrings(hosts)
 }
 
 // decodeStringOrSlice handles the two shapes a `field` value can take:
@@ -1418,7 +1419,7 @@ func (c *Client) doRawGET(ctx context.Context, path string) ([]byte, int, error)
 	}
 	resp, err := c.api.Perform(req)
 	if err != nil {
-		return nil, 0, esopsclient.ClassifyTransport(err)
+		return nil, 0, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
@@ -1559,7 +1560,7 @@ func (c *Client) Nodes(ctx context.Context) ([]types.Node, error) {
 		),
 	)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1749,7 +1750,7 @@ func (c *Client) Shrink(ctx context.Context, req types.IndexShrinkRequest) (type
 
 	resp, err := c.api.Indices.Shrink(req.Source, bytes.NewReader(body), req.Target, opts...)
 	if err != nil {
-		return types.IndexShrinkResult{}, esopsclient.ClassifyTransport(err)
+		return types.IndexShrinkResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1838,7 +1839,7 @@ func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types
 
 	resp, err := c.api.Cat.Aliases(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1847,7 +1848,7 @@ func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types
 	}
 
 	var rows []catAliasesRow
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat aliases")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat aliases")
 	if err := json.NewDecoder(body).Decode(&rows); err != nil {
 		return nil, errors.Join(errors.New("decoding cat aliases response"), err)
 	}
@@ -1872,7 +1873,7 @@ func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yi
 	}
 	resp, err := c.api.Cat.Aliases(opts...)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1881,7 +1882,7 @@ func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yi
 	}
 
 	wantedSet := indexFilterSet(filter.Index)
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat aliases (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat aliases (stream)")
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil {
 		return errors.Join(errors.New("decoding cat aliases (stream) response"), err)
@@ -2008,7 +2009,7 @@ func (c *Client) UpdateAliases(ctx context.Context, req types.AliasUpdateRequest
 	ua := c.api.Indices.UpdateAliases
 	resp, err := c.api.Indices.UpdateAliases(bytes.NewReader(body), ua.WithContext(ctx))
 	if err != nil {
-		return types.AliasUpdateResult{}, esopsclient.ClassifyTransport(err)
+		return types.AliasUpdateResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2122,7 +2123,7 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 
 	resp, err := c.api.Indices.GetSettings(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2131,7 +2132,7 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 	}
 
 	var wire settingsGetWire
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_settings")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "indices get_settings")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding indices get_settings response"), err)
 	}
@@ -2174,14 +2175,14 @@ func (c *Client) GetSettingsStream(ctx context.Context, req types.IndexSettingsG
 
 	resp, err := c.api.Indices.GetSettings(opts...)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if err := classifyResponse("indices get_settings (stream)", resp.StatusCode, resp.Body); err != nil {
 		return err
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_settings (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "indices get_settings (stream)")
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil {
 		return errors.Join(errors.New("decoding indices get_settings (stream) response"), err)
@@ -2243,7 +2244,7 @@ func (c *Client) PutSettings(ctx context.Context, req types.IndexSettingsUpdateR
 
 	resp, err := c.api.Indices.PutSettings(bytes.NewReader(req.Body), opts...)
 	if err != nil {
-		return types.IndexSettingsUpdateResult{}, esopsclient.ClassifyTransport(err)
+		return types.IndexSettingsUpdateResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2291,7 +2292,7 @@ func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.Inde
 
 	resp, err := c.api.Indices.GetIndexTemplate(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2300,7 +2301,7 @@ func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.Inde
 	}
 
 	var wire indexTemplateGetWire
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_index_template")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "indices get_index_template")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding indices get_index_template response"), err)
 	}
@@ -2357,7 +2358,7 @@ func (c *Client) PutTemplate(ctx context.Context, req types.IndexTemplatePutRequ
 
 	resp, err := c.api.Indices.PutIndexTemplate(req.Name, bytes.NewReader(req.Body), opts...)
 	if err != nil {
-		return types.IndexTemplatePutResult{}, esopsclient.ClassifyTransport(err)
+		return types.IndexTemplatePutResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2385,7 +2386,7 @@ func (c *Client) DeleteTemplate(ctx context.Context, req types.IndexTemplateDele
 	dt := c.api.Indices.DeleteIndexTemplate
 	resp, err := c.api.Indices.DeleteIndexTemplate([]string{req.Name}, dt.WithContext(ctx))
 	if err != nil {
-		return types.IndexTemplateDeleteResult{}, esopsclient.ClassifyTransport(err)
+		return types.IndexTemplateDeleteResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2424,7 +2425,7 @@ func (c *Client) GetClusterSettings(ctx context.Context) (types.ClusterSettingsV
 		gs.WithFlatSettings(true),
 	)
 	if err != nil {
-		return types.ClusterSettingsView{}, esopsclient.ClassifyTransport(err)
+		return types.ClusterSettingsView{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2474,7 +2475,7 @@ func (c *Client) PutAllocationExclude(ctx context.Context, req types.ClusterAllo
 		ps.WithFlatSettings(true),
 	)
 	if err != nil {
-		return types.ClusterSettingsUpdateResult{}, esopsclient.ClassifyTransport(err)
+		return types.ClusterSettingsUpdateResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2539,7 +2540,7 @@ func (c *Client) AddVotingExclusions(ctx context.Context, names []string) (types
 		pe.WithNodeNames(names...),
 	)
 	if err != nil {
-		return types.VotingExclusionsResult{}, esopsclient.ClassifyTransport(err)
+		return types.VotingExclusionsResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2568,7 +2569,7 @@ func (c *Client) ClearVotingExclusions(ctx context.Context) (types.VotingExclusi
 		de.WithWaitForRemoval(false),
 	)
 	if err != nil {
-		return types.VotingExclusionsResult{}, esopsclient.ClassifyTransport(err)
+		return types.VotingExclusionsResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2592,7 +2593,7 @@ func (c *Client) GetVotingExclusions(ctx context.Context) ([]string, error) {
 		cs.WithFilterPath("metadata.cluster_coordination.voting_config_exclusions.node_name"),
 	)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2660,7 +2661,7 @@ func (c *Client) Tasks(ctx context.Context, filter types.TasksFilter) ([]types.T
 	}
 	resp, err := c.api.Tasks.List(opts...)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2712,7 +2713,7 @@ func (c *Client) TasksStream(ctx context.Context, filter types.TasksFilter, yiel
 	}
 	resp, err := c.api.Tasks.List(opts...)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2720,7 +2721,7 @@ func (c *Client) TasksStream(ctx context.Context, filter types.TasksFilter, yiel
 		return err
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "tasks list (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "tasks list (stream)")
 	dec := json.NewDecoder(body)
 	return streamTasksObject(dec, yield)
 }
@@ -2896,7 +2897,7 @@ func (c *Client) CancelTasks(ctx context.Context, req types.TasksCancelRequest) 
 	}
 	resp, err := c.api.Tasks.Cancel(opts...)
 	if err != nil {
-		return types.TasksCancelResult{}, esopsclient.ClassifyTransport(err)
+		return types.TasksCancelResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

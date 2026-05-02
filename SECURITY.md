@@ -5,7 +5,7 @@
 Please do **not** open public GitHub issues for security problems.
 
 Report privately via GitHub Security Advisories:
-https://github.com/dj-wasabi/esops-go/security/advisories/new
+https://github.com/esops-dev/esops-go/security/advisories/new
 
 Include:
 

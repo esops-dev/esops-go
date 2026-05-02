@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/ops"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeTasksInspector serves a canned slice and records the last filter

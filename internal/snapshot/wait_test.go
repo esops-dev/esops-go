@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/snapshot"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeStatusInspector implements just enough of SnapshotInspector for

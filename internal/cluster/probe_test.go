@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/cluster"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/cluster"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // esRootBody mimics a real Elasticsearch 9.x GET / response. The probe

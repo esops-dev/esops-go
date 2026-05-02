@@ -1,4 +1,4 @@
-module github.com/dj-wasabi/esops-go
+module github.com/esops-dev/esops-go
 
 go 1.26.2
 

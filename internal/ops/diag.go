@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
-	"github.com/dj-wasabi/esops-go/internal/version"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
+	"github.com/esops-dev/esops-go/internal/version"
 )
 
 // defaultDiagConcurrency caps the number of in-flight collectors when

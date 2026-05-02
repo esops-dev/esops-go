@@ -3,8 +3,8 @@ package index
 import (
 	"strings"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // ParseSort turns a --sort string into the typed IndexSort value used

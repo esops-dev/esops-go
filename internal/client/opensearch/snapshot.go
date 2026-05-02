@@ -12,9 +12,10 @@ import (
 	"strings"
 	"sync"
 
-	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/client/snapshotwire"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/clientutil"
+	"github.com/esops-dev/esops-go/internal/client/snapshotwire"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // snapshotPath builds a /_snapshot URL safely. Each prefix segment is
@@ -97,17 +98,17 @@ func (c *Client) Repositories(ctx context.Context, filter types.SnapshotReposito
 	}
 	resp, err := c.api.Client.Perform(req)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot get_repository error"))
-		return nil, esopsclient.ClassifyStatus("snapshot get_repository", resp.StatusCode, body)
+		body, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot get_repository error"))
+		return nil, clientutil.ClassifyStatus("snapshot get_repository", resp.StatusCode, body)
 	}
 
 	var wire map[string]snapshotwire.RepoEntry
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot get_repository")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot get_repository")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding snapshot get_repository response"), err)
 	}
@@ -190,7 +191,7 @@ func (c *Client) SnapshotsStream(ctx context.Context, filter types.SnapshotFilte
 			return nil
 		})
 	}
-	return esopsclient.RunBounded(ctx, fanOutConcurrency, tasks)
+	return clientutil.RunBounded(ctx, fanOutConcurrency, tasks)
 }
 
 func (c *Client) resolveRepoNames(ctx context.Context, repository string) ([]string, error) {
@@ -224,17 +225,17 @@ func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, fil
 	}
 	resp, err := c.api.Client.Perform(req)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot get error"))
-		return nil, esopsclient.ClassifyStatus("snapshot get repo="+repo, resp.StatusCode, body)
+		body, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot get error"))
+		return nil, clientutil.ClassifyStatus("snapshot get repo="+repo, resp.StatusCode, body)
 	}
 
 	var wire snapshotwire.EntriesResponse
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot get")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot get")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return nil, errors.Join(errors.New("decoding snapshot get response"), err)
 	}
@@ -264,7 +265,7 @@ func (c *Client) Recovery(ctx context.Context, req types.RecoveryRequest) (types
 	}
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.RecoveryReport{}, esopsclient.ClassifyTransport(err)
+		return types.RecoveryReport{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -272,12 +273,12 @@ func (c *Client) Recovery(ctx context.Context, req types.RecoveryRequest) (types
 		return types.RecoveryReport{AllDone: true, Indices: []types.IndexRecovery{}}, nil
 	}
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "recovery error"))
-		return types.RecoveryReport{}, esopsclient.ClassifyStatus("recovery indices="+indices, resp.StatusCode, body)
+		body, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "recovery error"))
+		return types.RecoveryReport{}, clientutil.ClassifyStatus("recovery indices="+indices, resp.StatusCode, body)
 	}
 
 	var wire snapshotwire.RecoveryEnvelope
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "recovery")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "recovery")
 	if err := json.NewDecoder(body).Decode(&wire); err != nil {
 		return types.RecoveryReport{}, errors.Join(errors.New("decoding recovery response"), err)
 	}
@@ -298,7 +299,7 @@ func (c *Client) SnapshotStatus(ctx context.Context, req types.SnapshotStatusReq
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotStatus{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotStatus{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -309,12 +310,12 @@ func (c *Client) SnapshotStatus(ctx context.Context, req types.SnapshotStatusReq
 		}, nil
 	}
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot status error"))
-		return types.SnapshotStatus{}, esopsclient.ClassifyStatus("snapshot status repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot status error"))
+		return types.SnapshotStatus{}, clientutil.ClassifyStatus("snapshot status repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.StatusResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot status")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot status")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotStatus{}, errors.Join(errors.New("decoding snapshot status response"), err)
 	}
@@ -356,17 +357,17 @@ func (c *Client) CreateSnapshot(ctx context.Context, req types.SnapshotCreateReq
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotCreateResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotCreateResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot create error"))
-		return types.SnapshotCreateResult{}, esopsclient.ClassifyStatus("snapshot create repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot create error"))
+		return types.SnapshotCreateResult{}, clientutil.ClassifyStatus("snapshot create repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.CreateResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot create")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot create")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotCreateResult{}, errors.Join(errors.New("decoding snapshot create response"), err)
 	}
@@ -385,17 +386,17 @@ func (c *Client) VerifyRepository(ctx context.Context, req types.SnapshotVerifyR
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotVerifyResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotVerifyResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot verify error"))
-		return types.SnapshotVerifyResult{}, esopsclient.ClassifyStatus("snapshot verify repo="+req.Repository, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot verify error"))
+		return types.SnapshotVerifyResult{}, clientutil.ClassifyStatus("snapshot verify repo="+req.Repository, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.VerifyResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot verify")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot verify")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotVerifyResult{}, errors.Join(errors.New("decoding snapshot verify response"), err)
 	}
@@ -415,7 +416,7 @@ func (c *Client) AnalyzeRepository(ctx context.Context, req types.SnapshotAnalyz
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotAnalyzeResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotAnalyzeResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -423,12 +424,12 @@ func (c *Client) AnalyzeRepository(ctx context.Context, req types.SnapshotAnalyz
 		return types.SnapshotAnalyzeResult{}, errors.Join(esopsclient.ErrUnsupported, errors.New("repository _analyze is not available on this cluster (OS 2.x required)"))
 	}
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot analyze error"))
-		return types.SnapshotAnalyzeResult{}, esopsclient.ClassifyStatus("snapshot analyze repo="+req.Repository, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot analyze error"))
+		return types.SnapshotAnalyzeResult{}, clientutil.ClassifyStatus("snapshot analyze repo="+req.Repository, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.AnalyzeResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot analyze")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot analyze")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotAnalyzeResult{}, errors.Join(errors.New("decoding snapshot analyze response"), err)
 	}
@@ -471,17 +472,17 @@ func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreR
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotRestoreResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotRestoreResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot restore error"))
-		return types.SnapshotRestoreResult{}, esopsclient.ClassifyStatus("snapshot restore repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot restore error"))
+		return types.SnapshotRestoreResult{}, clientutil.ClassifyStatus("snapshot restore repo="+req.Repository+" snapshot="+req.Snapshot, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.RestoreResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot restore")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot restore")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotRestoreResult{}, errors.Join(errors.New("decoding snapshot restore response"), err)
 	}
@@ -506,17 +507,17 @@ func (c *Client) DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRe
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotDeleteResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotDeleteResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot delete error"))
-		return types.SnapshotDeleteResult{}, esopsclient.ClassifyStatus("snapshot delete repo="+req.Repository, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot delete error"))
+		return types.SnapshotDeleteResult{}, clientutil.ClassifyStatus("snapshot delete repo="+req.Repository, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.DeleteResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot delete")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot delete")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotDeleteResult{}, errors.Join(errors.New("decoding snapshot delete response"), err)
 	}
@@ -557,17 +558,17 @@ func (c *Client) RegisterRepository(ctx context.Context, req types.SnapshotRepos
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotRepositoryRegisterResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotRepositoryRegisterResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot register error"))
-		return types.SnapshotRepositoryRegisterResult{}, esopsclient.ClassifyStatus("snapshot register repo="+req.Repository, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot register error"))
+		return types.SnapshotRepositoryRegisterResult{}, clientutil.ClassifyStatus("snapshot register repo="+req.Repository, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.DeleteResponse // {acknowledged:true}
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot register")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot register")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotRepositoryRegisterResult{}, errors.Join(errors.New("decoding snapshot register response"), err)
 	}
@@ -591,17 +592,17 @@ func (c *Client) DeregisterRepository(ctx context.Context, req types.SnapshotRep
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.SnapshotRepositoryDeregisterResult{}, esopsclient.ClassifyTransport(err)
+		return types.SnapshotRepositoryDeregisterResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "snapshot deregister error"))
-		return types.SnapshotRepositoryDeregisterResult{}, esopsclient.ClassifyStatus("snapshot deregister repo="+req.Repository, resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "snapshot deregister error"))
+		return types.SnapshotRepositoryDeregisterResult{}, clientutil.ClassifyStatus("snapshot deregister repo="+req.Repository, resp.StatusCode, errBody)
 	}
 
 	var wire snapshotwire.DeleteResponse
-	bodyR := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "snapshot deregister")
+	bodyR := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "snapshot deregister")
 	if err := json.NewDecoder(bodyR).Decode(&wire); err != nil {
 		return types.SnapshotRepositoryDeregisterResult{}, errors.Join(errors.New("decoding snapshot deregister response"), err)
 	}

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/config"
 )
 
 // writeCfg creates a config file at path with the given mode and body.

@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // HealthInspector exposes read-only cluster-health operations.

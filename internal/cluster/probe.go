@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/auth"
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/auth"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // Probe hits GET / on the first address in the context and identifies

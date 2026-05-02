@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/ops"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeSecurityAuditor returns a canned SecurityReport, same pattern as

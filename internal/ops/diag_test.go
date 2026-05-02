@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/ops"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeDiagnoser returns canned responses keyed by path. Unknown paths

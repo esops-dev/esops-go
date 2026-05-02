@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/dj-wasabi/esops-go/internal/cli"
-	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
-	"github.com/dj-wasabi/esops-go/internal/client"
+	"github.com/esops-dev/esops-go/internal/cli"
+	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/pkg/client"
 )
 
 func main() {

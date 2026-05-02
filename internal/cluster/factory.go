@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/auth"
-	"github.com/dj-wasabi/esops-go/internal/client"
-	esadapter "github.com/dj-wasabi/esops-go/internal/client/elasticsearch"
-	osadapter "github.com/dj-wasabi/esops-go/internal/client/opensearch"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/auth"
+	"github.com/esops-dev/esops-go/pkg/client"
+	esadapter "github.com/esops-dev/esops-go/internal/client/elasticsearch"
+	osadapter "github.com/esops-dev/esops-go/internal/client/opensearch"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // New probes the target cluster, determines its dialect, and returns

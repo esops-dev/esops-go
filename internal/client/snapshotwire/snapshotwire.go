@@ -22,7 +22,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // RepoEntry mirrors a single value in the GET /_snapshot[/<repos>]

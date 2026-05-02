@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeStateChanger captures the request the business layer issues to

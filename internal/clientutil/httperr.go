@@ -1,10 +1,12 @@
-package client
+package clientutil
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/esops-dev/esops-go/pkg/client"
 )
 
 // ClassifyStatus maps an HTTP status to the sentinel error the rest of
@@ -23,11 +25,11 @@ import (
 func ClassifyStatus(op string, statusCode int, body []byte) error {
 	switch statusCode {
 	case http.StatusUnauthorized:
-		return ErrAuth
+		return client.ErrAuth
 	case http.StatusForbidden:
-		return ErrForbidden
+		return client.ErrForbidden
 	case http.StatusNotFound:
-		return fmt.Errorf("%w: %s returned HTTP 404: %s", ErrNotFound, op, formatClusterError(body))
+		return fmt.Errorf("%w: %s returned HTTP 404: %s", client.ErrNotFound, op, formatClusterError(body))
 	}
 	if statusCode >= 400 {
 		return fmt.Errorf("%s returned HTTP %d: %s", op, statusCode, formatClusterError(body))
@@ -40,7 +42,7 @@ func ClassifyStatus(op string, statusCode int, body []byte) error {
 // against it. The upstream clients expose this as a plain error, but
 // exit-code stability depends on it being this sentinel.
 func ClassifyTransport(err error) error {
-	return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	return fmt.Errorf("%w: %v", client.ErrUnreachable, err)
 }
 
 // formatClusterError extracts a one-line operator-readable string from
