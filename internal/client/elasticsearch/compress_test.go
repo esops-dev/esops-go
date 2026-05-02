@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/auth"
-	esadapter "github.com/dj-wasabi/esops-go/internal/client/elasticsearch"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/auth"
+	esadapter "github.com/esops-dev/esops-go/internal/client/elasticsearch"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // captureTransport records outbound requests and returns canned

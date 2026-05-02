@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // ShrinkOptions are the knobs the CLI layer hands to Shrink. Source

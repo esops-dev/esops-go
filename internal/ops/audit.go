@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // Audit builds the full `ops audit` view: it asks the cluster for its

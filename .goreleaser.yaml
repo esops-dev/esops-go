@@ -16,9 +16,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/dj-wasabi/esops-go/internal/version.Version={{.Version}}
-      - -X github.com/dj-wasabi/esops-go/internal/version.Commit={{.Commit}}
-      - -X github.com/dj-wasabi/esops-go/internal/version.Date={{.Date}}
+      - -X github.com/esops-dev/esops-go/internal/version.Version={{.Version}}
+      - -X github.com/esops-dev/esops-go/internal/version.Commit={{.Commit}}
+      - -X github.com/esops-dev/esops-go/internal/version.Date={{.Date}}
     goos:
       - linux
       - darwin

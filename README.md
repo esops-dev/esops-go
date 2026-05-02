@@ -2,9 +2,9 @@
 
 Operations CLI for self-managed Elasticsearch and OpenSearch clusters.
 
-[![CI](https://github.com/dj-wasabi/esops-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dj-wasabi/esops-go/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/dj-wasabi/esops-go?include_prereleases&sort=semver)](https://github.com/dj-wasabi/esops-go/releases)
-[![License](https://img.shields.io/github/license/dj-wasabi/esops-go)](LICENSE)
+[![CI](https://github.com/esops-dev/esops-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/esops-dev/esops-go/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/esops-dev/esops-go?include_prereleases&sort=semver)](https://github.com/esops-dev/esops-go/releases)
+[![License](https://img.shields.io/github/license/esops-dev/esops-go)](LICENSE)
 
 > [!WARNING]
 > Early scaffolding. Interfaces and exit codes are not yet stable. Not yet production ready.
@@ -32,14 +32,14 @@ As an Elasticsearch (ES) or OpenSearch (OS) deployment ages, there are many case
 
 ### Binary releases
 
-Pre-built binaries for Linux (amd64 and arm64), Darwin (amd64 and arm64) and Windows (amd64) are available on the [release page](https://github.com/dj-wasabi/esops-go/releases). There are also .deb and .rpm packages. When a release is created, cosign signatures, SBOM, and SLSA provenance are generated.
+Pre-built binaries for Linux (amd64 and arm64), Darwin (amd64 and arm64) and Windows (amd64) are available on the [release page](https://github.com/esops-dev/esops-go/releases). There are also .deb and .rpm packages. When a release is created, cosign signatures, SBOM, and SLSA provenance are generated.
 
 ### From source
 
 Requires Go matching the floor in [go.mod](go.mod).
 
 ```sh
-git clone https://github.com/dj-wasabi/esops-go
+git clone https://github.com/esops-dev/esops-go
 cd esops-go
 make build
 ./bin/esops --help

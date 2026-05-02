@@ -8,8 +8,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/output"
 )
 
 // cmdWith runs a stub urfave/cli app just long enough to parse the

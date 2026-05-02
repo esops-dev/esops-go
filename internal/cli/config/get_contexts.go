@@ -13,8 +13,8 @@ import (
 	"github.com/urfave/cli/v3"
 	"go.yaml.in/yaml/v3"
 
-	esopsconfig "github.com/dj-wasabi/esops-go/internal/config"
-	"github.com/dj-wasabi/esops-go/internal/output"
+	esopsconfig "github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/output"
 )
 
 // contextEntry is the render-friendly projection of a context. Field

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/ops"
-	"github.com/dj-wasabi/esops-go/internal/output"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeHotThreadsInspector captures the request it received so parameter

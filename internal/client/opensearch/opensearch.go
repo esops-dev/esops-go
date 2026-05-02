@@ -20,9 +20,10 @@ import (
 	os "github.com/opensearch-project/opensearch-go/v4"
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
-	"github.com/dj-wasabi/esops-go/internal/auth"
-	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/auth"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/clientutil"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // Client is an OS-backed implementation of the esops client capabilities.
@@ -144,14 +145,14 @@ func (c *Client) Shards(ctx context.Context, filter types.ShardFilter) ([]types.
 			Shard:             s.Shard,
 			Primary:           s.Prirep == "p",
 			State:             s.State,
-			Docs:              esopsclient.Atoi64Ptr(s.Docs),
-			StoreBytes:        esopsclient.Atoi64Ptr(s.Store),
-			Node:              esopsclient.DerefString(s.Node),
-			IP:                esopsclient.DerefString(s.IP),
-			UnassignedReason:  esopsclient.DerefString(s.UnassignedReason),
-			UnassignedAt:      esopsclient.DerefString(s.UnassignedAt),
-			UnassignedFor:     esopsclient.DerefString(s.UnassignedFor),
-			UnassignedDetails: esopsclient.DerefString(s.UnassignedDetails),
+			Docs:              clientutil.Atoi64Ptr(s.Docs),
+			StoreBytes:        clientutil.Atoi64Ptr(s.Store),
+			Node:              clientutil.DerefString(s.Node),
+			IP:                clientutil.DerefString(s.IP),
+			UnassignedReason:  clientutil.DerefString(s.UnassignedReason),
+			UnassignedAt:      clientutil.DerefString(s.UnassignedAt),
+			UnassignedFor:     clientutil.DerefString(s.UnassignedFor),
+			UnassignedDetails: clientutil.DerefString(s.UnassignedDetails),
 		})
 	}
 	return out, nil
@@ -202,12 +203,12 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 			UUID:               r.UUID,
 			Health:             r.Health,
 			Status:             r.Status,
-			Primaries:          esopsclient.IntPtrOrZero(r.Primary),
-			Replicas:           esopsclient.IntPtrOrZero(r.Replica),
-			DocsCount:          esopsclient.Int64PtrOrZero(r.DocsCount),
-			DocsDeleted:        esopsclient.Int64PtrOrZero(r.DocDeleted),
-			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
-			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PrimaryStoreSize),
+			Primaries:          clientutil.IntPtrOrZero(r.Primary),
+			Replicas:           clientutil.IntPtrOrZero(r.Replica),
+			DocsCount:          clientutil.Int64PtrOrZero(r.DocsCount),
+			DocsDeleted:        clientutil.Int64PtrOrZero(r.DocDeleted),
+			StoreBytes:         clientutil.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  clientutil.Atoi64Ptr(r.PrimaryStoreSize),
 			CreationDateMillis: int64(r.CreationDate),
 		})
 	}
@@ -267,16 +268,16 @@ func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yi
 	}
 	resp, err := c.api.Client.Perform(req)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "cat indices (stream) error"))
-		return esopsclient.ClassifyStatus("cat indices (stream)", resp.StatusCode, body)
+		body, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "cat indices (stream) error"))
+		return clientutil.ClassifyStatus("cat indices (stream)", resp.StatusCode, body)
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat indices (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat indices (stream)")
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil {
 		return errors.Join(errors.New("decoding cat indices (stream) response"), err)
@@ -293,13 +294,13 @@ func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yi
 			UUID:               r.UUID,
 			Health:             r.Health,
 			Status:             r.Status,
-			Primaries:          esopsclient.AtoiOrZero(esopsclient.DerefString(r.Pri)),
-			Replicas:           esopsclient.AtoiOrZero(esopsclient.DerefString(r.Rep)),
-			DocsCount:          esopsclient.Atoi64Ptr(r.DocsCount),
-			DocsDeleted:        esopsclient.Atoi64Ptr(r.DocsDeleted),
-			StoreBytes:         esopsclient.Atoi64Ptr(r.StoreSize),
-			PrimaryStoreBytes:  esopsclient.Atoi64Ptr(r.PriStoreSize),
-			CreationDateMillis: esopsclient.Atoi64Ptr(r.CreationDate),
+			Primaries:          clientutil.AtoiOrZero(clientutil.DerefString(r.Pri)),
+			Replicas:           clientutil.AtoiOrZero(clientutil.DerefString(r.Rep)),
+			DocsCount:          clientutil.Atoi64Ptr(r.DocsCount),
+			DocsDeleted:        clientutil.Atoi64Ptr(r.DocsDeleted),
+			StoreBytes:         clientutil.Atoi64Ptr(r.StoreSize),
+			PrimaryStoreBytes:  clientutil.Atoi64Ptr(r.PriStoreSize),
+			CreationDateMillis: clientutil.Atoi64Ptr(r.CreationDate),
 		}
 		if err := yield(ix); err != nil {
 			return err
@@ -668,7 +669,7 @@ func (c *Client) Reroute(ctx context.Context, req types.RerouteRequest) (types.R
 
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return types.RerouteResult{}, esopsclient.ClassifyTransport(err)
+		return types.RerouteResult{}, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -683,7 +684,7 @@ func (c *Client) Reroute(ctx context.Context, req types.RerouteRequest) (types.R
 		return types.RerouteResult{}, esopsclient.ErrForbidden
 	}
 	if resp.StatusCode >= 400 {
-		return types.RerouteResult{}, esopsclient.ClassifyStatus("cluster reroute", resp.StatusCode, respBody)
+		return types.RerouteResult{}, clientutil.ClassifyStatus("cluster reroute", resp.StatusCode, respBody)
 	}
 
 	var wire rerouteResponseWire
@@ -801,7 +802,7 @@ func classifyResponseErr(err error, status int) error {
 	case http.StatusForbidden:
 		return esopsclient.ErrForbidden
 	}
-	return esopsclient.ClassifyTransport(err)
+	return clientutil.ClassifyTransport(err)
 }
 
 // osInternalUserWire mirrors an entry from GET /_plugins/_security/api/internalusers.
@@ -872,7 +873,7 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 		mNote    string
 		tNote    string
 	)
-	err = esopsclient.RunParallel(
+	err = clientutil.RunParallel(
 		func() error {
 			r, e := c.fetchOSRoles(ctx)
 			roles = r
@@ -919,7 +920,7 @@ func (c *Client) fetchOSUsers(ctx context.Context) ([]types.SecurityUser, bool, 
 		return nil, false, "", esopsclient.ErrForbidden
 	}
 	if status >= 400 {
-		return nil, false, "", esopsclient.ClassifyStatus("security internalusers", status, body)
+		return nil, false, "", clientutil.ClassifyStatus("security internalusers", status, body)
 	}
 
 	var raw map[string]osInternalUserWire
@@ -956,7 +957,7 @@ func (c *Client) fetchOSRoles(ctx context.Context) ([]types.SecurityRole, error)
 		return nil, esopsclient.ErrForbidden
 	}
 	if status >= 400 {
-		return nil, esopsclient.ClassifyStatus("security roles", status, body)
+		return nil, clientutil.ClassifyStatus("security roles", status, body)
 	}
 
 	var raw map[string]osRoleWire
@@ -973,7 +974,7 @@ func (c *Client) fetchOSRoles(ctx context.Context) ([]types.SecurityRole, error)
 			Name:              name,
 			Reserved:          r.Reserved,
 			ClusterPrivileges: r.ClusterPermissions,
-			IndexPatterns:     esopsclient.UniqueStrings(patterns),
+			IndexPatterns:     clientutil.UniqueStrings(patterns),
 			Description:       r.Description,
 		})
 	}
@@ -1092,7 +1093,7 @@ func (c *Client) doSecurityGET(ctx context.Context, path string) ([]byte, int, e
 	}
 	resp, err := c.api.Client.Perform(req)
 	if err != nil {
-		return nil, 0, esopsclient.ClassifyTransport(err)
+		return nil, 0, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1143,7 +1144,7 @@ func (c *Client) HotThreads(ctx context.Context, req types.HotThreadsRequest) (t
 		return types.HotThreads{}, errors.Join(errors.New("reading hot_threads response"), err)
 	}
 	if resp.StatusCode >= 400 {
-		return types.HotThreads{}, esopsclient.ClassifyStatus("nodes hot_threads", resp.StatusCode, body)
+		return types.HotThreads{}, clientutil.ClassifyStatus("nodes hot_threads", resp.StatusCode, body)
 	}
 	return types.HotThreads{Text: string(body)}, nil
 }
@@ -1200,7 +1201,7 @@ func (c *Client) hotThreadsViaGET(ctx context.Context, req types.HotThreadsReque
 		return types.HotThreads{}, esopsclient.ErrForbidden
 	}
 	if status >= 400 {
-		return types.HotThreads{}, esopsclient.ClassifyStatus("nodes hot_threads", status, body)
+		return types.HotThreads{}, clientutil.ClassifyStatus("nodes hot_threads", status, body)
 	}
 	return types.HotThreads{Text: string(body)}, nil
 }
@@ -1575,13 +1576,13 @@ func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yi
 	}
 	resp, err := c.api.Client.Perform(req)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "cat aliases (stream) error"))
-		return esopsclient.ClassifyStatus("cat aliases (stream)", resp.StatusCode, body)
+		body, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "cat aliases (stream) error"))
+		return clientutil.ClassifyStatus("cat aliases (stream)", resp.StatusCode, body)
 	}
 
 	wanted := map[string]struct{}{}
@@ -1591,7 +1592,7 @@ func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yi
 		}
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "cat aliases (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "cat aliases (stream)")
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil {
 		return errors.Join(errors.New("decoding cat aliases (stream) response"), err)
@@ -1766,11 +1767,11 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 	}
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return nil, esopsclient.ClassifyTransport(err)
+		return nil, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_settings"))
+	body, err := io.ReadAll(clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "indices get_settings"))
 	if err != nil {
 		return nil, errors.Join(errors.New("reading indices get_settings response"), err)
 	}
@@ -1781,7 +1782,7 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 		return nil, esopsclient.ErrForbidden
 	}
 	if resp.StatusCode >= 400 {
-		return nil, esopsclient.ClassifyStatus("indices get_settings", resp.StatusCode, body)
+		return nil, clientutil.ClassifyStatus("indices get_settings", resp.StatusCode, body)
 	}
 
 	var wire map[string]settingsGetEntryWire
@@ -1840,16 +1841,16 @@ func (c *Client) GetSettingsStream(ctx context.Context, req types.IndexSettingsG
 	}
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "indices get_settings (stream) error"))
-		return esopsclient.ClassifyStatus("indices get_settings (stream)", resp.StatusCode, errBody)
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "indices get_settings (stream) error"))
+		return clientutil.ClassifyStatus("indices get_settings (stream)", resp.StatusCode, errBody)
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "indices get_settings (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "indices get_settings (stream)")
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil {
 		return errors.Join(errors.New("decoding indices get_settings (stream) response"), err)
@@ -1957,7 +1958,7 @@ func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.Inde
 	if raw == nil || raw.Body == nil {
 		return nil, errors.New("opensearch get_index_template: empty response body")
 	}
-	body, err := io.ReadAll(esopsclient.NewBoundedReader(raw.Body, esopsclient.DefaultMaxResponseBytes, "get_index_template"))
+	body, err := io.ReadAll(clientutil.NewBoundedReader(raw.Body, clientutil.DefaultMaxResponseBytes, "get_index_template"))
 	if err != nil {
 		return nil, errors.Join(errors.New("reading get_index_template response"), err)
 	}

@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // Nodes returns the cluster's node list with role/version/heap/disk

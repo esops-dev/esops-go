@@ -3,7 +3,7 @@ package snapshot
 import (
 	"strings"
 
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // alwaysSecretKeys are setting key names that are credentials wherever

@@ -7,11 +7,11 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/output"
-	esopssnapshot "github.com/dj-wasabi/esops-go/internal/snapshot"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/output"
+	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // listCommand is `esops snapshot list`. By default lists registered

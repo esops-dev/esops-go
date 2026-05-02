@@ -12,8 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	esopsclient "github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/clientutil"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // ismPolicyEntryWire mirrors one row in the GET /_plugins/_ism/policies
@@ -336,16 +337,16 @@ func (c *Client) ExplainPolicyStream(ctx context.Context, req types.ISMExplainRe
 	}
 	resp, err := c.api.Client.Perform(httpReq)
 	if err != nil {
-		return esopsclient.ClassifyTransport(err)
+		return clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, 64*1024, "ism explain (stream) error"))
+		errBody, _ := io.ReadAll(clientutil.NewBoundedReader(resp.Body, 64*1024, "ism explain (stream) error"))
 		return classifyISMStatus("ism explain (stream)", resp.StatusCode, errBody)
 	}
 
-	body := esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, "ism explain (stream)")
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "ism explain (stream)")
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil {
 		return errors.Join(errors.New("decoding ism explain (stream) response"), err)
@@ -443,12 +444,12 @@ func (c *Client) doISMRequest(ctx context.Context, method, path string, body io.
 	}
 	resp, err := c.api.Client.Perform(req)
 	if err != nil {
-		return nil, 0, esopsclient.ClassifyTransport(err)
+		return nil, 0, clientutil.ClassifyTransport(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	op := method + " " + path
-	respBody, err := io.ReadAll(esopsclient.NewBoundedReader(resp.Body, esopsclient.DefaultMaxResponseBytes, op))
+	respBody, err := io.ReadAll(clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, op))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}

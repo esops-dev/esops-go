@@ -1,4 +1,4 @@
-package client
+package clientutil
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/esops-dev/esops-go/pkg/client"
 )
 
 func TestBoundedReader_belowCap_passesThrough(t *testing.T) {
@@ -36,7 +38,7 @@ func TestBoundedReader_overCap_returnsErrResponseTooLarge(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !errors.Is(err, ErrResponseTooLarge) {
+	if !errors.Is(err, client.ErrResponseTooLarge) {
 		t.Errorf("err = %v, want ErrResponseTooLarge", err)
 	}
 	if !strings.Contains(err.Error(), "test") {
@@ -49,7 +51,7 @@ func TestBoundedReader_overCap_chunkedReads(t *testing.T) {
 	// trip-detection path inside BoundedReader gets exercised.
 	r := NewBoundedReader(&oneByteReader{src: bytes.NewReader([]byte("abcdefgh"))}, 4, "test")
 	_, err := io.ReadAll(r)
-	if !errors.Is(err, ErrResponseTooLarge) {
+	if !errors.Is(err, client.ErrResponseTooLarge) {
 		t.Errorf("err = %v, want ErrResponseTooLarge", err)
 	}
 }

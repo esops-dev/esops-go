@@ -3,8 +3,8 @@ package snapshot_test
 import (
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/snapshot"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 func TestRedactRepositorySettings_redactsKnownSecretsAtAnyDepth(t *testing.T) {

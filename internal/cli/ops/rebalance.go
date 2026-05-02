@@ -8,12 +8,12 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/logging"
-	esopsops "github.com/dj-wasabi/esops-go/internal/ops"
-	"github.com/dj-wasabi/esops-go/internal/output"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/logging"
+	esopsops "github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 func rebalanceCommand() *cli.Command {

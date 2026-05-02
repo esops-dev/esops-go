@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/snapshot"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeCreator records the requests the business layer issues and

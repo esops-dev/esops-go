@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/ops"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeRerouteExecutor records the request it was called with and

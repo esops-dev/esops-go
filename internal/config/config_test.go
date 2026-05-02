@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/internal/config"
 )
 
 // isolateEnv empties the env vars Resolve inspects and redirects HOME

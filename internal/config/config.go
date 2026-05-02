@@ -23,7 +23,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
-	"github.com/dj-wasabi/esops-go/internal/logging"
+	"github.com/esops-dev/esops-go/internal/logging"
 )
 
 // Config is the parsed esops configuration file.

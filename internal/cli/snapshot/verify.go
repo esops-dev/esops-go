@@ -6,9 +6,9 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/dj-wasabi/esops-go/internal/cli/cmdsetup"
-	"github.com/dj-wasabi/esops-go/internal/output"
-	esopssnapshot "github.com/dj-wasabi/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/output"
+	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 )
 
 func verifyCommand() *cli.Command {

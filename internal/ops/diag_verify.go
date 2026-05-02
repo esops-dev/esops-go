@@ -12,7 +12,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // Decompression-bomb caps for VerifyDiagBundle. The reader is gzipped

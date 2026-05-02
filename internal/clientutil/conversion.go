@@ -1,32 +1,17 @@
-package client
+// Package clientutil holds the HTTP-transport and _cat-decoding helpers
+// the Elasticsearch and OpenSearch adapters share. Nothing here is part
+// of the public capability surface (which lives in pkg/client) — this
+// package is implementation glue for adapters only.
+package clientutil
 
 import (
 	"strconv"
-	"strings"
 )
 
 // Helpers shared by the Elasticsearch and OpenSearch adapters for the
 // small ceremony around _cat API responses: quoted numerics, null-able
-// string columns, comma-separated index patterns. Kept in the `client`
-// package (rather than a util/ sibling) so both adapters import the same
-// primitives from one place.
-
-// SplitCSV splits a comma-separated list of patterns, trimming whitespace
-// and dropping empty entries. Returns nil (not []string{}) for the empty
-// input — distinguishable from "user passed an empty pattern".
-func SplitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
+// string columns. The CSV-splitting twin (SplitCSV) lives in pkg/client
+// because business-logic callers want it too.
 
 // AtoiOrZero parses a string as int; returns 0 on error. The _cat APIs
 // quote every numeric column, and cells can be empty for system indices

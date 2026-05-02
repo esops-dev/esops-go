@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dj-wasabi/esops-go/internal/client"
-	"github.com/dj-wasabi/esops-go/internal/index"
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // fakeISM is the ISM equivalent of fakeILM (above) — a hand-rolled

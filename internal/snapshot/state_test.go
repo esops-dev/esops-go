@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/internal/snapshot"
 )
 
 func TestSaveAndLoadCreateState_roundTrip(t *testing.T) {

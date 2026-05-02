@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dj-wasabi/esops-go/internal/types"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // buildHotThreadsPath is exercised only on the OS --type=wait|block|mem
