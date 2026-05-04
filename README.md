@@ -1,6 +1,6 @@
-# esops
+# esops-go
 
-Operations CLI for self-managed Elasticsearch and OpenSearch clusters.
+`esops` is your operations CLI for (self-managed) Elasticsearch and OpenSearch clusters. "es" (Elasticsearch, and its fork OpenSearch), "ops" for operations: because when the clusters need work, it’s time to go esops.
 
 [![CI](https://github.com/esops-dev/esops-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/esops-dev/esops-go/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/esops-dev/esops-go?include_prereleases&sort=semver)](https://github.com/esops-dev/esops-go/releases)
@@ -13,11 +13,17 @@ Operations CLI for self-managed Elasticsearch and OpenSearch clusters.
 
 ## Why esops
 
-As an Elasticsearch (ES) or OpenSearch (OS) deployment ages, there are many cases where command lines using 'curl' and 'jq' commands are used for things like checking shard skew, allocating explain requests, reindexing drivers, pruning snapshots and swapping aliases. Instead of having a long list of individual command lines, the `esops` system has a single binary file to do everything above.
+The older the ES/OS cluster gets, the more often you will find yourself typing command lines using `curl` and `jq` to perform different operations like checking shard imbalance, explaining the allocation of requests, driving re-indexing, cleaning up snapshots, and swapping aliases. Rather than having a bunch of different command lines, `esops` is one binary that does all of the above.
 
-* Performs a reindex operation as an adaptive throttled and resumable task rather than an action that needs a synchronous HTTP call to be monitored.
-* It will not allow operations that may cause unbounded mutations by default. For any destructive operation, the system calculates the “blast radius” of the operation it’s proposing, and also requires the user to explicitly opt-in to allow the operation to go past the defined threshold.
-* Produce scriptable output (table / JSON / NDJSON / YAML) with standard exit codes and stable schema(s). Documentation will be provided on how to use the various exit codes.
+* Adaptive, resumable reindexing (coming soon).
+* Scriptable output in table, JSON, NDJSON, or YAML with stable schemas and standard exit codes.
+* kubectl-style named contexts, with protection tiers (`none` / `staging` / `prod`). Destructive ops on `prod` require `--i-know-this-is-prod`; dry-runs and read-only commands are always allowed.
+* Secrets loaded securely via indirection (`${env:VAR}`, `${file:...}`, `${keyring:...}`); inline plaintext secrets are refused and auth headers are redacted from logs.
+* Pipeline-friendly by design: `CI=true` auto-enables non-interactive mode and JSON logging. Stdout is pure data; stderr gets logs and progress. NDJSON streams large results without buffering.
+* One-command diagnostics: `esops ops diag` bundles health, shards, hot threads, tasks, ILM/ISM, snapshots, etc. into a credential-free tarball: perfect for support tickets.
+* Single static binary, `CGO_ENABLED=0`. No JVM, no Python runtime, no Docker. Drops into Alpine or scratch images without dragging a runtime along.
+
+----
 
 ## Features
 
@@ -98,18 +104,19 @@ See [docs/](docs/) for per-command reference.
 
 | Flag | Description |
 |---|---|
+| `--cacert PATH` | Custom CA bundle |
 | `-c, --config PATH` | Config file (env: `ESOPS_CONFIG`) |
 | `--context NAME` | Named cluster from config (alias: `--cluster`) |
-| `--url URL` | Override: single cluster URL |
-| `--timeout DURATION` | HTTP timeout (default `30s`) |
-| `--insecure` | Skip TLS verification (last resort) |
-| `--cacert PATH` | Custom CA bundle |
-| `-o, --output FORMAT` | `table` \| `json` \| `ndjson` \| `yaml` \| `wide` |
-| `--log-level LEVEL` | `debug` \| `info` \| `warn` \| `error` |
-| `--log-format FORMAT` | `text` \| `json` |
 | `--dry-run` | Where applicable |
+| `--i-know-this-is-prod` | Required for destructive operations against a prod-protected context |
+| `--insecure` | Skip TLS verification (last resort) |
+| `--log-file PATH` | Append log lines to PATH instead of stderr (file created with mode 0600) |
+| `--log-format FORMAT` | `text` \| `json` |
+| `--log-level LEVEL` | `debug` \| `info` \| `warn` \| `error` |
 | `--no-prompt` | Fail instead of prompting (CI-safe) |
-| `--compress` | Gzip request and response bodies |
+| `-o, --output FORMAT` | `table` \| `json` \| `ndjson` \| `yaml` \| `wide` |
+| `--timeout DURATION` | HTTP timeout (default `30s`) |
+| `--url URL` | Override: single cluster URL |
 
 `CI=true` in the environment auto-enables `--no-prompt` and defaults `--log-format=json`.
 
