@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elastic/elastic-transport-go/v8/elastictransport"
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
@@ -37,9 +38,9 @@ type Client struct {
 // at a glance.
 type Options struct {
 	// MaxRetries: 0 = library default (3). Negative disables retries.
-	// Mirrors es.Config.MaxRetries; we apply DisableRetry for negatives
-	// so "I want no retries" is expressible without conflating zero and
-	// "use the library default".
+	// Maps to es.WithRetry / elastictransport.WithDisableRetry so "I
+	// want no retries" is expressible without conflating zero and "use
+	// the library default".
 	MaxRetries int
 
 	// CompressRequestBody gzips outbound bodies. Useful for big reindex
@@ -65,20 +66,20 @@ func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper
 	if provider.Type() == auth.TypeSigV4 {
 		return nil, errors.New("auth.type=sigv4 is not supported on Elasticsearch; use bearer or basic")
 	}
-	cfg := es.Config{
-		Addresses: addrs,
-		Transport: auth.WrapTransport(provider, httpTransport),
+	options := []es.Option{
+		es.WithAddresses(addrs...),
+		es.WithTransportOptions(elastictransport.WithTransport(auth.WrapTransport(provider, httpTransport))),
 	}
 	switch {
 	case opts.MaxRetries < 0:
-		cfg.DisableRetry = true
+		options = append(options, es.WithTransportOptions(elastictransport.WithDisableRetry()))
 	case opts.MaxRetries > 0:
-		cfg.MaxRetries = opts.MaxRetries
+		options = append(options, es.WithRetry(opts.MaxRetries))
 	}
 	if opts.CompressRequestBody {
-		cfg.CompressRequestBody = true
+		options = append(options, es.WithCompression())
 	}
-	c, err := es.NewClient(cfg)
+	c, err := es.New(options...)
 	if err != nil {
 		return nil, fmt.Errorf("elasticsearch client: %w", err)
 	}

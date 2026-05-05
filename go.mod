@@ -4,12 +4,14 @@ go 1.26.2
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
-	github.com/elastic/go-elasticsearch/v9 v9.3.3
+	github.com/elastic/elastic-transport-go/v8 v8.11.0
+	github.com/elastic/go-elasticsearch/v9 v9.4.0
 	github.com/knadh/koanf/parsers/yaml v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/v2 v2.3.4
 	github.com/opensearch-project/opensearch-go/v4 v4.6.0
 	github.com/urfave/cli/v3 v3.8.0
+	github.com/zalando/go-keyring v0.2.8
 	go.yaml.in/yaml/v3 v3.0.4
 )
 
@@ -28,11 +30,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1 // indirect
 	github.com/aws/smithy-go v1.25.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/elastic/elastic-transport-go/v8 v8.11.0 // indirect
-	github.com/fsnotify/fsnotify v1.10.0 // indirect
+	github.com/danieljoos/wincred v1.2.3 // indirect
+	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
