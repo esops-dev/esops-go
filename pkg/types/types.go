@@ -1149,6 +1149,52 @@ type Node struct {
 	Uptime          string   `json:"uptime,omitempty"              yaml:"uptime,omitempty"`
 }
 
+// NodeStats is the neutral view of one cluster node's JVM and OS
+// introspection — the configured heap (-Xms/-Xmx) and the kernel-reported
+// total physical memory of the host. Distinct from Node (which wraps
+// /_cat/nodes and reports current heap usage) because the underlying
+// endpoints, response shapes, and payload sizes are all larger here:
+// callers that only need /_cat/nodes columns should not pay for it.
+//
+// The capability behind this type fans across /_nodes/jvm (info — for
+// heap_init_in_bytes / heap_max_in_bytes; stats does not carry init)
+// and /_nodes/stats/os (for total physical memory; the info endpoint's
+// os section omits memory totals on ES and OS alike). Numeric fields
+// are bytes and zero when the cluster did not report a value.
+type NodeStats struct {
+	Name string       `json:"name"           yaml:"name"`
+	JVM  NodeJVMStats `json:"jvm,omitempty"  yaml:"jvm,omitempty"`
+	OS   NodeOSStats  `json:"os,omitempty"   yaml:"os,omitempty"`
+}
+
+// NodeJVMStats carries the JVM-level introspection NodeStats exposes.
+// Currently just the heap configuration — non-heap, GC, and pool
+// breakdowns live on /_nodes/stats and are out of scope for the heap-
+// sizing rule that drives this capability.
+type NodeJVMStats struct {
+	Heap NodeJVMHeap `json:"heap" yaml:"heap"`
+}
+
+// NodeJVMHeap mirrors the configured -Xms/-Xmx the JVM was started with.
+// InitBytes is jvm.mem.heap_init_in_bytes (the -Xms floor); MaxBytes is
+// jvm.mem.heap_max_in_bytes (the -Xmx ceiling). Both come from the
+// /_nodes (info) endpoint — /_nodes/stats reports current usage, not
+// the configured floor, which is exactly the data the heap_size rule
+// needs to check init <= 50% of RAM.
+type NodeJVMHeap struct {
+	InitBytes int64 `json:"init_bytes,omitempty" yaml:"init_bytes,omitempty"`
+	MaxBytes  int64 `json:"max_bytes,omitempty"  yaml:"max_bytes,omitempty"`
+}
+
+// NodeOSStats carries the OS-level introspection NodeStats exposes.
+// Today that is only the host's total physical memory; CPU, swap, and
+// load averages are surfaced through Node (/_cat/nodes) and /_nodes/
+// stats/os already, so duplicating them here would just bloat the
+// payload for callers that only want the heap-vs-RAM ratio.
+type NodeOSStats struct {
+	TotalPhysicalMemoryBytes int64 `json:"total_physical_memory_bytes,omitempty" yaml:"total_physical_memory_bytes,omitempty"`
+}
+
 // NodeDrainRequest is the input to ops.DrainNode. NodeNames carries the
 // nodes the operator wants excluded from shard allocation; each must
 // already be present in the cluster (validated client-side via

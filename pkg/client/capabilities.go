@@ -28,6 +28,32 @@ type NodeInspector interface {
 	Nodes(ctx context.Context) ([]types.Node, error)
 }
 
+// NodeStatsInspector exposes the JVM/OS introspection surface that
+// /_cat/nodes leaves out: configured -Xms/-Xmx (jvm.mem.heap_init_in_bytes,
+// jvm.mem.heap_max_in_bytes) and the host's kernel-reported total
+// physical memory (os.mem.total_in_bytes). NodeInspector reports current
+// heap usage and disk via /_cat/nodes, which is the right shape for
+// `ops nodes` but the wrong shape for "is the configured heap floor
+// safe given how much RAM the host has" — that question needs the
+// init/max pair plus OS memory, none of which /_cat/nodes carries.
+//
+// Implementations call /_nodes/jvm (info — heap_init/heap_max are
+// configuration, not stats) and /_nodes/stats/os (memory totals — the
+// info endpoint's os block omits them on both ES and OS) and merge by
+// node. Kept separate from NodeInspector so consumers that only want
+// the cat-nodes columns aren't paying the larger payload cost; the
+// info+stats responses include cgroup, GC, thread-pool, and pool
+// breakdowns that the doctor's heap_size rule does not need.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message
+type NodeStatsInspector interface {
+	NodeStats(ctx context.Context) ([]types.NodeStats, error)
+}
+
 // IndexInspector exposes read-only index-listing operations backed by
 // /_cat/indices. The filter's Index field is forwarded to the cluster;
 // Health/Status/Hidden/Sort are applied in the business layer so the
@@ -622,6 +648,7 @@ type Client struct {
 	Health            HealthInspector
 	Shards            ShardInspector
 	Nodes             NodeInspector
+	NodeStats         NodeStatsInspector
 	Indices           IndexInspector
 	IndexState        IndexStateChanger
 	IndexOptimize     IndexOptimizer

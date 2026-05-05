@@ -1412,6 +1412,82 @@ func hasDataRole(roles []string) bool {
 	return false
 }
 
+// NodeStats implements client.NodeStatsInspector. The cluster splits the
+// data this rule needs across two endpoints: configured -Xms/-Xmx come
+// from /_nodes/jvm (info), but the host's total physical memory is only
+// reported by /_nodes/stats/os — the info endpoint's os block carries
+// processor counts and arch, not memory totals. Both calls run in
+// parallel and merge by node ID.
+//
+// A node that appears on one side but not the other is still surfaced;
+// fields the missing endpoint would have filled stay at their zero
+// value, matching CLAUDE.md §7's "missing column is information, not
+// failure" policy.
+func (c *Client) NodeStats(ctx context.Context) ([]types.NodeStats, error) {
+	var (
+		info  *osapi.NodesInfoResp
+		stats *osapi.NodesStatsResp
+	)
+	err := clientutil.RunParallel(
+		func() error {
+			req := &osapi.NodesInfoReq{Metrics: []string{"jvm"}}
+			resp, err := c.api.Nodes.Info(ctx, req)
+			if err != nil {
+				status := 0
+				if resp != nil {
+					status = statusOf(resp.Inspect().Response)
+				}
+				return classifyResponseErr(err, status)
+			}
+			info = resp
+			return nil
+		},
+		func() error {
+			req := &osapi.NodesStatsReq{Metric: []string{"os"}}
+			resp, err := c.api.Nodes.Stats(ctx, req)
+			if err != nil {
+				status := 0
+				if resp != nil {
+					status = statusOf(resp.Inspect().Response)
+				}
+				return classifyResponseErr(err, status)
+			}
+			stats = resp
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]types.NodeStats, 0, len(info.Nodes))
+	seen := make(map[string]int, len(info.Nodes))
+	for id, n := range info.Nodes {
+		seen[id] = len(out)
+		out = append(out, types.NodeStats{
+			Name: n.Name,
+			JVM: types.NodeJVMStats{
+				Heap: types.NodeJVMHeap{
+					InitBytes: n.JVM.Mem.HeapInitInBytes,
+					MaxBytes:  n.JVM.Mem.HeapMaxInBytes,
+				},
+			},
+		})
+	}
+	for id, n := range stats.Nodes {
+		if idx, ok := seen[id]; ok {
+			out[idx].OS.TotalPhysicalMemoryBytes = int64(n.OS.Mem.TotalInBytes)
+			continue
+		}
+		out = append(out, types.NodeStats{
+			Name: n.Name,
+			OS:   types.NodeOSStats{TotalPhysicalMemoryBytes: int64(n.OS.Mem.TotalInBytes)},
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 // Shrink implements client.IndexShrinker via /<source>/_shrink/<target>.
 // Body shape is identical to ES — {settings: {…}} — built by the
 // shared helper in this package.
