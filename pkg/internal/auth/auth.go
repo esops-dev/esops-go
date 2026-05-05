@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 // Type identifiers used in config and adapter compatibility checks.

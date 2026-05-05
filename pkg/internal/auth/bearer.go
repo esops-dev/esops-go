@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 // bearerProvider sends "Authorization: Bearer <token>". Works on any

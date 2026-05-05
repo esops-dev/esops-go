@@ -13,7 +13,7 @@ import (
 	"github.com/urfave/cli/v3"
 	"go.yaml.in/yaml/v3"
 
-	esopsconfig "github.com/esops-dev/esops-go/internal/config"
+	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/output"
 )
 
@@ -24,7 +24,7 @@ import (
 const redactionPlaceholder = "REDACTED"
 
 // secretRefPattern matches ${scheme:arg} indirection. Duplicated from
-// internal/config so view can tell references apart from literal
+// pkg/config so view can tell references apart from literal
 // secrets without widening the config package's exported surface —
 // indirection refs are *pointers* to secrets, safe to print verbatim.
 var secretRefPattern = regexp.MustCompile(`^\$\{[a-z]+:[^}]+\}$`)

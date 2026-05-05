@@ -1,4 +1,10 @@
 // Package cluster wires a config.Context to a connected esops client.
+//
+// This is the public construction surface consumed by esops-doctor and
+// any future commercial product. The ES/OS adapters, transport
+// plumbing, and auth providers live under pkg/internal/... so they
+// stay invisible to external consumers — Go's internal-directory rule
+// makes pkg/cluster the only path to a connected *client.Client.
 package cluster
 
 import (
@@ -8,11 +14,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/esops-dev/esops-go/internal/auth"
+	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	"github.com/esops-dev/esops-go/pkg/client"
-	esadapter "github.com/esops-dev/esops-go/internal/client/elasticsearch"
-	osadapter "github.com/esops-dev/esops-go/internal/client/opensearch"
-	"github.com/esops-dev/esops-go/internal/config"
+	esadapter "github.com/esops-dev/esops-go/pkg/internal/client/elasticsearch"
+	osadapter "github.com/esops-dev/esops-go/pkg/internal/client/opensearch"
+	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

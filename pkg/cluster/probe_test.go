@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/internal/cluster"
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/cluster"
+	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

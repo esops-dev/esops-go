@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/esops-dev/esops-go/internal/auth"
-	esadapter "github.com/esops-dev/esops-go/internal/client/elasticsearch"
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/internal/auth"
+	esadapter "github.com/esops-dev/esops-go/pkg/internal/client/elasticsearch"
+	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

@@ -13,8 +13,8 @@ import (
 	"sync"
 
 	esopsclient "github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/internal/clientutil"
-	"github.com/esops-dev/esops-go/internal/client/snapshotwire"
+	"github.com/esops-dev/esops-go/pkg/internal/clientutil"
+	"github.com/esops-dev/esops-go/pkg/internal/client/snapshotwire"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

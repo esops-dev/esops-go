@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/esops-dev/esops-go/internal/auth"
+	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	"github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
