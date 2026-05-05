@@ -2246,3 +2246,77 @@ type TasksCancelResult struct {
 	Cancelled         []Task   `json:"cancelled"               yaml:"cancelled"`
 	NodeFailures      []string `json:"node_failures,omitempty" yaml:"node_failures,omitempty"`
 }
+
+// PendingTask is a normalised entry from /_cluster/pending_tasks — work
+// the master has accepted but not yet committed to cluster state.
+// ClusterHealth.NumberOfPendingTasks gives the count; this is the
+// per-task breakdown a rule needs to tell "1 pending task that's been
+// queued for 4 minutes" (master overload) from "30 pending tasks that
+// were enqueued in the last second" (a healthy burst).
+//
+// InsertOrder is the cluster's monotonic counter — useful only for
+// pairing with a follow-up read to detect "the same task is still
+// stuck". Priority is one of "URGENT", "HIGH", "NORMAL", "LOW",
+// "LANGUID" — surfaced verbatim so an operator who knows the cluster's
+// vocabulary doesn't have to translate. Source is the cluster's free-
+// text task description (e.g. "create-index [foo]"). Executing
+// distinguishes "currently being applied by the master" from "queued
+// behind something".
+//
+// TimeInQueueMillis is the cluster's own measurement; it does not
+// include execution time. The renderer formats it as a short duration
+// for the table view; the JSON form keeps the raw value scriptable.
+type PendingTask struct {
+	InsertOrder       int64  `json:"insert_order"         yaml:"insert_order"`
+	Priority          string `json:"priority"             yaml:"priority"`
+	Source            string `json:"source"               yaml:"source"`
+	TimeInQueueMillis int64  `json:"time_in_queue_millis" yaml:"time_in_queue_millis"`
+	Executing         bool   `json:"executing,omitempty"  yaml:"executing,omitempty"`
+}
+
+// DeprecationsRequest narrows a DeprecationInspector.Deprecations call.
+// Zero value = "report on every category the cluster knows about".
+//
+// Index, when set, scopes the index_settings category to the named
+// pattern (the cluster's own /_migration/deprecations/<index> endpoint
+// shape) — the cluster_settings/node_settings/ml_settings categories
+// are still returned because they are global. Patterns follow the same
+// convention as elsewhere: a literal name, a comma list, or the cluster
+// wildcard syntax.
+type DeprecationsRequest struct {
+	Index string
+}
+
+// DeprecationIssue is one finding from /_migration/deprecations,
+// flattened across the cluster's per-category groupings. The cluster
+// returns issues bucketed under cluster_settings, node_settings,
+// index_settings (keyed by index name), ml_settings, data_streams,
+// templates, ilm_policies — the bucket name is preserved on Category
+// and the per-bucket key (where one exists, e.g. an index name for
+// index_settings) on Target. A flat slice is the right shape for a
+// rule consumer that wants "every critical issue across the cluster"
+// without having to switch on category first.
+//
+// Level is "critical" / "warning" / "info" / "none" verbatim from the
+// cluster — surfaced rather than mapped because the cluster's own
+// vocabulary is what the operator-facing remediation docs use.
+// Message is the short human description; URL points at the long-form
+// docs; Details carries any cluster-supplied extra context (often the
+// specific setting key or value that triggered the warning).
+//
+// ResolveDuringRollingUpgrade flags issues that the cluster will fix
+// itself as nodes are restarted — useful so a hygiene rule can grade
+// "you need to act before upgrading" against "the upgrade itself
+// resolves this". Meta carries the cluster's free-form `_meta` block
+// verbatim as a JSON-encoded string when present; it is a recent
+// addition and not every issue carries one.
+type DeprecationIssue struct {
+	Category                    string `json:"category"                                 yaml:"category"`
+	Target                      string `json:"target,omitempty"                         yaml:"target,omitempty"`
+	Level                       string `json:"level"                                    yaml:"level"`
+	Message                     string `json:"message"                                  yaml:"message"`
+	URL                         string `json:"url,omitempty"                            yaml:"url,omitempty"`
+	Details                     string `json:"details,omitempty"                        yaml:"details,omitempty"`
+	ResolveDuringRollingUpgrade bool   `json:"resolve_during_rolling_upgrade,omitempty" yaml:"resolve_during_rolling_upgrade,omitempty"`
+	Meta                        string `json:"meta,omitempty"                           yaml:"meta,omitempty"`
+}

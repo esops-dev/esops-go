@@ -54,7 +54,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		// so business code can call s.Client.ISM.* without nil-checks
 		// and get ErrUnsupported with a clear message when the
 		// operator targeted an ES context by mistake.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl}, nil
 	case types.DialectOpenSearch:
 		impl, err := osadapter.New(addrs, provider, transport, osadapter.Options{
 			MaxRetries:          cc.MaxRetries,
@@ -65,7 +65,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		}
 		// ILM is Elasticsearch-only — same stubbing pattern as the ES
 		// branch above for ISM.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}
@@ -117,6 +117,18 @@ func (unsupportedISM) ExplainPolicy(context.Context, types.ISMExplainRequest) ([
 }
 func (unsupportedISM) ExplainPolicyStream(context.Context, types.ISMExplainRequest, func(types.ISMExplainEntry) error) error {
 	return fmt.Errorf("%w: ISM is OpenSearch-only; use 'esops index ilm' for Elasticsearch", client.ErrUnsupported)
+}
+
+// unsupportedDeprecations is the deprecation-inspector stub installed
+// on OpenSearch clients. /_migration/deprecations is an Elasticsearch-
+// only endpoint (the migration plugin); OS has no equivalent. Returning
+// ErrUnsupported here keeps the dialect mismatch loud and stable
+// (exit code 6) rather than leaking through as a 404 from a path the
+// cluster never advertised.
+type unsupportedDeprecations struct{}
+
+func (unsupportedDeprecations) Deprecations(context.Context, types.DeprecationsRequest) ([]types.DeprecationIssue, error) {
+	return nil, fmt.Errorf("%w: /_migration/deprecations is Elasticsearch-only; OpenSearch has no equivalent endpoint", client.ErrUnsupported)
 }
 
 // buildTransport returns the http.RoundTripper handed to the upstream

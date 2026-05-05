@@ -2286,3 +2286,129 @@ func TestTasksCancel_rejectsUnknownFormat(t *testing.T) {
 		t.Fatal("expected error for unknown format")
 	}
 }
+
+func samplePendingTasks() []types.PendingTask {
+	return []types.PendingTask{
+		{InsertOrder: 1, Priority: "URGENT", Source: "create-index [foo]", TimeInQueueMillis: 250, Executing: true},
+		{InsertOrder: 2, Priority: "HIGH", Source: "put-mapping [bar/_doc]", TimeInQueueMillis: 70_000},
+	}
+}
+
+func TestPendingTasks_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.PendingTasks(&buf, samplePendingTasks(), output.FormatJSON); err != nil {
+		t.Fatalf("PendingTasks: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if len(rows) != 2 || rows[0]["priority"] != "URGENT" || rows[0]["source"] != "create-index [foo]" {
+		t.Errorf("rows[0] = %v, want priority=URGENT source=create-index [foo]", rows[0])
+	}
+}
+
+func TestPendingTasks_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.PendingTasks(&buf, samplePendingTasks(), output.FormatTable); err != nil {
+		t.Fatalf("PendingTasks: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ORDER", "PRIORITY", "IN_QUEUE", "EXECUTING", "SOURCE", "URGENT", "create-index [foo]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+	// The default table omits the raw millis column — that one is wide-only.
+	if strings.Contains(out, "IN_QUEUE_MS") {
+		t.Errorf("default table should not include IN_QUEUE_MS column, got:\n%s", out)
+	}
+}
+
+func TestPendingTasks_wideAddsRawMillis(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.PendingTasks(&buf, samplePendingTasks(), output.FormatWide); err != nil {
+		t.Fatalf("PendingTasks: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"IN_QUEUE_MS", "70000"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPendingTasks_rejectsUnknownFormat(t *testing.T) {
+	if err := output.PendingTasks(&bytes.Buffer{}, samplePendingTasks(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
+
+func sampleDeprecations() []types.DeprecationIssue {
+	return []types.DeprecationIssue{
+		{
+			Category: "cluster_settings",
+			Level:    "critical",
+			Message:  "setting cluster.foo will be removed in 9.x",
+			URL:      "https://example/cluster-foo",
+		},
+		{
+			Category:                    "index_settings",
+			Target:                      "logs-2024",
+			Level:                       "warning",
+			Message:                     "old analyzer in use",
+			ResolveDuringRollingUpgrade: true,
+			Details:                     "analyzer=legacy_v1",
+		},
+	}
+}
+
+func TestDeprecations_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Deprecations(&buf, sampleDeprecations(), output.FormatJSON); err != nil {
+		t.Fatalf("Deprecations: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if len(rows) != 2 || rows[0]["level"] != "critical" || rows[1]["target"] != "logs-2024" {
+		t.Errorf("rows = %v, want [0].level=critical [1].target=logs-2024", rows)
+	}
+}
+
+func TestDeprecations_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Deprecations(&buf, sampleDeprecations(), output.FormatTable); err != nil {
+		t.Fatalf("Deprecations: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"LEVEL", "CATEGORY", "TARGET", "MESSAGE", "critical", "logs-2024", "old analyzer in use"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+	// URL/details are wide-only.
+	if strings.Contains(out, "URL") || strings.Contains(out, "DETAILS") {
+		t.Errorf("default table should not include URL/DETAILS columns, got:\n%s", out)
+	}
+}
+
+func TestDeprecations_wideAddsURLAndDetails(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Deprecations(&buf, sampleDeprecations(), output.FormatWide); err != nil {
+		t.Fatalf("Deprecations: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"URL", "DETAILS", "RESOLVE_DURING_RU", "https://example/cluster-foo", "analyzer=legacy_v1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDeprecations_rejectsUnknownFormat(t *testing.T) {
+	if err := output.Deprecations(&bytes.Buffer{}, sampleDeprecations(), output.Format("bogus")); err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}

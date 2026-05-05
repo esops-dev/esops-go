@@ -53,10 +53,27 @@ func TestUnsupportedISM_AllMethodsReturnUnsupported(t *testing.T) {
 	}
 }
 
+func TestUnsupportedDeprecations_ReturnsUnsupported(t *testing.T) {
+	stub := unsupportedDeprecations{}
+	ctx := context.Background()
+
+	got, err := stub.Deprecations(ctx, types.DeprecationsRequest{})
+	if !errors.Is(err, client.ErrUnsupported) {
+		t.Errorf("Deprecations err = %v, want ErrUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "Elasticsearch-only") {
+		t.Errorf("Deprecations err = %q, want hint mentioning 'Elasticsearch-only'", err.Error())
+	}
+	if got != nil {
+		t.Errorf("Deprecations issues = %v, want nil on unsupported", got)
+	}
+}
+
 // Compile-time guarantees that the stubs satisfy the capability
 // interfaces. A future capability addition that breaks the contract
 // will fail here, not deep in the factory call site.
 var (
-	_ client.ILMManager = unsupportedILM{}
-	_ client.ISMManager = unsupportedISM{}
+	_ client.ILMManager           = unsupportedILM{}
+	_ client.ISMManager           = unsupportedISM{}
+	_ client.DeprecationInspector = unsupportedDeprecations{}
 )

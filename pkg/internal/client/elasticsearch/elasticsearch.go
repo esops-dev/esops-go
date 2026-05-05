@@ -3114,3 +3114,181 @@ func formatTaskNodeFailure(nodeID, reason, typ string) string {
 		return prefix
 	}
 }
+
+// pendingTasksWire mirrors the GET /_cluster/pending_tasks envelope.
+// Identical on both dialects so the same shape covers ES and OS — the
+// OS adapter decodes via its own copy rather than crossing the package
+// boundary, but the wire layout is shared.
+type pendingTasksWire struct {
+	Tasks []pendingTaskWire `json:"tasks"`
+}
+
+type pendingTaskWire struct {
+	InsertOrder       int64  `json:"insert_order"`
+	Priority          string `json:"priority"`
+	Source            string `json:"source"`
+	TimeInQueueMillis int64  `json:"time_in_queue_millis"`
+	Executing         bool   `json:"executing"`
+}
+
+// PendingTasks implements client.PendingTasksInspector. The cluster
+// endpoint takes no body and no useful query params for our purposes —
+// `local=true` would skip the master round-trip but the operator-
+// facing intent of this command is "what is the master sitting on",
+// which a stale local-state read cannot answer.
+func (c *Client) PendingTasks(ctx context.Context) ([]types.PendingTask, error) {
+	pt := c.api.Cluster.PendingTasks
+	resp, err := c.api.Cluster.PendingTasks(pt.WithContext(ctx))
+	if err != nil {
+		return nil, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("cluster pending_tasks", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var wire pendingTasksWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return nil, errors.Join(errors.New("decoding pending_tasks response"), err)
+	}
+	return pendingTasksFromWire(wire.Tasks), nil
+}
+
+// pendingTasksFromWire is shared with the OS adapter via a copy — the
+// envelope is identical across dialects but we keep the per-adapter
+// decode so neither package has to reach into the other's internals.
+func pendingTasksFromWire(in []pendingTaskWire) []types.PendingTask {
+	out := make([]types.PendingTask, 0, len(in))
+	for _, t := range in {
+		out = append(out, types.PendingTask{
+			InsertOrder:       t.InsertOrder,
+			Priority:          t.Priority,
+			Source:            t.Source,
+			TimeInQueueMillis: t.TimeInQueueMillis,
+			Executing:         t.Executing,
+		})
+	}
+	return out
+}
+
+// migrationDeprecationsWire mirrors the GET /_migration/deprecations
+// envelope. The cluster groups issues by category. Older ES versions
+// (≤ 7.x) emit cluster_settings/node_settings/index_settings/
+// ml_settings; 8.x added data_streams/templates/ilm_policies. Newer
+// ES versions may extend this set; we decode known categories
+// explicitly and capture the rest via the `Other` map so an unknown
+// category is reported under its own name rather than silently dropped.
+type migrationDeprecationsWire struct {
+	ClusterSettings []deprecationIssueWire            `json:"cluster_settings"`
+	NodeSettings    []deprecationIssueWire            `json:"node_settings"`
+	IndexSettings   map[string][]deprecationIssueWire `json:"index_settings"`
+	MLSettings      []deprecationIssueWire            `json:"ml_settings"`
+	DataStreams     map[string][]deprecationIssueWire `json:"data_streams"`
+	Templates       map[string][]deprecationIssueWire `json:"templates"`
+	ILMPolicies     map[string][]deprecationIssueWire `json:"ilm_policies"`
+}
+
+type deprecationIssueWire struct {
+	Level                       string          `json:"level"`
+	Message                     string          `json:"message"`
+	URL                         string          `json:"url"`
+	Details                     string          `json:"details"`
+	ResolveDuringRollingUpgrade bool            `json:"resolve_during_rolling_upgrade"`
+	Meta                        json.RawMessage `json:"_meta"`
+}
+
+// Deprecations implements client.DeprecationInspector against ES's
+// /_migration/deprecations. The cluster's per-category groupings are
+// flattened into a single []DeprecationIssue tagged with Category and
+// Target; the result is sorted by category then target then message
+// so a captured JSON listing is stable across runs.
+//
+// A 404 from a cluster build that omits the migration plugin returns
+// the cluster's own body verbatim via classifyResponse — the operator
+// needs the cluster's reason, not a paraphrase.
+func (c *Client) Deprecations(ctx context.Context, req types.DeprecationsRequest) ([]types.DeprecationIssue, error) {
+	md := c.api.Migration.Deprecations
+	opts := []func(*esapi.MigrationDeprecationsRequest){md.WithContext(ctx)}
+	if req.Index != "" {
+		opts = append(opts, md.WithIndex(req.Index))
+	}
+	resp, err := c.api.Migration.Deprecations(opts...)
+	if err != nil {
+		return nil, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := classifyResponse("migration deprecations", resp.StatusCode, resp.Body); err != nil {
+		return nil, err
+	}
+
+	var wire migrationDeprecationsWire
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return nil, errors.Join(errors.New("decoding migration deprecations response"), err)
+	}
+
+	out := make([]types.DeprecationIssue, 0)
+	out = appendDeprecationIssues(out, "cluster_settings", "", wire.ClusterSettings)
+	out = appendDeprecationIssues(out, "node_settings", "", wire.NodeSettings)
+	out = appendDeprecationIssues(out, "ml_settings", "", wire.MLSettings)
+	out = appendKeyedDeprecationIssues(out, "index_settings", wire.IndexSettings)
+	out = appendKeyedDeprecationIssues(out, "data_streams", wire.DataStreams)
+	out = appendKeyedDeprecationIssues(out, "templates", wire.Templates)
+	out = appendKeyedDeprecationIssues(out, "ilm_policies", wire.ILMPolicies)
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Category != out[j].Category {
+			return out[i].Category < out[j].Category
+		}
+		if out[i].Target != out[j].Target {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Message < out[j].Message
+	})
+	return out, nil
+}
+
+// appendDeprecationIssues flattens a per-category slice into the result.
+// Target is left empty for global categories (cluster_settings,
+// node_settings, ml_settings); the keyed counterpart handles
+// per-resource categories.
+func appendDeprecationIssues(out []types.DeprecationIssue, category, target string, in []deprecationIssueWire) []types.DeprecationIssue {
+	for _, w := range in {
+		out = append(out, deprecationIssueFromWire(category, target, w))
+	}
+	return out
+}
+
+// appendKeyedDeprecationIssues flattens a category whose cluster
+// envelope is keyed by resource name (index, data stream, template,
+// ILM policy). The map key becomes Target.
+func appendKeyedDeprecationIssues(out []types.DeprecationIssue, category string, in map[string][]deprecationIssueWire) []types.DeprecationIssue {
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, w := range in[k] {
+			out = append(out, deprecationIssueFromWire(category, k, w))
+		}
+	}
+	return out
+}
+
+func deprecationIssueFromWire(category, target string, w deprecationIssueWire) types.DeprecationIssue {
+	issue := types.DeprecationIssue{
+		Category:                    category,
+		Target:                      target,
+		Level:                       w.Level,
+		Message:                     w.Message,
+		URL:                         w.URL,
+		Details:                     w.Details,
+		ResolveDuringRollingUpgrade: w.ResolveDuringRollingUpgrade,
+	}
+	if len(w.Meta) > 0 && string(w.Meta) != "null" {
+		issue.Meta = string(w.Meta)
+	}
+	return issue
+}

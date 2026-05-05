@@ -24,6 +24,8 @@ func Command() *cli.Command {
 			drainCommand(),
 			uncordonCommand(),
 			tasksCommand(),
+			pendingTasksCommand(),
+			deprecationsCommand(),
 		},
 	}
 }
