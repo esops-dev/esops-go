@@ -9,7 +9,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	esopsconfig "github.com/esops-dev/esops-go/internal/config"
+	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 )
 
 func useContextCommand() *cli.Command {

@@ -18,6 +18,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 var (
@@ -58,6 +60,11 @@ func Init(level, format, logFile string) error {
 	mu.Lock()
 	logger = slog.New(newRedactingHandler(inner))
 	mu.Unlock()
+	// pkg/config emits Load-time safety warnings through its own slog
+	// hook (it can't import internal/* without breaking the public-API
+	// import guard). Plumb the same redacting handler through so those
+	// warnings honour --log-level / --log-format and stay redacted.
+	config.SetLogger(Logger())
 	return nil
 }
 

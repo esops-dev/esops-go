@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	esopsconfig "github.com/esops-dev/esops-go/internal/config"
+	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/output"
 )
 

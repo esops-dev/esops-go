@@ -18,7 +18,7 @@ import (
 	"github.com/esops-dev/esops-go/internal/cli/ops"
 	snapshotcmd "github.com/esops-dev/esops-go/internal/cli/snapshot"
 	"github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/internal/version"
 )

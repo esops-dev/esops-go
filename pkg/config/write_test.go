@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 func TestSetCurrentContext_replacesLinePreservingRest(t *testing.T) {

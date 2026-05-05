@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/esops-dev/esops-go/internal/config"
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 // apiKeyProvider sends "Authorization: ApiKey <encoded>" — Elasticsearch's

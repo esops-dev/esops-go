@@ -10,7 +10,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/signer"
 	"github.com/opensearch-project/opensearch-go/v4/signer/awsv2"
 
-	esopsconfig "github.com/esops-dev/esops-go/internal/config"
+	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 )
 
 // sigV4Provider signs requests with AWS SigV4 using the standard AWS

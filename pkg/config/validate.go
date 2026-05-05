@@ -96,7 +96,7 @@ var (
 )
 
 // authRules is the source of truth for per-type field policy. New auth
-// methods land as a single map entry plus a provider in internal/auth.
+// methods land as a single map entry plus a provider in pkg/internal/auth.
 var authRules = map[string]authRule{
 	"basic": {
 		required:  []authField{fieldUsername},

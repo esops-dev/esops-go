@@ -41,7 +41,7 @@ func TestPkgDoesNotImportInternal(t *testing.T) {
 	}
 }
 
-// TestClientutilOnlyConsumedByAdapters — internal/clientutil holds
+// TestClientutilOnlyConsumedByAdapters — pkg/internal/clientutil holds
 // HTTP plumbing private to the ES/OS adapters: BoundedReader,
 // ClassifyStatus, RunParallel, _cat decoders. Business logic must not
 // import it; it talks to the cluster only through capability
@@ -51,10 +51,10 @@ func TestPkgDoesNotImportInternal(t *testing.T) {
 // See CLAUDE.md §5 (the rule) and §11 (the test).
 func TestClientutilOnlyConsumedByAdapters(t *testing.T) {
 	root := repoRoot(t)
-	target := modulePath + "/internal/clientutil"
+	target := modulePath + "/pkg/internal/clientutil"
 	allowed := map[string]bool{
-		"internal/client/elasticsearch": true,
-		"internal/client/opensearch":    true,
+		"pkg/internal/client/elasticsearch": true,
+		"pkg/internal/client/opensearch":    true,
 	}
 
 	fset := token.NewFileSet()
@@ -76,7 +76,7 @@ func TestClientutilOnlyConsumedByAdapters(t *testing.T) {
 	})
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("internal/clientutil should only be imported by ES/OS adapters (CLAUDE.md §5):\n  %s",
+		t.Fatalf("pkg/internal/clientutil should only be imported by ES/OS adapters (CLAUDE.md §5):\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }

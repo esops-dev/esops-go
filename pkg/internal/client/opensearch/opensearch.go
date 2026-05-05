@@ -20,9 +20,9 @@ import (
 	os "github.com/opensearch-project/opensearch-go/v4"
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
-	"github.com/esops-dev/esops-go/internal/auth"
+	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	esopsclient "github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/internal/clientutil"
+	"github.com/esops-dev/esops-go/pkg/internal/clientutil"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

@@ -11,20 +11,49 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
-
-	"github.com/esops-dev/esops-go/internal/logging"
 )
+
+// loggerMu guards the package-level logger that emits safety warnings
+// during Load. It defaults to a discard handler so library consumers
+// (esops-doctor, future commercial product) don't see stray output; the
+// esops CLI installs the process-wide logger via SetLogger during init.
+var (
+	loggerMu sync.RWMutex
+	logger   = slog.New(slog.NewTextHandler(io.Discard, nil))
+)
+
+// SetLogger installs the slog.Logger used for safety warnings emitted
+// from Load (world-readable config + plaintext secret, plaintext
+// secrets in any mode). Passing nil resets to a discard handler.
+func SetLogger(l *slog.Logger) {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+	if l == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		return
+	}
+	logger = l
+}
+
+func getLogger() *slog.Logger {
+	loggerMu.RLock()
+	defer loggerMu.RUnlock()
+	return logger
+}
 
 // Config is the parsed esops configuration file.
 type Config struct {
@@ -216,7 +245,7 @@ func checkSafety(path string, cfg Config) error {
 					"tighten permissions (chmod 600 %s) or set ESOPS_ALLOW_INSECURE_CONFIG=1 to override",
 				path, strings.Join(plaintextCtxs, ", "), path)
 		}
-		logging.Logger().Warn("config.insecure",
+		getLogger().Warn("config.insecure",
 			"path", path,
 			"contexts", plaintextCtxs,
 			"hint", "world-readable with plaintext secrets; override via ESOPS_ALLOW_INSECURE_CONFIG=1",
@@ -225,7 +254,7 @@ func checkSafety(path string, cfg Config) error {
 	}
 
 	if len(plaintextCtxs) > 0 && os.Getenv("ESOPS_ALLOW_PLAINTEXT_SECRETS") != "1" {
-		logging.Logger().Warn("config.plaintext_secrets",
+		getLogger().Warn("config.plaintext_secrets",
 			"path", path,
 			"contexts", plaintextCtxs,
 			"hint", "use ${env:VAR} indirection, or set ESOPS_ALLOW_PLAINTEXT_SECRETS=1 to silence",
