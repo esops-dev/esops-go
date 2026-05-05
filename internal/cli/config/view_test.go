@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -85,21 +86,50 @@ func TestBuildViewDoc_showSecretsPreservesValues(t *testing.T) {
 	}
 }
 
-func TestBuildViewDoc_preservesIndirectionRefs(t *testing.T) {
-	// Indirection refs are pointers, not secrets — leave them visible
-	// in both modes so operators can audit config shape without the
-	// secret value leaking.
-	for _, showSecrets := range []bool{false, true} {
-		doc := mustBuild(t, sampleConfig(), viewOptions{all: true, showSecrets: showSecrets})
-		auth := doc.Contexts["staging-eu"].Auth
-		if auth == nil {
-			t.Fatalf("showSecrets=%v: expected auth on staging-eu", showSecrets)
-		}
-		want := "${env:ESOPS_STAGING_API_KEY}"
-		if auth.APIKey != want {
-			t.Errorf("showSecrets=%v: api_key = %q, want %q (indirection ref preserved)",
-				showSecrets, auth.APIKey, want)
-		}
+func TestBuildViewDoc_preservesIndirectionRefsWhenRedacted(t *testing.T) {
+	// With showSecrets=false, indirection refs stay literal — they're
+	// pointers, not secrets, and an operator auditing config shape needs
+	// to see them.
+	t.Setenv("ESOPS_STAGING_API_KEY", "must-not-leak")
+	doc := mustBuild(t, sampleConfig(), viewOptions{all: true})
+	auth := doc.Contexts["staging-eu"].Auth
+	if auth == nil {
+		t.Fatal("expected auth on staging-eu")
+	}
+	want := "${env:ESOPS_STAGING_API_KEY}"
+	if auth.APIKey != want {
+		t.Errorf("api_key = %q, want %q (indirection ref preserved when redacted)", auth.APIKey, want)
+	}
+}
+
+func TestBuildViewDoc_showSecretsResolvesIndirection(t *testing.T) {
+	// With showSecrets=true the operator wants to see what's actually
+	// going to be sent on the wire, so indirection resolves before
+	// rendering.
+	t.Setenv("ESOPS_STAGING_API_KEY", "resolved-value")
+	doc := mustBuild(t, sampleConfig(), viewOptions{all: true, showSecrets: true})
+	auth := doc.Contexts["staging-eu"].Auth
+	if auth == nil {
+		t.Fatal("expected auth on staging-eu")
+	}
+	if auth.APIKey != "resolved-value" {
+		t.Errorf("api_key = %q, want %q (resolved env var)", auth.APIKey, "resolved-value")
+	}
+}
+
+func TestBuildViewDoc_showSecretsFallsBackOnResolutionFailure(t *testing.T) {
+	// A single unresolvable indirection — unset env var, missing file,
+	// locked keyring — must not blank the whole listing. Fall back to
+	// the literal reference so the operator can see what's broken.
+	_ = os.Unsetenv("ESOPS_STAGING_API_KEY")
+	doc := mustBuild(t, sampleConfig(), viewOptions{all: true, showSecrets: true})
+	auth := doc.Contexts["staging-eu"].Auth
+	if auth == nil {
+		t.Fatal("expected auth on staging-eu")
+	}
+	want := "${env:ESOPS_STAGING_API_KEY}"
+	if auth.APIKey != want {
+		t.Errorf("api_key = %q, want %q (literal preserved on resolution failure)", auth.APIKey, want)
 	}
 }
 

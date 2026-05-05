@@ -54,7 +54,7 @@ contexts:
     protection: none
 ```
 
-See `config/esops.example.yaml` for all auth types (`api_key`, `bearer`, `mtls`, `sigv4`), TLS options, and protection tiers.
+See [auth.md](./auth.md) for all auth types (`api_key`, `bearer`, `mtls`, `sigv4`), TLS options, secret indirection, and the safety rules around plaintext credentials. `config/esops.example.yaml` has copy-paste YAML stanzas for the same set.
 
 ---
 

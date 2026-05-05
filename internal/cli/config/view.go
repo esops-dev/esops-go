@@ -148,6 +148,11 @@ func parseViewFormat(s string) (output.Format, error) {
 // references (${env:...}, ${file:...}, ${keyring:...}) are preserved
 // as-is — they're pointers, not secrets themselves, and hiding them
 // removes information an operator needs to verify config shape.
+// When opts.showSecrets is true, indirection references are resolved
+// before rendering so the operator sees the actual credential a
+// command would send. A failed resolution (unset env var, missing
+// file, locked keyring) leaves the literal reference in place so a
+// single broken context never blanks the whole listing.
 //
 // Context filtering: by default only the selected context (opts.selected,
 // falling back to cfg.CurrentContext) is included. opts.all restores
@@ -224,6 +229,11 @@ func projectContext(c esopsconfig.Context, showSecrets bool) viewContext {
 func projectAuth(a esopsconfig.Auth, showSecrets bool) *viewAuth {
 	if a == (esopsconfig.Auth{}) {
 		return nil
+	}
+	if showSecrets {
+		if resolved, err := esopsconfig.ResolveAuth(a); err == nil {
+			a = resolved
+		}
 	}
 	return &viewAuth{
 		Type:       a.Type,

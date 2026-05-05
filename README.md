@@ -17,7 +17,7 @@ The older the ES/OS cluster gets, the more often you will find yourself typing c
 
 * Adaptive, resumable reindexing (coming soon).
 * Scriptable output in table, JSON, NDJSON, or YAML with stable schemas and standard exit codes.
-* kubectl-style named contexts, with protection tiers (`none` / `staging` / `prod`). Destructive ops on `prod` require `--i-know-this-is-prod`; dry-runs and read-only commands are always allowed.
+* kubectl-style named contexts, with protection tiers (`none` / `prod`). Destructive ops on `prod` require `--i-know-this-is-prod`; dry-runs and read-only commands are always allowed.
 * Secrets loaded securely via indirection (`${env:VAR}`, `${file:...}`, `${keyring:...}`); inline plaintext secrets are refused and auth headers are redacted from logs.
 * Pipeline-friendly by design: `CI=true` auto-enables non-interactive mode and JSON logging. Stdout is pure data; stderr gets logs and progress. NDJSON streams large results without buffering.
 * One-command diagnostics: `esops ops diag` bundles health, shards, hot threads, tasks, ILM/ISM, snapshots, etc. into a credential-free tarball: perfect for support tickets.
@@ -127,6 +127,7 @@ See [docs/](docs/) for per-command reference.
 - [docs/snapshot.md](docs/snapshot.md) — snapshot and repository inspection
 - [docs/config.md](docs/config.md) — config schema, contexts, secrets
 - [docs/completion.md](docs/completion.md) — shell completion
+- [docs/auth.md](docs/auth.md) — Authentication
 
 ## Contributing
 

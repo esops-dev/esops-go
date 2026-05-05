@@ -3,9 +3,7 @@
 // The file shape matches config/esops.example.yaml: a set of named
 // `contexts`, a `current-context` pointer, and `defaults` that contexts
 // inherit. Secret indirection (${env:VAR}, ${file:...}, ${keyring:...})
-// is applied at load time. Currently only ${env:...} is implemented;
-// the other prefixes return an explicit error so users aren't silently
-// passed a literal `${file:/...}` string to an auth header.
+// is resolved when ResolveContext is called.
 package config
 
 import (
@@ -25,6 +23,7 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+	"github.com/zalando/go-keyring"
 )
 
 // loggerMu guards the package-level logger that emits safety warnings
@@ -340,14 +339,33 @@ func (cfg Config) ResolveContext(name string) (string, Context, error) {
 // secretRef matches ${env:VAR}, ${file:/path}, ${keyring:svc/acct}.
 var secretRef = regexp.MustCompile(`^\$\{([a-z]+):([^}]+)\}$`)
 
-func resolveContextSecrets(c *Context) error {
-	for _, field := range []*string{&c.Auth.Password, &c.Auth.APIKey, &c.Auth.Token} {
+// ResolveAuth returns a copy of a with password, api_key, and token
+// indirection references resolved (${env:VAR}, ${file:/path},
+// ${keyring:svc/acct}). Literal values pass through unchanged. The
+// first failed resolution short-circuits and is returned to the caller
+// — partial resolution is never returned.
+//
+// Exposed for callers that want to render or transmit resolved
+// credentials without reaching for ResolveContext (which also merges
+// defaults). The CLI's `config view --show-secrets` is the canonical
+// consumer.
+func ResolveAuth(a Auth) (Auth, error) {
+	for _, field := range []*string{&a.Password, &a.APIKey, &a.Token} {
 		v, err := resolveOne(*field)
 		if err != nil {
-			return err
+			return Auth{}, err
 		}
 		*field = v
 	}
+	return a, nil
+}
+
+func resolveContextSecrets(c *Context) error {
+	resolved, err := ResolveAuth(c.Auth)
+	if err != nil {
+		return err
+	}
+	c.Auth = resolved
 	return nil
 }
 
@@ -364,9 +382,55 @@ func resolveOne(v string) (string, error) {
 			return "", fmt.Errorf("environment variable %q is not set", arg)
 		}
 		return val, nil
-	case "file", "keyring":
-		return "", fmt.Errorf("${%s:...} indirection is not implemented yet", scheme)
+	case "file":
+		// #nosec G304 -- arg is the operator's chosen secret-file path from their own config.
+		data, err := os.ReadFile(arg)
+		if err != nil {
+			return "", fmt.Errorf("reading secret file %q: %w", arg, err)
+		}
+		warnIfWorldReadable(arg)
+		return strings.TrimRight(string(data), "\r\n"), nil
+	case "keyring":
+		service, account, ok := strings.Cut(arg, "/")
+		if !ok || service == "" || account == "" {
+			return "", fmt.Errorf("keyring reference %q must be in the form service/account", arg)
+		}
+		val, err := keyring.Get(service, account)
+		if err != nil {
+			return "", fmt.Errorf("reading keyring entry %q: %w", arg, err)
+		}
+		return val, nil
 	default:
 		return "", fmt.Errorf("unknown secret indirection scheme %q", scheme)
 	}
+}
+
+// warnIfWorldReadable emits a single slog warning when path's mode bits
+// have the world-read bit set, unless the operator has opted out via
+// ESOPS_ALLOW_INSECURE_CONFIG=1. The check never refuses — Kubernetes
+// and Docker secret mounts default to mode 0644, so refusing would
+// break the most common production setup. The warning still flags
+// genuine permission mistakes (e.g. a developer dropping a token into
+// ~/secrets without tightening it). Skipped on Windows for the same
+// reason as the config-file check: os.Stat's mode bits don't reflect
+// real ACLs there.
+func warnIfWorldReadable(path string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if os.Getenv("ESOPS_ALLOW_INSECURE_CONFIG") == "1" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if info.Mode().Perm()&0o004 == 0 {
+		return
+	}
+	getLogger().Warn("config.secret_file_world_readable",
+		"path", path,
+		"mode", fmt.Sprintf("%#o", info.Mode().Perm()),
+		"hint", "tighten with chmod 0600 (k8s/docker secret mounts can be ignored; set ESOPS_ALLOW_INSECURE_CONFIG=1 to silence)",
+	)
 }
