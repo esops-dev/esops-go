@@ -702,6 +702,41 @@ type DeprecationInspector interface {
 	Deprecations(ctx context.Context, req types.DeprecationsRequest) ([]types.DeprecationIssue, error)
 }
 
+// DocumentInspector wraps GET /<index>/_search — restricted to the
+// "list every document, optionally filtered by ID" shape so the
+// capability stays a read-only window onto operator-managed metadata
+// indices (esops-doctor waivers, annotations, config) rather than a
+// general-purpose search client. The endpoint envelope
+// (`{"hits":{"hits":[{_id, _source, _version, _seq_no}, ...]}}`) is
+// identical on ES and OS, so one capability covers both dialects.
+//
+// Read-only by construction: there is no DocumentWriter or
+// DocumentDeleter sibling on this interface, and we do not plan to
+// add one. If a write surface ever lands it goes on a separate
+// capability so a downstream "no mutating capability imports" guard
+// (esops-doctor's CI) stays a single grep.
+//
+// Documents returns the matching set in deterministic id-sorted order
+// so a captured slice is stable across runs. DocumentsStream walks
+// the cluster's hits[] one record at a time and yields each — for
+// the typical operator-managed index this barely matters, but the
+// streaming contract mirrors IndicesStream/AliasesStream so a
+// thousand-waiver index does not have to be buffered.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the cluster surface ever stops exposing
+//     /_search at the shape we use (so doctor's translation to
+//     ErrProbeNotApplicable keeps working unchanged)
+//   - generic wrapped error on 4xx/5xx with the cluster's body in
+//     the message (typical case: a 404 when the requested index
+//     does not exist)
+type DocumentInspector interface {
+	Documents(ctx context.Context, req types.DocumentListRequest) ([]types.Document, error)
+	DocumentsStream(ctx context.Context, req types.DocumentListRequest, yield func(types.Document) error) error
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -745,4 +780,5 @@ type Client struct {
 	TasksCancel         TasksCanceller
 	PendingTasks        PendingTasksInspector
 	Deprecations        DeprecationInspector
+	Documents           DocumentInspector
 }

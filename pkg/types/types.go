@@ -2320,3 +2320,42 @@ type DeprecationIssue struct {
 	ResolveDuringRollingUpgrade bool   `json:"resolve_during_rolling_upgrade,omitempty" yaml:"resolve_during_rolling_upgrade,omitempty"`
 	Meta                        string `json:"meta,omitempty"                           yaml:"meta,omitempty"`
 }
+
+// DocumentListRequest narrows a DocumentInspector.Documents call. Index
+// is the literal index name (no patterns — DocumentInspector is the
+// "read operator-managed metadata from a known index" capability, not
+// a general search client). IDs optionally restricts to the given
+// document IDs; an empty slice returns every document in the index.
+//
+// The shape is deliberately small. A full DSL surface would push the
+// capability towards "general-purpose search" — exactly what
+// CLAUDE.md §3 / §15 ("do not invent a lowest-common-denominator")
+// warns against. Operator-managed metadata indices (esops-doctor
+// waivers, annotations, config) are the target use case; they fit in
+// a single 10k-document _search and do not need scrolling.
+type DocumentListRequest struct {
+	Index string   // required; literal index name, no patterns
+	IDs   []string // optional; empty = every document in the index
+}
+
+// Document is the neutral view of one cluster-side document. Source is
+// the raw `_source` body the cluster returned, kept verbatim — the
+// neutral domain types stop at the document boundary because the
+// schema of operator-managed bodies (waivers, annotations, config) is
+// the consumer's contract, not esops's. Callers decode Source into
+// whatever shape they own.
+//
+// Index is echoed so a captured slice is interpretable on its own
+// (the same way IndexSettings carries Index). Version and
+// SequenceNumber are surfaced because consumers that write back into
+// the same index need them for optimistic concurrency control via
+// `if_seq_no`/`if_primary_term` — DocumentInspector itself never
+// writes, but exposing the values keeps a future writer capability
+// from forcing a re-read.
+type Document struct {
+	Index          string          `json:"index"            yaml:"index"`
+	ID             string          `json:"id"               yaml:"id"`
+	Source         json.RawMessage `json:"source,omitempty" yaml:"source,omitempty"`
+	Version        int64           `json:"version,omitempty" yaml:"version,omitempty"`
+	SequenceNumber int64           `json:"sequence_number,omitempty" yaml:"sequence_number,omitempty"`
+}

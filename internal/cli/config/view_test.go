@@ -66,6 +66,7 @@ func TestBuildViewDoc_redactsSecretsByDefault(t *testing.T) {
 	auth := doc.Contexts["local-os"].Auth
 	if auth == nil {
 		t.Fatal("expected auth block on local-os")
+		return
 	}
 	if auth.Password != redactionPlaceholder {
 		t.Errorf("password = %q, want %q (redaction default)", auth.Password, redactionPlaceholder)
@@ -80,6 +81,7 @@ func TestBuildViewDoc_showSecretsPreservesValues(t *testing.T) {
 	auth := doc.Contexts["local-os"].Auth
 	if auth == nil {
 		t.Fatal("expected auth block on local-os")
+		return
 	}
 	if auth.Password != "s3cret-plaintext" {
 		t.Errorf("password = %q, want the real plaintext value (show-secrets on)", auth.Password)
@@ -95,6 +97,7 @@ func TestBuildViewDoc_preservesIndirectionRefsWhenRedacted(t *testing.T) {
 	auth := doc.Contexts["staging-eu"].Auth
 	if auth == nil {
 		t.Fatal("expected auth on staging-eu")
+		return
 	}
 	want := "${env:ESOPS_STAGING_API_KEY}"
 	if auth.APIKey != want {
@@ -111,6 +114,7 @@ func TestBuildViewDoc_showSecretsResolvesIndirection(t *testing.T) {
 	auth := doc.Contexts["staging-eu"].Auth
 	if auth == nil {
 		t.Fatal("expected auth on staging-eu")
+		return
 	}
 	if auth.APIKey != "resolved-value" {
 		t.Errorf("api_key = %q, want %q (resolved env var)", auth.APIKey, "resolved-value")
@@ -126,6 +130,7 @@ func TestBuildViewDoc_showSecretsFallsBackOnResolutionFailure(t *testing.T) {
 	auth := doc.Contexts["staging-eu"].Auth
 	if auth == nil {
 		t.Fatal("expected auth on staging-eu")
+		return
 	}
 	want := "${env:ESOPS_STAGING_API_KEY}"
 	if auth.APIKey != want {
