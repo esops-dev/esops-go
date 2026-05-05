@@ -1718,6 +1718,130 @@ func hasDataRole(roles []string) bool {
 	return false
 }
 
+// nodesInfoJVMWire is the minimal slice of the /_nodes/jvm response we
+// care about. The full response carries vm name/version, GC collectors,
+// memory pools, and input arguments — none of which the heap_size rule
+// needs, so we don't decode them.
+type nodesInfoJVMWire struct {
+	Nodes map[string]struct {
+		Name string `json:"name"`
+		JVM  struct {
+			Mem struct {
+				HeapInitInBytes int64 `json:"heap_init_in_bytes"`
+				HeapMaxInBytes  int64 `json:"heap_max_in_bytes"`
+			} `json:"mem"`
+		} `json:"jvm"`
+	} `json:"nodes"`
+}
+
+// nodesStatsOSWire mirrors /_nodes/stats/os. Only os.mem.total_in_bytes
+// is surfaced today; CPU/load are already on /_cat/nodes via Nodes() and
+// adding them here would just duplicate signal at the cost of decode
+// time on a busy fleet.
+type nodesStatsOSWire struct {
+	Nodes map[string]struct {
+		Name string `json:"name"`
+		OS   struct {
+			Mem struct {
+				TotalInBytes int64 `json:"total_in_bytes"`
+			} `json:"mem"`
+		} `json:"os"`
+	} `json:"nodes"`
+}
+
+// NodeStats implements client.NodeStatsInspector. The cluster splits the
+// data this rule needs across two endpoints: configured -Xms/-Xmx live
+// on /_nodes/jvm (info), but the host's total physical memory is only
+// reported by /_nodes/stats/os — the info endpoint's os block carries
+// processor counts and arch but not memory totals. We fan out both calls
+// in parallel and merge by node ID; running them serially would double
+// the latency for no benefit.
+//
+// A node that appears in the info response but not in the stats response
+// (or vice versa) is still surfaced — fields the missing endpoint would
+// have filled stay at their zero value, matching CLAUDE.md §7's
+// "best-effort, missing column is information not failure" policy that
+// Nodes() already follows. Iteration is over the union of node IDs
+// rather than just one side.
+func (c *Client) NodeStats(ctx context.Context) ([]types.NodeStats, error) {
+	var (
+		info  nodesInfoJVMWire
+		stats nodesStatsOSWire
+	)
+
+	err := clientutil.RunParallel(
+		func() error {
+			ni := c.api.Nodes.Info
+			resp, err := c.api.Nodes.Info(
+				ni.WithContext(ctx),
+				ni.WithMetric("jvm"),
+			)
+			if err != nil {
+				return clientutil.ClassifyTransport(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if err := classifyResponse("nodes info jvm", resp.StatusCode, resp.Body); err != nil {
+				return err
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+				return errors.Join(errors.New("decoding nodes info jvm response"), err)
+			}
+			return nil
+		},
+		func() error {
+			ns := c.api.Nodes.Stats
+			resp, err := c.api.Nodes.Stats(
+				ns.WithContext(ctx),
+				ns.WithMetric("os"),
+			)
+			if err != nil {
+				return clientutil.ClassifyTransport(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if err := classifyResponse("nodes stats os", resp.StatusCode, resp.Body); err != nil {
+				return err
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+				return errors.Join(errors.New("decoding nodes stats os response"), err)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stable iteration order: alphabetic by node name. Both endpoints
+	// key the response by node ID rather than name, but the operator
+	// reads the table by name, so sort there.
+	out := make([]types.NodeStats, 0, len(info.Nodes))
+	seen := make(map[string]int, len(info.Nodes))
+	for id, n := range info.Nodes {
+		seen[id] = len(out)
+		out = append(out, types.NodeStats{
+			Name: n.Name,
+			JVM: types.NodeJVMStats{
+				Heap: types.NodeJVMHeap{
+					InitBytes: n.JVM.Mem.HeapInitInBytes,
+					MaxBytes:  n.JVM.Mem.HeapMaxInBytes,
+				},
+			},
+		})
+	}
+	for id, n := range stats.Nodes {
+		if idx, ok := seen[id]; ok {
+			out[idx].OS.TotalPhysicalMemoryBytes = n.OS.Mem.TotalInBytes
+			continue
+		}
+		out = append(out, types.NodeStats{
+			Name: n.Name,
+			OS:   types.NodeOSStats{TotalPhysicalMemoryBytes: n.OS.Mem.TotalInBytes},
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 // shrinkWire mirrors a /<source>/_shrink/<target> response. Both ES
 // and OS return the same envelope: acknowledged + shards_acknowledged
 // + index (the new target name, echoed back).
