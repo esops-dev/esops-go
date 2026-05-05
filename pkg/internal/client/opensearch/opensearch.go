@@ -2535,3 +2535,31 @@ func formatNodeFailure(f osapi.FailuresCause) string {
 		return prefix
 	}
 }
+
+// PendingTasks implements client.PendingTasksInspector. The OS v4 SDK
+// exposes a typed Cluster.PendingTasks helper whose response fields
+// line up with the cluster envelope; we copy across into the neutral
+// type and discard the cluster's `time_in_queue` human string (the
+// renderer formats from the millis value so YAML/JSON output stays
+// stable across cluster versions).
+func (c *Client) PendingTasks(ctx context.Context) ([]types.PendingTask, error) {
+	resp, err := c.api.Cluster.PendingTasks(ctx, nil)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		return nil, classifyResponseErr(err, status)
+	}
+	out := make([]types.PendingTask, 0, len(resp.Tasks))
+	for _, t := range resp.Tasks {
+		out = append(out, types.PendingTask{
+			InsertOrder:       int64(t.InsertOrder),
+			Priority:          t.Priority,
+			Source:            t.Source,
+			TimeInQueueMillis: int64(t.TimeInQueueMillis),
+			Executing:         t.Executing,
+		})
+	}
+	return out, nil
+}

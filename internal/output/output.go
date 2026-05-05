@@ -3255,3 +3255,116 @@ func humanRunningTime(ns int64) string {
 	}
 	return d.String()
 }
+
+// PendingTasks renders the master's pending cluster-state queue for
+// `ops pending-tasks`. Default table is the columns operators reach
+// for first when triaging a slow master (order, priority, in-queue,
+// executing, source). Wide adds the raw time-in-queue millis so
+// scripted thresholds don't have to re-parse a humanised duration.
+// JSON/YAML emit the neutral PendingTask shape unchanged.
+func PendingTasks(w io.Writer, tasks []types.PendingTask, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(tasks)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(tasks)
+	case FormatWide:
+		return pendingTasksTable(w, tasks, true)
+	case FormatTable, "":
+		return pendingTasksTable(w, tasks, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func pendingTasksTable(w io.Writer, tasks []types.PendingTask, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "ORDER\tPRIORITY\tIN_QUEUE\tIN_QUEUE_MS\tEXECUTING\tSOURCE")
+		for _, t := range tasks {
+			_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%t\t%s\n",
+				t.InsertOrder,
+				dashIfEmpty(t.Priority),
+				humanDuration(t.TimeInQueueMillis),
+				t.TimeInQueueMillis,
+				t.Executing,
+				dashIfEmpty(t.Source),
+			)
+		}
+	} else {
+		_, _ = fmt.Fprintln(tw, "ORDER\tPRIORITY\tIN_QUEUE\tEXECUTING\tSOURCE")
+		for _, t := range tasks {
+			_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%t\t%s\n",
+				t.InsertOrder,
+				dashIfEmpty(t.Priority),
+				humanDuration(t.TimeInQueueMillis),
+				t.Executing,
+				dashIfEmpty(t.Source),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// Deprecations renders the cluster's pre-upgrade lint findings for
+// `ops deprecations`. Default table is one row per issue with the
+// columns operators reach for when triaging an upgrade (level,
+// category, target, message). Wide adds the docs URL, the cluster's
+// resolve-during-rolling-upgrade flag, and the per-issue details.
+// JSON/YAML emit the neutral DeprecationIssue slice unchanged.
+//
+// The adapter sorts by category → target → message before returning,
+// so a captured listing is stable across runs without re-sorting here.
+func Deprecations(w io.Writer, issues []types.DeprecationIssue, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(issues)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(issues)
+	case FormatWide:
+		return deprecationsTable(w, issues, true)
+	case FormatTable, "":
+		return deprecationsTable(w, issues, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func deprecationsTable(w io.Writer, issues []types.DeprecationIssue, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "LEVEL\tCATEGORY\tTARGET\tRESOLVE_DURING_RU\tMESSAGE\tURL\tDETAILS")
+		for _, i := range issues {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
+				dashIfEmpty(i.Level),
+				dashIfEmpty(i.Category),
+				dashIfEmpty(i.Target),
+				i.ResolveDuringRollingUpgrade,
+				dashIfEmpty(i.Message),
+				dashIfEmpty(i.URL),
+				dashIfEmpty(i.Details),
+			)
+		}
+	} else {
+		_, _ = fmt.Fprintln(tw, "LEVEL\tCATEGORY\tTARGET\tMESSAGE")
+		for _, i := range issues {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				dashIfEmpty(i.Level),
+				dashIfEmpty(i.Category),
+				dashIfEmpty(i.Target),
+				dashIfEmpty(i.Message),
+			)
+		}
+	}
+	return tw.Flush()
+}

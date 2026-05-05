@@ -534,12 +534,12 @@ type SnapshotPruner interface {
 	DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error)
 }
 
-// ClusterSettingsManager wraps GET/PUT /_cluster/settings — the
-// cluster-level settings surface behind `ops drain` and `ops uncordon`.
-// The capability is intentionally narrow: `ops drain` and `ops uncordon`
-// only need to read and modify `cluster.routing.allocation.exclude._name`,
-// so the surface here is a typed view over that single setting rather
-// than the full nested-vs-flat dance every other key would require.
+// ClusterSettingsInspector wraps GET /_cluster/settings — the read-only
+// half of the cluster-level settings surface. Split out from
+// ClusterSettingsManager so read-only consumers (esops-doctor's hygiene
+// rules detecting cluster-settings drift) can depend on the read
+// surface alone, without pulling in a type whose name carries
+// PutAllocationExclude.
 //
 // GetClusterSettings reads the persistent and transient exclude._name
 // lists; a missing key returns an empty slice rather than an error
@@ -547,6 +547,26 @@ type SnapshotPruner interface {
 // failure). Defaults are not surfaced: the exclude._name default is the
 // empty list and a default-only response is indistinguishable from
 // "nothing set", which is exactly what the empty-slice convention models.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type ClusterSettingsInspector interface {
+	GetClusterSettings(ctx context.Context) (types.ClusterSettingsView, error)
+}
+
+// ClusterSettingsManager wraps GET/PUT /_cluster/settings — the
+// cluster-level settings surface behind `ops drain` and `ops uncordon`.
+// The capability is intentionally narrow: `ops drain` and `ops uncordon`
+// only need to read and modify `cluster.routing.allocation.exclude._name`,
+// so the surface here is a typed view over that single setting rather
+// than the full nested-vs-flat dance every other key would require.
+//
+// The read half lives on ClusterSettingsInspector and is embedded here
+// so the manager IS-A inspector for callers that need both, while
+// read-only consumers can take a dependency on the inspector alone.
 //
 // PutAllocationExclude installs the requested name list. An empty
 // Names slice clears the setting by sending JSON null on the wire —
@@ -562,7 +582,7 @@ type SnapshotPruner interface {
 //     name is misspelled — surfaced verbatim so the operator sees the
 //     cluster's own reason)
 type ClusterSettingsManager interface {
-	GetClusterSettings(ctx context.Context) (types.ClusterSettingsView, error)
+	ClusterSettingsInspector
 	PutAllocationExclude(ctx context.Context, req types.ClusterAllocationExcludeUpdate) (types.ClusterSettingsUpdateResult, error)
 }
 
@@ -638,44 +658,91 @@ type TasksCanceller interface {
 	CancelTasks(ctx context.Context, req types.TasksCancelRequest) (types.TasksCancelResult, error)
 }
 
+// PendingTasksInspector wraps GET /_cluster/pending_tasks — the master
+// queue of cluster-state changes that have been accepted but not yet
+// applied. ClusterHealth.NumberOfPendingTasks gives the count; this
+// capability returns the per-task breakdown (priority, source,
+// time-in-queue, executing-vs-queued) a hygiene rule needs to tell a
+// transient burst from a stuck master.
+//
+// Endpoint shape is identical on ES and OS (`tasks: [...]` array of
+// objects with insert_order/priority/source/time_in_queue_millis/
+// executing), so one capability covers both dialects.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type PendingTasksInspector interface {
+	PendingTasks(ctx context.Context) ([]types.PendingTask, error)
+}
+
+// DeprecationInspector wraps GET /_migration/deprecations — the
+// pre-upgrade lint that reports cluster, node, index, ML, data-stream,
+// and template settings that will not survive the next major version.
+// ES-only: OpenSearch has no equivalent endpoint, so the OS adapter
+// returns ErrUnsupported on every method, mirroring the ILM/ISM split.
+//
+// The cluster groups issues by category (cluster_settings,
+// node_settings, index_settings keyed by index name, ml_settings,
+// data_streams, templates, ilm_policies); the adapter flattens those
+// into a single []DeprecationIssue tagged with Category and Target so
+// a rule consumer can scan for "every critical issue cluster-wide"
+// without switching on category first.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the adapter is the OS one
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a 404 on /_migration/deprecations against
+//     an ES build that omits the migration plugin)
+type DeprecationInspector interface {
+	Deprecations(ctx context.Context, req types.DeprecationsRequest) ([]types.DeprecationIssue, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
 // on *Client directly — composing (rather than embedding) the interfaces
 // is what makes that a compile-time constraint instead of a convention.
 type Client struct {
-	Info              types.ClusterInfo
-	Health            HealthInspector
-	Shards            ShardInspector
-	Nodes             NodeInspector
-	NodeStats         NodeStatsInspector
-	Indices           IndexInspector
-	IndexState        IndexStateChanger
-	IndexOptimize     IndexOptimizer
-	IndexRollover     IndexRollover
-	IndexShrink       IndexShrinker
-	IndexSettings     IndexSettingsInspector
-	IndexSettingsSet  IndexSettingsUpdater
-	IndexTemplateGet  IndexTemplateInspector
-	IndexTemplateSet  IndexTemplateUpdater
-	AliasInspect      AliasInspector
-	AliasUpdate       AliasUpdater
-	AllocationExplain AllocationExplainer
-	Security          SecurityAuditor
-	Diag              ClusterDiagnoser
-	HotThreads        HotThreadsInspector
-	Reroute           RerouteExecutor
-	ILM               ILMManager
-	ISM               ISMManager
-	Snapshot          SnapshotInspector
-	SnapshotCreate    SnapshotCreator
-	SnapshotVerify    SnapshotVerifier
-	SnapshotRestore   SnapshotRestorer
-	SnapshotPrune     SnapshotPruner
-	SnapshotRepoMgr   SnapshotRepositoryManager
-	Recovery          RecoveryInspector
-	ClusterSettings   ClusterSettingsManager
-	VotingExclusion   VotingExclusionManager
-	Tasks             TasksInspector
-	TasksCancel       TasksCanceller
+	Info                types.ClusterInfo
+	Health              HealthInspector
+	Shards              ShardInspector
+	Nodes               NodeInspector
+	NodeStats           NodeStatsInspector
+	Indices             IndexInspector
+	IndexState          IndexStateChanger
+	IndexOptimize       IndexOptimizer
+	IndexRollover       IndexRollover
+	IndexShrink         IndexShrinker
+	IndexSettings       IndexSettingsInspector
+	IndexSettingsSet    IndexSettingsUpdater
+	IndexTemplateGet    IndexTemplateInspector
+	IndexTemplateSet    IndexTemplateUpdater
+	AliasInspect        AliasInspector
+	AliasUpdate         AliasUpdater
+	AllocationExplain   AllocationExplainer
+	Security            SecurityAuditor
+	Diag                ClusterDiagnoser
+	HotThreads          HotThreadsInspector
+	Reroute             RerouteExecutor
+	ILM                 ILMManager
+	ISM                 ISMManager
+	Snapshot            SnapshotInspector
+	SnapshotCreate      SnapshotCreator
+	SnapshotVerify      SnapshotVerifier
+	SnapshotRestore     SnapshotRestorer
+	SnapshotPrune       SnapshotPruner
+	SnapshotRepoMgr     SnapshotRepositoryManager
+	Recovery            RecoveryInspector
+	ClusterSettings     ClusterSettingsManager
+	ClusterSettingsRead ClusterSettingsInspector
+	VotingExclusion     VotingExclusionManager
+	Tasks               TasksInspector
+	TasksCancel         TasksCanceller
+	PendingTasks        PendingTasksInspector
+	Deprecations        DeprecationInspector
 }

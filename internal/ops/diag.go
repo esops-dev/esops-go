@@ -80,6 +80,10 @@ var baseCollectors = []diagCollector{
 	{Name: "ilm_policies", Path: "/_ilm/policy", Dialect: types.DialectElasticsearch},
 	{Name: "ilm_status", Path: "/_ilm/status", Dialect: types.DialectElasticsearch},
 	{Name: "ism_policies", Path: "/_plugins/_ism/policies", Dialect: types.DialectOpenSearch},
+	// Pre-upgrade lint: useful in any post-incident review where the
+	// question is "was this cluster about to fall off a deprecation
+	// cliff anyway?". ES-only — OS has no equivalent endpoint.
+	{Name: "migration_deprecations", Path: "/_migration/deprecations", Dialect: types.DialectElasticsearch},
 }
 
 // optionalCollectors gate the expensive or policy-sensitive captures.
