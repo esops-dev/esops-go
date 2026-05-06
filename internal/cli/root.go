@@ -15,6 +15,7 @@ import (
 	"github.com/esops-dev/esops-go/internal/cli/completion"
 	configcmd "github.com/esops-dev/esops-go/internal/cli/config"
 	indexcmd "github.com/esops-dev/esops-go/internal/cli/index"
+	migratecmd "github.com/esops-dev/esops-go/internal/cli/migrate"
 	"github.com/esops-dev/esops-go/internal/cli/ops"
 	snapshotcmd "github.com/esops-dev/esops-go/internal/cli/snapshot"
 	"github.com/esops-dev/esops-go/pkg/client"
@@ -38,6 +39,7 @@ func Run(ctx context.Context, args []string) error {
 			ops.Command(),
 			indexcmd.Command(),
 			snapshotcmd.Command(),
+			migratecmd.Command(),
 			configcmd.Command(),
 		},
 	}
