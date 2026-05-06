@@ -1040,13 +1040,22 @@ func classifyResponse(op string, status int, body io.Reader) error {
 // returns a JSON object keyed by username; we decode the value side
 // into this struct. Metadata._reserved flags built-in users (elastic,
 // kibana_system, etc.) that ship with an ES distribution.
+//
+// PasswordChangedAt is populated only when the cluster surfaces the
+// field — ES does not advertise it on every supported version, so a
+// missing value is "the cluster did not tell us" rather than "the
+// password is at its shipped default". Doctor's default-credentials
+// rule treats a populated value as evidence the password has been
+// rotated; an empty value falls through to whatever other signal the
+// rule has.
 type securityUserWire struct {
-	Username string   `json:"username"`
-	Roles    []string `json:"roles"`
-	FullName string   `json:"full_name"`
-	Email    string   `json:"email"`
-	Enabled  bool     `json:"enabled"`
-	Metadata struct {
+	Username          string   `json:"username"`
+	Roles             []string `json:"roles"`
+	FullName          string   `json:"full_name"`
+	Email             string   `json:"email"`
+	Enabled           bool     `json:"enabled"`
+	PasswordChangedAt string   `json:"password_changed_at"`
+	Metadata          struct {
 		Reserved bool `json:"_reserved"`
 	} `json:"metadata"`
 }
@@ -1181,12 +1190,13 @@ func (c *Client) fetchESUsers(ctx context.Context) ([]types.SecurityUser, string
 			username = name
 		}
 		out = append(out, types.SecurityUser{
-			Username: username,
-			Enabled:  u.Enabled,
-			Reserved: u.Metadata.Reserved,
-			Roles:    u.Roles,
-			FullName: u.FullName,
-			Email:    u.Email,
+			Username:          username,
+			Enabled:           u.Enabled,
+			Reserved:          u.Metadata.Reserved,
+			Roles:             u.Roles,
+			FullName:          u.FullName,
+			Email:             u.Email,
+			PasswordChangedAt: u.PasswordChangedAt,
 		})
 	}
 	return out, "", false, nil

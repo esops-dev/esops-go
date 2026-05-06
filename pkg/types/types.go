@@ -752,6 +752,16 @@ type SecurityUser struct {
 	BackendRoles []string `json:"backend_roles,omitempty"  yaml:"backend_roles,omitempty"`
 	FullName     string   `json:"full_name,omitempty"      yaml:"full_name,omitempty"`
 	Email        string   `json:"email,omitempty"          yaml:"email,omitempty"`
+	// PasswordChangedAt carries the cluster-reported timestamp of the
+	// user's last password change, when the cluster exposes it. Empty
+	// when the cluster does not surface the field — neither ES's
+	// /_security/user nor the OpenSearch security plugin's
+	// /_plugins/_security/api/internalusers expose this on every
+	// supported version, so a missing value is "the cluster did not
+	// tell us", not "never changed". Doctor's default-credentials rule
+	// uses a non-empty value as evidence that the password is no
+	// longer the shipped default.
+	PasswordChangedAt string `json:"password_changed_at,omitempty"  yaml:"password_changed_at,omitempty"`
 }
 
 // SecurityRole is the normalised view of a role definition. We surface
@@ -834,17 +844,45 @@ type SecurityAudit struct {
 }
 
 // TLSPosture is what the context's connection looks like from the
-// client's side. Not from the cluster — the cluster can't tell us
-// whether we set `insecure: true` locally. Scheme is derived from the
-// first configured URL; InsecureSkipVerify and CACertSet surface the
-// two config knobs that weaken or strengthen trust; AuthType and
-// ClientCertSet surface which credential the tool is presenting.
+// client's side. Scheme is derived from the first configured URL;
+// InsecureSkipVerify and CACertSet surface the two config knobs that
+// weaken or strengthen trust; AuthType and ClientCertSet surface which
+// credential the tool is presenting.
+//
+// TransportTLSEnabled / TransportTLSVerified are server-side fields —
+// distinct from the client-side fields above. They mirror what the
+// cluster reports about its own node-to-node transport TLS config and
+// are populated only by callers that consulted TransportTLSInspector
+// (esops-doctor's node_to_node_encryption rule). Left unset (omitempty)
+// when the caller didn't fan out to the cluster — the rest of the
+// posture is meaningful without them.
 type TLSPosture struct {
 	Scheme             string `json:"scheme"                       yaml:"scheme"`
 	InsecureSkipVerify bool   `json:"insecure_skip_verify"         yaml:"insecure_skip_verify"`
 	CACertSet          bool   `json:"cacert_set"                   yaml:"cacert_set"`
 	AuthType           string `json:"auth_type"                    yaml:"auth_type"`
 	ClientCertSet      bool   `json:"client_cert_set"              yaml:"client_cert_set"`
+
+	TransportTLSEnabled  bool `json:"transport_tls_enabled,omitempty"  yaml:"transport_tls_enabled,omitempty"`
+	TransportTLSVerified bool `json:"transport_tls_verified,omitempty" yaml:"transport_tls_verified,omitempty"`
+}
+
+// TransportTLS is the cluster-side view of node-to-node transport TLS
+// posture, returned by TransportTLSInspector. Distinct from TLSPosture
+// because the latter mixes client-side connection facts (Scheme,
+// InsecureSkipVerify, …) that only the operator's config knows; this
+// type carries only what the cluster reports about itself, so an
+// inspector that reads /_nodes/settings has somewhere clean to put it.
+//
+// Enabled is true when every reachable node reports transport TLS as
+// enabled — homogeneity matters here, since one misconfigured node is
+// the exact case the rule has to flag, so we do not fudge a majority
+// vote into a green outcome. Verified mirrors the same all-or-nothing
+// aggregation over the verification-mode setting (ES) /
+// enforce_hostname_verification (OS).
+type TransportTLS struct {
+	Enabled  bool `json:"transport_tls_enabled"            yaml:"transport_tls_enabled"`
+	Verified bool `json:"transport_tls_verified,omitempty" yaml:"transport_tls_verified,omitempty"`
 }
 
 // HotThreadsRequest narrows a HotThreadsInspector.HotThreads call. A
@@ -2794,4 +2832,75 @@ type MigrationCutoverResult struct {
 	Acknowledged bool                   `json:"acknowledged"         yaml:"acknowledged"`
 	Steps        []MigrationCutoverStep `json:"steps"                yaml:"steps"`
 	Status       string                 `json:"status"               yaml:"status"`
+}
+
+// NodeBootstrap is the per-node view of bootstrap-check posture the
+// cluster exposes through its /_nodes/{jvm,process,os} endpoints. Used
+// by esops-doctor's bootstrap_memory_lock / file-descriptor /
+// max_map_count rules — these are the operator-tuned kernel and JVM
+// limits whose absence the cluster either refuses to start with (in
+// production mode) or warns loudly about (in development). Surfacing
+// them lets a hygiene rule flag the same misconfiguration the cluster
+// would have rejected at startup but didn't because the operator
+// flipped to single-node mode.
+//
+// Numeric fields are zero when the cluster did not report a value.
+// MaxMapCount in particular is only present on some cluster versions
+// (it's an OS-side reading the cluster does not always relay through
+// /_nodes); a zero value is "the cluster did not tell us", not "the
+// kernel says zero". BootstrapWarnings is a verbatim list of warning
+// strings the cluster surfaces (when it does — newer ES tucks them
+// behind /_migration/deprecations rather than /_nodes); empty when
+// the cluster reports a clean bootstrap or omits the field.
+type NodeBootstrap struct {
+	Name               string   `json:"name"                            yaml:"name"`
+	MlockallEnabled    bool     `json:"mlockall_enabled"                yaml:"mlockall_enabled"`
+	MaxFileDescriptors int64    `json:"max_file_descriptors,omitempty"  yaml:"max_file_descriptors,omitempty"`
+	MaxMapCount        int64    `json:"max_map_count,omitempty"         yaml:"max_map_count,omitempty"`
+	BootstrapWarnings  []string `json:"bootstrap_warnings,omitempty"    yaml:"bootstrap_warnings,omitempty"`
+}
+
+// ClusterSettingsFull is the un-narrowed view of /_cluster/settings —
+// the persistent and transient scopes plus the cluster's own defaults
+// when the caller asked for them. Distinct from ClusterSettingsView,
+// which is shaped narrowly for the drain/uncordon path's single
+// allocation-exclude key; rules that need to inspect any other key
+// (cluster.routing.allocation.awareness.attributes,
+// action.destructive_requires_name, script.allowed_types,
+// reindex.remote.whitelist, cluster.max_shards_per_node, …) need the
+// full envelope so they can drill in without each one demanding its
+// own typed view.
+//
+// Maps are flat-key strings → cluster-reported value when the caller
+// requested flat_settings=true (the default at the adapter layer).
+// Defaults is empty unless the caller asked for include_defaults; the
+// cluster's default tree is large and rarely interesting outside of
+// drift/awareness rules that explicitly want to compare against it.
+type ClusterSettingsFull struct {
+	Persistent map[string]any `json:"persistent"          yaml:"persistent"`
+	Transient  map[string]any `json:"transient"           yaml:"transient"`
+	Defaults   map[string]any `json:"defaults,omitempty"  yaml:"defaults,omitempty"`
+}
+
+// NodeAllocation is the per-node row /_cat/allocation reports — shard
+// count and disk breakdown keyed by node name. Distinct from Node
+// (which wraps /_cat/nodes) because /_cat/allocation also reports rows
+// for the cluster's "UNASSIGNED" pseudo-node, and because adding the
+// shard count to /_cat/nodes would force every Nodes() caller to pay
+// for a second cluster call they don't need.
+//
+// Used by esops-doctor's shard_count_per_node rule (the ~600-shard-
+// per-node ceiling). Numeric fields are bytes; zero when the cluster
+// did not report a value (coordinating-only nodes legitimately omit
+// the disk columns).
+type NodeAllocation struct {
+	Name             string `json:"name"                          yaml:"name"`
+	Shards           int    `json:"shards"                        yaml:"shards"`
+	DiskIndicesBytes int64  `json:"disk_indices_bytes,omitempty"  yaml:"disk_indices_bytes,omitempty"`
+	DiskUsedBytes    int64  `json:"disk_used_bytes,omitempty"     yaml:"disk_used_bytes,omitempty"`
+	DiskAvailBytes   int64  `json:"disk_avail_bytes,omitempty"    yaml:"disk_avail_bytes,omitempty"`
+	DiskTotalBytes   int64  `json:"disk_total_bytes,omitempty"    yaml:"disk_total_bytes,omitempty"`
+	DiskPercent      int    `json:"disk_percent,omitempty"        yaml:"disk_percent,omitempty"`
+	Host             string `json:"host,omitempty"                yaml:"host,omitempty"`
+	IP               string `json:"ip,omitempty"                  yaml:"ip,omitempty"`
 }
