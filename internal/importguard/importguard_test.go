@@ -17,8 +17,6 @@ const modulePath = "github.com/esops-dev/esops-go"
 // It must not transitively reach into internal/, otherwise the public
 // surface accidentally drags private implementation along with it
 // and a future internal/ rename becomes a downstream breaking change.
-//
-// See CLAUDE.md §5 (the rule) and §11 (the test).
 func TestPkgDoesNotImportInternal(t *testing.T) {
 	root := repoRoot(t)
 	pkgRoot := filepath.Join(root, "pkg")
@@ -36,7 +34,7 @@ func TestPkgDoesNotImportInternal(t *testing.T) {
 	})
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("pkg/ must not import internal/* (CLAUDE.md §5):\n  %s",
+		t.Fatalf("pkg/ must not import internal/*:\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }
@@ -47,8 +45,6 @@ func TestPkgDoesNotImportInternal(t *testing.T) {
 // import it; it talks to the cluster only through capability
 // interfaces in pkg/client. A business-logic file reaching for HTTP
 // error classification is the signal that a capability has a gap.
-//
-// See CLAUDE.md §5 (the rule) and §11 (the test).
 func TestClientutilOnlyConsumedByAdapters(t *testing.T) {
 	root := repoRoot(t)
 	target := modulePath + "/pkg/internal/clientutil"
@@ -76,7 +72,7 @@ func TestClientutilOnlyConsumedByAdapters(t *testing.T) {
 	})
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("pkg/internal/clientutil should only be imported by ES/OS adapters (CLAUDE.md §5):\n  %s",
+		t.Fatalf("pkg/internal/clientutil should only be imported by ES/OS adapters:\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }

@@ -1421,8 +1421,7 @@ func hasDataRole(roles []string) bool {
 //
 // A node that appears on one side but not the other is still surfaced;
 // fields the missing endpoint would have filled stay at their zero
-// value, matching CLAUDE.md §7's "missing column is information, not
-// failure" policy.
+// value — a missing column is information, not failure.
 func (c *Client) NodeStats(ctx context.Context) ([]types.NodeStats, error) {
 	var (
 		info  *osapi.NodesInfoResp

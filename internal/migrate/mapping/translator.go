@@ -1,7 +1,7 @@
 // Package mapping is the table-driven translator behind `esops migrate
 // plan`. It walks an index's mapping tree and emits one issue per
 // field whose type either changes shape across dialects (warn) or
-// blocks a reindex outright (block) — see CLAUDE.md §9.1.
+// blocks a reindex outright (block).
 //
 // Adding a new translation is a data change: append a row to the
 // rules table. Code does not branch on dialect names anywhere outside

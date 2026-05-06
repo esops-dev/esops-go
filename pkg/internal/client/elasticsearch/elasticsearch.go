@@ -274,8 +274,8 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 // IndicesStream implements client.IndexInspector. Decodes
 // /_cat/indices one JSON-array element at a time via json.Decoder and
 // hands each parsed row to yield. Lets `index list -o ndjson` print
-// the first row before the cluster has finished sending the last one
-// — see CLAUDE.md §6 for the contract.
+// the first row before the cluster has finished sending the last
+// one.
 func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yield func(types.Index) error) error {
 	ci := c.api.Cat.Indices
 	expand := "open,closed"
@@ -1760,10 +1760,9 @@ type nodesStatsOSWire struct {
 //
 // A node that appears in the info response but not in the stats response
 // (or vice versa) is still surfaced — fields the missing endpoint would
-// have filled stay at their zero value, matching CLAUDE.md §7's
-// "best-effort, missing column is information not failure" policy that
-// Nodes() already follows. Iteration is over the union of node IDs
-// rather than just one side.
+// have filled stay at their zero value. Best-effort: a missing column is
+// information, not failure (the same convention Nodes() uses). Iteration
+// is over the union of node IDs rather than just one side.
 func (c *Client) NodeStats(ctx context.Context) ([]types.NodeStats, error) {
 	var (
 		info  nodesInfoJVMWire
@@ -2277,8 +2276,8 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 // the cluster's top-level {"index1": {...}, "index2": {...}} envelope
 // one entry at a time via json.Decoder + Token, yielding each parsed
 // IndexSettings. Lets `settings get -o ndjson --include-defaults`
-// honour CLAUDE.md §6 on a busy cluster where the full nested-defaults
-// payload runs into multiple MB.
+// stream on a busy cluster where the full nested-defaults payload
+// runs into multiple MB.
 func (c *Client) GetSettingsStream(ctx context.Context, req types.IndexSettingsGetRequest, yield func(types.IndexSettings) error) error {
 	gs := c.api.Indices.GetSettings
 	opts := []func(*esapi.IndicesGetSettingsRequest){gs.WithContext(ctx)}

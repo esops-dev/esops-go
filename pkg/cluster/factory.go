@@ -54,7 +54,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		// so business code can call s.Client.ISM.* without nil-checks
 		// and get ErrUnsupported with a clear message when the
 		// operator targeted an ES context by mistake.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl, Documents: impl, Mappings: impl, RemoteReindex: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl}, nil
 	case types.DialectOpenSearch:
 		impl, err := osadapter.New(addrs, provider, transport, osadapter.Options{
 			MaxRetries:          cc.MaxRetries,
@@ -65,7 +65,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		}
 		// ILM is Elasticsearch-only — same stubbing pattern as the ES
 		// branch above for ISM.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}, Documents: impl, Mappings: impl, RemoteReindex: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}
@@ -140,9 +140,9 @@ func (unsupportedDeprecations) Deprecations(context.Context, types.DeprecationsR
 //
 // When the context sets max_in_flight > 0, the transport is wrapped
 // with a semaphore so concurrent in-flight requests for that context
-// stay bounded — CLAUDE.md §9: "prevents one runaway esops invocation
-// from starving shared clusters". The cap applies across the whole
-// process since one config.Context produces one client.
+// stay bounded — prevents one runaway esops invocation from starving
+// a shared cluster. The cap applies across the whole process since
+// one config.Context produces one client.
 func buildTransport(cc config.Context) (http.RoundTripper, error) {
 	tlsConf, err := buildTLSConfig(cc.Auth, cc.TLS)
 	if err != nil {

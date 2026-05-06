@@ -108,9 +108,10 @@ func Shards(w io.Writer, shards []types.Shard, f Format) error {
 }
 
 // IndicesNDJSONStream writes one Index per line to w as records arrive
-// from the supplied callback-shaped source. Honours CLAUDE.md §6: a
-// 20k-index cluster's first row reaches stdout before the cluster has
-// finished sending the last one. Use with index.ListStream.
+// from the supplied callback-shaped source. Streams without buffering
+// the full result so a 20k-index cluster's first row reaches stdout
+// before the cluster has finished sending the last one. Use with
+// index.ListStream.
 func IndicesNDJSONStream(w io.Writer, source func(yield func(types.Index) error) error) error {
 	enc := json.NewEncoder(w)
 	return source(func(ix types.Index) error {
@@ -287,8 +288,8 @@ func indexShrinkTable(w io.Writer, r types.IndexShrinkResult, wide bool) error {
 // slice; NDJSON writes one record per line so a cluster with tens of
 // thousands of aliases doesn't have to be parsed as one blob.
 // AliasesNDJSONStream writes one Alias per line to w as records
-// arrive from the supplied callback-shaped source. Honours CLAUDE.md
-// §6 for `aliases list`.
+// arrive from the supplied callback-shaped source. The streaming
+// counterpart to Aliases, used by `aliases list -o ndjson`.
 func AliasesNDJSONStream(w io.Writer, source func(yield func(types.Alias) error) error) error {
 	enc := json.NewEncoder(w)
 	return source(func(a types.Alias) error {
@@ -422,8 +423,9 @@ func aliasUpdateTable(w io.Writer, r types.AliasUpdateResult, wide bool) error {
 // streams one IndexSettings record per line so a cluster with tens of
 // thousands of indices doesn't have to be parsed as a single blob.
 // IndexSettingsNDJSONStream writes one IndexSettings per line to w as
-// records arrive from the supplied callback-shaped source. Honours
-// CLAUDE.md §6 for `settings get`.
+// records arrive from the supplied callback-shaped source. The
+// streaming counterpart to IndexSettingsList, used by `settings get
+// -o ndjson`.
 func IndexSettingsNDJSONStream(w io.Writer, source func(yield func(types.IndexSettings) error) error) error {
 	enc := json.NewEncoder(w)
 	return source(func(r types.IndexSettings) error {
@@ -2027,8 +2029,9 @@ func ILMPolicyDelete(w io.Writer, r types.ILMPolicyDeleteResult, f Format) error
 // and a compact step_info JSON blob. JSON/YAML emit the neutral
 // []ILMExplainEntry shape directly. NDJSON streams one record per line.
 // ILMExplainNDJSONStream writes one ILMExplainEntry per line to w as
-// records arrive from the supplied callback-shaped source. Honours
-// CLAUDE.md §6 for `ilm explain` against a multi-thousand-index fleet.
+// records arrive from the supplied callback-shaped source. Streaming
+// matters here: `ilm explain` against a multi-thousand-index fleet
+// can run into tens of MB if buffered.
 func ILMExplainNDJSONStream(w io.Writer, source func(yield func(types.ILMExplainEntry) error) error) error {
 	enc := json.NewEncoder(w)
 	return source(func(e types.ILMExplainEntry) error {
@@ -2827,8 +2830,8 @@ func snapshotPruneTable(w io.Writer, r types.SnapshotPruneResult, wide bool) err
 	return tw.Flush()
 }
 
-// Nodes renders a slice of Node rows. Default table is the columns
-// CLAUDE.md §6 calls out for `ops nodes`: name, role, version, heap,
+// Nodes renders a slice of Node rows. Default table is the operator-
+// facing column set for `ops nodes`: name, role, version, heap, and
 // disk usage. Wide adds the master flag, IP, CPU, load, and uptime.
 // JSON/YAML emit the full Node struct.
 func Nodes(w io.Writer, nodes []types.Node, f Format) error {
@@ -3096,7 +3099,7 @@ func writeExcludeBeforeAfter(w io.Writer, before, after []string) {
 
 // TasksNDJSONStream writes one Task per line to w as records arrive
 // from the supplied callback-shaped source. Honours the same
-// CLAUDE.md §6 contract as IndicesNDJSONStream: a fleet running
+// streaming contract as IndicesNDJSONStream: a fleet running
 // thousands of concurrent tasks emits the first row before the
 // cluster has finished sending the last one. Use with
 // ops.ListTasksStream.
