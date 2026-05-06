@@ -2359,3 +2359,169 @@ type Document struct {
 	Version        int64           `json:"version,omitempty" yaml:"version,omitempty"`
 	SequenceNumber int64           `json:"sequence_number,omitempty" yaml:"sequence_number,omitempty"`
 }
+
+// IndexMapping is the neutral view of a single index's GET /<index>/_mapping
+// response. Properties holds the cluster's raw `properties` tree as an
+// opaque map — esops's mapping translator walks it directly rather than
+// imposing a typed shape on a structure that mostly varies. Meta carries
+// the user-defined `_meta` block when present (operators stash schema
+// versions there); Dynamic mirrors the top-level `dynamic` setting.
+//
+// Used by `migrate plan` to inspect source mappings before a reindex.
+type IndexMapping struct {
+	Name       string         `json:"name"                yaml:"name"`
+	Properties map[string]any `json:"properties"          yaml:"properties"`
+	Meta       map[string]any `json:"meta,omitempty"      yaml:"meta,omitempty"`
+	Dynamic    string         `json:"dynamic,omitempty"   yaml:"dynamic,omitempty"`
+}
+
+// MappingFilter narrows a MappingsInspector.GetMappings call. Index
+// accepts the cluster's standard pattern syntax (comma-separated names,
+// '*' wildcards). IgnoreUnavailable maps to ?ignore_unavailable=true so
+// a pattern that legitimately matches nothing returns an empty slice
+// rather than a 404.
+type MappingFilter struct {
+	Index             string
+	IgnoreUnavailable bool
+}
+
+// RemoteReindexWhitelist mirrors the cluster's
+// `reindex.remote.whitelist` setting from /_cluster/settings — the list
+// of host[:port] entries the cluster will accept as a remote source for
+// /_reindex. Both ES and OS use the same setting name.
+//
+// Persistent and Transient are reported separately so an operator can
+// see which scope set the value (transient settings vanish on a full
+// cluster restart — a real foot-gun for migration plans built around
+// them). Defaults captures any value the cluster reports under the
+// "defaults" scope (rare; usually empty).
+type RemoteReindexWhitelist struct {
+	Persistent []string `json:"persistent" yaml:"persistent"`
+	Transient  []string `json:"transient"  yaml:"transient"`
+	Defaults   []string `json:"defaults,omitempty"  yaml:"defaults,omitempty"`
+}
+
+// All returns the de-duplicated union of every scope's entries. Order
+// is persistent → transient → defaults. Used by the migrate-check
+// reachability test, which only cares whether the source's host:port
+// is whitelisted somewhere — not in which scope.
+func (w RemoteReindexWhitelist) All() []string {
+	total := len(w.Persistent) + len(w.Transient) + len(w.Defaults)
+	seen := make(map[string]struct{}, total)
+	out := make([]string, 0, total)
+	for _, group := range [][]string{w.Persistent, w.Transient, w.Defaults} {
+		for _, e := range group {
+			if _, ok := seen[e]; ok {
+				continue
+			}
+			seen[e] = struct{}{}
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// MigrationCheckRequest controls a `migrate check` invocation. The
+// command resolves both contexts up-front; a missing or unreachable
+// endpoint surfaces as a single failed check rather than aborting the
+// whole report.
+type MigrationCheckRequest struct {
+	SourceContext string
+	TargetContext string
+	Indices       string
+}
+
+// MigrationPlanRequest controls a `migrate plan` invocation.
+// ThroughputDocsPerSec is an optional override for the duration
+// estimate (zero = the package default — see internal/migrate). Indices
+// narrows the source-side scan to a subset; empty = every non-hidden
+// index.
+type MigrationPlanRequest struct {
+	SourceContext        string
+	TargetContext        string
+	Indices              string
+	ThroughputDocsPerSec int
+}
+
+// MigrationEndpoint is the per-cluster summary block embedded in both
+// the check and plan results so a captured JSON record is interpretable
+// without re-reading the operator's config.
+type MigrationEndpoint struct {
+	Context string `json:"context"           yaml:"context"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
+	URL     string `json:"url"               yaml:"url"`
+}
+
+// MigrationStatus is the per-check / per-plan severity. The progression
+// is ok → warn → block; the report's overall status is the worst seen.
+const (
+	MigrationStatusOK    = "ok"
+	MigrationStatusWarn  = "warn"
+	MigrationStatusBlock = "block"
+)
+
+// MigrationCheck is one row in MigrationCheckResult.Checks. Name is a
+// short stable identifier (e.g. "source.connectivity",
+// "target.remote_whitelist"); operators script around it. Detail is the
+// human-readable line shown in table output.
+type MigrationCheck struct {
+	Name   string `json:"name"   yaml:"name"`
+	Status string `json:"status" yaml:"status"`
+	Detail string `json:"detail" yaml:"detail"`
+}
+
+// MigrationCheckResult is the structured outcome of `migrate check`.
+type MigrationCheckResult struct {
+	Source   MigrationEndpoint `json:"source"   yaml:"source"`
+	Target   MigrationEndpoint `json:"target"   yaml:"target"`
+	Checks   []MigrationCheck  `json:"checks"   yaml:"checks"`
+	Status   string            `json:"status"   yaml:"status"`
+	Blockers int               `json:"blockers" yaml:"blockers"`
+	Warnings int               `json:"warnings" yaml:"warnings"`
+}
+
+// MappingIssue records a single mapping translation finding. Field is
+// the dotted JSON path inside `properties` (e.g. "user.address.city").
+// FromType is the source type; ToType is empty when the issue is purely
+// diagnostic (e.g. an _all/_type usage that needs operator action).
+// Severity is one of MigrationStatusOK / Warn / Block.
+type MappingIssue struct {
+	Field    string `json:"field"           yaml:"field"`
+	FromType string `json:"from_type"       yaml:"from_type"`
+	ToType   string `json:"to_type,omitempty" yaml:"to_type,omitempty"`
+	Severity string `json:"severity"        yaml:"severity"`
+	Note     string `json:"note"            yaml:"note"`
+}
+
+// MigrationIndexPlan is the per-index entry in MigrationPlan.Indices.
+// Status is the worst severity across Issues. EstimatedSeconds is the
+// duration estimate at the resolved throughput (0 when DocsCount is 0).
+type MigrationIndexPlan struct {
+	Index             string         `json:"index"                  yaml:"index"`
+	DocsCount         int64          `json:"docs_count"             yaml:"docs_count"`
+	PrimaryStoreBytes int64          `json:"primary_store_bytes"    yaml:"primary_store_bytes"`
+	Issues            []MappingIssue `json:"issues,omitempty"       yaml:"issues,omitempty"`
+	EstimatedSeconds  float64        `json:"estimated_seconds"      yaml:"estimated_seconds"`
+	Status            string         `json:"status"                 yaml:"status"`
+}
+
+// MigrationPlanTotals is the aggregate footer.
+type MigrationPlanTotals struct {
+	Indices           int     `json:"indices"             yaml:"indices"`
+	DocsCount         int64   `json:"docs_count"          yaml:"docs_count"`
+	PrimaryStoreBytes int64   `json:"primary_store_bytes" yaml:"primary_store_bytes"`
+	EstimatedSeconds  float64 `json:"estimated_seconds"   yaml:"estimated_seconds"`
+}
+
+// MigrationPlan is the structured outcome of `migrate plan`.
+type MigrationPlan struct {
+	Source           MigrationEndpoint    `json:"source"             yaml:"source"`
+	Target           MigrationEndpoint    `json:"target"             yaml:"target"`
+	ThroughputDPS    int                  `json:"throughput_dps"     yaml:"throughput_dps"`
+	Indices          []MigrationIndexPlan `json:"indices"            yaml:"indices"`
+	Totals           MigrationPlanTotals  `json:"totals"             yaml:"totals"`
+	Blockers         int                  `json:"blockers"           yaml:"blockers"`
+	Warnings         int                  `json:"warnings"           yaml:"warnings"`
+	Status           string               `json:"status"             yaml:"status"`
+}

@@ -737,6 +737,44 @@ type DocumentInspector interface {
 	DocumentsStream(ctx context.Context, req types.DocumentListRequest, yield func(types.Document) error) error
 }
 
+// MappingsInspector wraps GET /<indices>/_mapping — the read-only
+// mapping surface. Both ES and OS expose the same envelope
+// (`{"<index>":{"mappings":{"properties":{...},"_meta":{...},"dynamic":"..."}}}`)
+// so one capability covers both dialects.
+//
+// Used by `migrate plan` to inspect source mappings before a reindex.
+// The capability is intentionally read-only: there is no MappingsUpdater
+// sibling and we do not plan to add one — mapping rewrites belong on the
+// target index's settings/template path, not as an in-place mutation.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a 404 when a literal index name does not
+//     exist and IgnoreUnavailable is false)
+type MappingsInspector interface {
+	GetMappings(ctx context.Context, filter types.MappingFilter) ([]types.IndexMapping, error)
+}
+
+// RemoteReindexInspector reads the cluster's `reindex.remote.whitelist`
+// configuration via GET /_cluster/settings?include_defaults=true. Both
+// ES and OS use the same setting name — without it, a /_reindex call
+// using `source.remote` is rejected by the cluster regardless of
+// network reachability or credentials. `migrate check` uses it to
+// surface the pre-flight that catches the most common "the reindex
+// just won't start" foot-gun.
+//
+// The capability is split out from ClusterSettingsInspector — whose
+// scope is documented as the drain/uncordon path's narrow view of
+// allocation excludes — so a future hygiene rule that only needs the
+// whitelist doesn't have to depend on the broader settings surface.
+//
+// Errors mirror ClusterSettingsInspector.
+type RemoteReindexInspector interface {
+	RemoteReindexWhitelist(ctx context.Context) (types.RemoteReindexWhitelist, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -781,4 +819,6 @@ type Client struct {
 	PendingTasks        PendingTasksInspector
 	Deprecations        DeprecationInspector
 	Documents           DocumentInspector
+	Mappings            MappingsInspector
+	RemoteReindex       RemoteReindexInspector
 }
