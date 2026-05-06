@@ -370,5 +370,7 @@ func ageSince(ms int64) string {
 }
 
 // Compile-time guarantee that this Client satisfies the ILM capability.
-// ISM intentionally not implemented — see CLAUDE.md §3 and the factory.
+// ISM intentionally not implemented — ILM and ISM are deliberately
+// kept as separate, dialect-specific capabilities; the factory wires
+// the unsupportedISM stub on the ES branch.
 var _ esopsclient.ILMManager = (*Client)(nil)

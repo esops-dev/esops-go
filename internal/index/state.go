@@ -11,10 +11,10 @@ import (
 )
 
 // DefaultMaxIndices is the blast-radius cap for destructive index
-// operations resolved from a pattern. Spelled out in CLAUDE.md §6:
-// `index close` (and friends) refuse when the resolved match exceeds
-// this threshold without an explicit --max-indices opt-in. Centralised
-// here so the CLI flag's --help and the business rule stay in sync.
+// operations resolved from a pattern. `index close` (and friends)
+// refuse when the resolved match exceeds this threshold without an
+// explicit --max-indices opt-in. Centralised here so the CLI flag's
+// --help and the business rule stay in sync.
 const DefaultMaxIndices = 20
 
 // StateChangeOptions are the knobs the CLI layer hands to ChangeState.

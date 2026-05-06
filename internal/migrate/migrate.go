@@ -4,9 +4,9 @@
 // dialect's adapter — and the per-command actions in
 // internal/cli/migrate stay thin wiring.
 //
-// MVP surface: `migrate plan` and `migrate check`. Both are read-only.
-// The `migrate reindex` / `migrate cutover` / `migrate verify`
-// commands described in CLAUDE.md §9 are the next step on this base.
+// Surface: read-only pre-flights (Plan, Check), and the destructive
+// reindex / cutover / verify trio that move data and atomically swap
+// aliases on the target.
 package migrate
 
 import (
@@ -31,15 +31,62 @@ import (
 const DefaultThroughputDocsPerSec = 5000
 
 // Endpoint is the per-cluster meta + capability bundle a migrate
-// command operates on. Both sides of plan/check carry one. Built by
-// the CLI command before the action calls into this package.
+// command operates on. Built by the CLI command before the action calls
+// into this package. Not every command exercises every field — Plan
+// and Check are read-only; Reindex and Cutover use the write surfaces.
+// Nil capabilities short-circuit with a clear "wiring bug" error
+// rather than panicking, so a missing assignment surfaces loudly.
 type Endpoint struct {
-	Context   string
-	URL       string
-	Info      types.ClusterInfo
-	Indices   client.IndexInspector
-	Mappings  client.MappingsInspector
-	Whitelist client.RemoteReindexInspector
+	Context          string
+	URL              string
+	Info             types.ClusterInfo
+	Auth             EndpointAuth
+	Indices          client.IndexInspector
+	Mappings         client.MappingsInspector
+	Whitelist        client.RemoteReindexInspector
+	DocCount         client.DocCounter
+	Reindex          client.Reindexer
+	Health           client.HealthInspector
+	IndexSettingsSet client.IndexSettingsUpdater
+	AliasUpdate      client.AliasUpdater
+	AliasInspect     client.AliasInspector
+}
+
+// EndpointAuth is the credential subset migrate forwards to the
+// target's /_reindex source.remote block when the source cluster
+// requires authentication. Mirrors the fields config.Auth exposes
+// without depending on the config package directly — keeps the
+// migrate business layer free of CLI/config imports the way the rest
+// of internal/* is.
+//
+// Only the fields the cluster's source.remote block honours are kept;
+// mTLS / SigV4 source-side auth is *not* a remote-reindex feature in
+// either dialect, so a context using either is rejected at the CLI
+// layer (the operator points at a bearer/basic-auth proxy in front of
+// the source instead).
+type EndpointAuth struct {
+	Username string
+	Password string
+	Token    string  // bearer token; rendered as Authorization: Bearer <t>
+	APIKey   string  // ES api key; rendered as Authorization: ApiKey <k>
+}
+
+// remoteHeaders renders an EndpointAuth into the `headers` map the
+// /_reindex body's source.remote block expects. Username/password go
+// in their own typed slots — the headers map is for the bearer/api-
+// key forms the cluster doesn't have a typed slot for.
+func (a EndpointAuth) remoteHeaders() map[string]string {
+	if a.Token == "" && a.APIKey == "" {
+		return nil
+	}
+	h := make(map[string]string, 1)
+	switch {
+	case a.APIKey != "":
+		h["Authorization"] = "ApiKey " + a.APIKey
+	case a.Token != "":
+		h["Authorization"] = "Bearer " + a.Token
+	}
+	return h
 }
 
 // summary lifts Endpoint into the neutral MigrationEndpoint shape used
@@ -108,8 +155,8 @@ func probeCheck(name string, e Endpoint) types.MigrationCheck {
 	}
 }
 
-// dialectCheck flags ES↔OS migrations as a warn — they are first-
-// class supported (CLAUDE.md §9.1) but the operator should know
+// dialectCheck flags ES↔OS migrations as a warn — cross-dialect
+// reindex is first-class supported, but the operator should know
 // they're crossing dialects so the surprises (security, ILM/ISM)
 // don't land late.
 func dialectCheck(src, tgt Endpoint) types.MigrationCheck {

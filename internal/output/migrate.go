@@ -155,7 +155,9 @@ func migrationPlanTable(w io.Writer, p types.MigrationPlan, wide bool) error {
 
 // migrationStatusLabel uppercases the lowercase enum so it lines up
 // with the LEVEL/STATUS columns elsewhere in the renderer set
-// (HEALTH, DEPRECATIONS). Empty maps to "-".
+// (HEALTH, DEPRECATIONS). Empty maps to "-". The "skipped" value is
+// the cutover-specific per-step state — distinct from "ok" so the
+// table reader sees that a step did not run (dry-run, guard flag).
 func migrationStatusLabel(s string) string {
 	switch s {
 	case types.MigrationStatusOK:
@@ -164,11 +166,232 @@ func migrationStatusLabel(s string) string {
 		return "WARN"
 	case types.MigrationStatusBlock:
 		return "BLOCK"
+	case "skipped":
+		return "SKIP"
 	case "":
 		return "-"
 	default:
 		return s
 	}
+}
+
+// MigrationReindex renders a MigrationReindexResult in the requested
+// format. JSON/YAML emit the neutral shape; table groups the
+// source/target endpoints in a header and lists per-source-index rows
+// with the cluster-side counters surfaced inline.
+func MigrationReindex(w io.Writer, r types.MigrationReindexResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return migrationReindexTable(w, r, true)
+	case FormatTable, "":
+		return migrationReindexTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func migrationReindexTable(w io.Writer, r types.MigrationReindexResult, wide bool) error {
+	_, _ = fmt.Fprintf(w, "SOURCE  context=%s  dialect=%s  version=%s  url=%s\n",
+		dashIfEmpty(r.Source.Context), dashIfEmpty(r.Source.Dialect),
+		dashIfEmpty(r.Source.Version), dashIfEmpty(r.Source.URL))
+	_, _ = fmt.Fprintf(w, "TARGET  context=%s  dialect=%s  version=%s  url=%s\n",
+		dashIfEmpty(r.Target.Context), dashIfEmpty(r.Target.Dialect),
+		dashIfEmpty(r.Target.Version), dashIfEmpty(r.Target.URL))
+	if r.DryRun {
+		_, _ = fmt.Fprintln(w, "DRY-RUN  no /_reindex calls submitted")
+	}
+	_, _ = fmt.Fprintln(w)
+
+	if len(r.Indices) == 0 {
+		_, _ = fmt.Fprintln(w, "(no source indices matched the filter)")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "STATUS\tSOURCE\tTARGET\tTASK\tTOTAL\tCREATED\tUPDATED\tDELETED\tCONFLICTS\tDETAIL")
+	} else {
+		_, _ = fmt.Fprintln(tw, "STATUS\tSOURCE\tTARGET\tDOCS\tDETAIL")
+	}
+	for _, e := range r.Indices {
+		detail := dashIfEmpty(e.Detail)
+		if !wide {
+			detail = truncate(detail, 80)
+		}
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
+				migrationStatusLabel(e.Status),
+				e.SourceIndex,
+				e.TargetIndex,
+				dashIfEmpty(e.TaskID),
+				e.Stats.Total,
+				e.Stats.Created,
+				e.Stats.Updated,
+				e.Stats.Deleted,
+				e.Stats.VersionConflicts,
+				detail,
+			)
+		} else {
+			docs := e.Stats.Created + e.Stats.Updated
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
+				migrationStatusLabel(e.Status),
+				e.SourceIndex,
+				e.TargetIndex,
+				docs,
+				detail,
+			)
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	if wide {
+		// Surface the full failures list per affected index. Failures
+		// rarely exceed a handful per task; the cluster's count of
+		// "100 failures" usually means "99 are repeats of the same
+		// shape", and the operator wants the *first* one to act on.
+		for _, e := range r.Indices {
+			if len(e.Stats.Failures) == 0 {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "\nFAILURES for %s\n", e.SourceIndex)
+			for i, f := range e.Stats.Failures {
+				_, _ = fmt.Fprintf(w, "  %3d. %s\n", i+1, f)
+			}
+		}
+	}
+
+	_, _ = fmt.Fprintf(w, "\nSUMMARY  status=%s  blockers=%d  warnings=%d\n",
+		migrationStatusLabel(r.Status), r.Blockers, r.Warnings)
+	return nil
+}
+
+// MigrationVerify renders a MigrationVerifyResult in the requested
+// format. The table view shows a per-index source/target count plus
+// the diff and the operator-readable detail line.
+func MigrationVerify(w io.Writer, r types.MigrationVerifyResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return migrationVerifyTable(w, r, true)
+	case FormatTable, "":
+		return migrationVerifyTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func migrationVerifyTable(w io.Writer, r types.MigrationVerifyResult, wide bool) error {
+	_, _ = fmt.Fprintf(w, "SOURCE  context=%s  dialect=%s  version=%s\n",
+		dashIfEmpty(r.Source.Context), dashIfEmpty(r.Source.Dialect),
+		dashIfEmpty(r.Source.Version))
+	_, _ = fmt.Fprintf(w, "TARGET  context=%s  dialect=%s  version=%s\n\n",
+		dashIfEmpty(r.Target.Context), dashIfEmpty(r.Target.Dialect),
+		dashIfEmpty(r.Target.Version))
+
+	if len(r.Indices) == 0 {
+		_, _ = fmt.Fprintln(w, "(no source indices matched the filter)")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "STATUS\tSOURCE\tTARGET\tSOURCE_DOCS\tTARGET_DOCS\tDIFF\tDETAIL")
+	for _, e := range r.Indices {
+		detail := dashIfEmpty(e.Detail)
+		if !wide {
+			detail = truncate(detail, 80)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%+d\t%s\n",
+			migrationStatusLabel(e.Status),
+			e.SourceIndex,
+			e.TargetIndex,
+			e.SourceCount,
+			e.TargetCount,
+			e.Diff,
+			detail,
+		)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(w, "\nSUMMARY  status=%s  blockers=%d  warnings=%d\n",
+		migrationStatusLabel(r.Status), r.Blockers, r.Warnings)
+	return nil
+}
+
+// MigrationCutover renders a MigrationCutoverResult in the requested
+// format. The table view shows the per-step sequence — the per-step
+// detail is what an operator pastes into a postmortem when something
+// went sideways mid-swap.
+func MigrationCutover(w io.Writer, r types.MigrationCutoverResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return migrationCutoverTable(w, r, true)
+	case FormatTable, "":
+		return migrationCutoverTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func migrationCutoverTable(w io.Writer, r types.MigrationCutoverResult, wide bool) error {
+	_, _ = fmt.Fprintf(w, "CONTEXT  %s\n", dashIfEmpty(r.Context))
+	_, _ = fmt.Fprintf(w, "ALIAS    %s\n", dashIfEmpty(r.Alias))
+	_, _ = fmt.Fprintf(w, "FROM     %s\n", dashIfEmpty(r.FromIndex))
+	_, _ = fmt.Fprintf(w, "TO       %s\n", dashIfEmpty(r.ToIndex))
+	if r.DryRun {
+		_, _ = fmt.Fprintln(w, "DRY-RUN  no cluster mutations performed")
+	}
+	_, _ = fmt.Fprintln(w)
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "STATUS\tSTEP\tDETAIL")
+	for _, s := range r.Steps {
+		detail := dashIfEmpty(s.Detail)
+		if !wide {
+			detail = truncate(detail, 100)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
+			migrationStatusLabel(s.Status),
+			dashIfEmpty(s.Name),
+			detail,
+		)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(w, "\nSUMMARY  status=%s  acknowledged=%v\n",
+		migrationStatusLabel(r.Status), r.Acknowledged)
+	return nil
 }
 
 // formatSeconds renders an estimated-duration value. <60s prints

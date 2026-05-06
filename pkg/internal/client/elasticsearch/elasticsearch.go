@@ -274,8 +274,8 @@ func (c *Client) Indices(ctx context.Context, filter types.IndexFilter) ([]types
 // IndicesStream implements client.IndexInspector. Decodes
 // /_cat/indices one JSON-array element at a time via json.Decoder and
 // hands each parsed row to yield. Lets `index list -o ndjson` print
-// the first row before the cluster has finished sending the last one
-// — see CLAUDE.md §6 for the contract.
+// the first row before the cluster has finished sending the last
+// one.
 func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yield func(types.Index) error) error {
 	ci := c.api.Cat.Indices
 	expand := "open,closed"
@@ -1040,13 +1040,22 @@ func classifyResponse(op string, status int, body io.Reader) error {
 // returns a JSON object keyed by username; we decode the value side
 // into this struct. Metadata._reserved flags built-in users (elastic,
 // kibana_system, etc.) that ship with an ES distribution.
+//
+// PasswordChangedAt is populated only when the cluster surfaces the
+// field — ES does not advertise it on every supported version, so a
+// missing value is "the cluster did not tell us" rather than "the
+// password is at its shipped default". Doctor's default-credentials
+// rule treats a populated value as evidence the password has been
+// rotated; an empty value falls through to whatever other signal the
+// rule has.
 type securityUserWire struct {
-	Username string   `json:"username"`
-	Roles    []string `json:"roles"`
-	FullName string   `json:"full_name"`
-	Email    string   `json:"email"`
-	Enabled  bool     `json:"enabled"`
-	Metadata struct {
+	Username          string   `json:"username"`
+	Roles             []string `json:"roles"`
+	FullName          string   `json:"full_name"`
+	Email             string   `json:"email"`
+	Enabled           bool     `json:"enabled"`
+	PasswordChangedAt string   `json:"password_changed_at"`
+	Metadata          struct {
 		Reserved bool `json:"_reserved"`
 	} `json:"metadata"`
 }
@@ -1181,12 +1190,13 @@ func (c *Client) fetchESUsers(ctx context.Context) ([]types.SecurityUser, string
 			username = name
 		}
 		out = append(out, types.SecurityUser{
-			Username: username,
-			Enabled:  u.Enabled,
-			Reserved: u.Metadata.Reserved,
-			Roles:    u.Roles,
-			FullName: u.FullName,
-			Email:    u.Email,
+			Username:          username,
+			Enabled:           u.Enabled,
+			Reserved:          u.Metadata.Reserved,
+			Roles:             u.Roles,
+			FullName:          u.FullName,
+			Email:             u.Email,
+			PasswordChangedAt: u.PasswordChangedAt,
 		})
 	}
 	return out, "", false, nil
@@ -1760,10 +1770,9 @@ type nodesStatsOSWire struct {
 //
 // A node that appears in the info response but not in the stats response
 // (or vice versa) is still surfaced — fields the missing endpoint would
-// have filled stay at their zero value, matching CLAUDE.md §7's
-// "best-effort, missing column is information not failure" policy that
-// Nodes() already follows. Iteration is over the union of node IDs
-// rather than just one side.
+// have filled stay at their zero value. Best-effort: a missing column is
+// information, not failure (the same convention Nodes() uses). Iteration
+// is over the union of node IDs rather than just one side.
 func (c *Client) NodeStats(ctx context.Context) ([]types.NodeStats, error) {
 	var (
 		info  nodesInfoJVMWire
@@ -2277,8 +2286,8 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 // the cluster's top-level {"index1": {...}, "index2": {...}} envelope
 // one entry at a time via json.Decoder + Token, yielding each parsed
 // IndexSettings. Lets `settings get -o ndjson --include-defaults`
-// honour CLAUDE.md §6 on a busy cluster where the full nested-defaults
-// payload runs into multiple MB.
+// stream on a busy cluster where the full nested-defaults payload
+// runs into multiple MB.
 func (c *Client) GetSettingsStream(ctx context.Context, req types.IndexSettingsGetRequest, yield func(types.IndexSettings) error) error {
 	gs := c.api.Indices.GetSettings
 	opts := []func(*esapi.IndicesGetSettingsRequest){gs.WithContext(ctx)}

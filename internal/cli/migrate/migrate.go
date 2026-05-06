@@ -2,10 +2,12 @@
 // command tree. Command actions stay thin: parse flags, build the
 // source and target endpoints, call internal/migrate, render output.
 //
-// Unlike most other esops command groups, every migrate command
-// operates on TWO contexts at once. The shared helper buildEndpoints
-// (in shared.go) does the config-load and twin-cluster.New plumbing
-// that cmdsetup.Prepare does for a single context.
+// Most migrate commands operate on TWO contexts at once. The shared
+// helper buildEndpoints (in shared.go) does the config-load and
+// twin-cluster.New plumbing that cmdsetup.Prepare does for a single
+// context. `migrate cutover` is the exception: alias swaps live on a
+// single cluster and that command goes through cmdsetup.Prepare like
+// every other single-context destructive op.
 package migrate
 
 import (
@@ -17,23 +19,36 @@ func Command() *cli.Command {
 	return &cli.Command{
 		Name:  "migrate",
 		Usage: "Plan, check, reindex, verify, and cut over data between two clusters",
-		Description: `Migration toolkit. The MVP exposes the two read-only
-pre-flights every reindex starts with:
+		Description: `Migration toolkit covering the full reindex flow:
 
-  migrate check  Connectivity, version, and target reindex.remote.whitelist
-  migrate plan   Per-index size, mapping translation issues, and a duration estimate
+  migrate check    Read-only pre-flight: connectivity, version, target whitelist
+  migrate plan     Read-only: per-index size, mapping translation, duration est.
+  migrate reindex  Submit a deferred /_reindex per source index and poll to done
+  migrate verify   Compare per-index doc counts source vs target
+  migrate cutover  Atomic alias swap on a single cluster (FromIndex → ToIndex)
 
-Each command takes --source CTX and --target CTX (named contexts from
-the config file). The destination cluster's reindex.remote.whitelist
-is what gates remote /_reindex; that is the most common "the reindex
-just won't start" foot-gun and ` + "`migrate check`" + ` reports it explicitly.
+The first four take --source CTX and --target CTX (named contexts from
+the config file). The destination cluster's reindex.remote.whitelist is
+what gates remote /_reindex; that is the most common "the reindex just
+won't start" foot-gun and ` + "`migrate check`" + ` reports it explicitly.
 
-The reindex / cutover / verify commands described in CLAUDE.md §9 are
-the next layer on top of this base; migrate plan / check are safe to
-run against a live prod cluster — both are read-only.`,
+` + "`migrate cutover`" + ` is single-cluster: --context CTX, --alias, --from,
+--to. It composes existing capabilities (set settings + bulk alias
+update) into one atomic swap.
+
+A typical reindex flow:
+
+  esops migrate check    --source es-src --target es-tgt
+  esops migrate plan     --source es-src --target es-tgt
+  esops migrate reindex  --source es-src --target es-tgt --to-suffix=-v2
+  esops migrate verify   --source es-src --target es-tgt --to-suffix=-v2
+  esops migrate cutover  --context es-tgt --alias logs --from logs --to logs-v2 --block-writes`,
 		Commands: []*cli.Command{
 			checkCommand(),
 			planCommand(),
+			reindexCommand(),
+			verifyCommand(),
+			cutoverCommand(),
 		},
 	}
 }

@@ -173,8 +173,8 @@ type IndexSettingsInspector interface {
 	GetSettings(ctx context.Context, req types.IndexSettingsGetRequest) ([]types.IndexSettings, error)
 	// GetSettingsStream streams /<indices>/_settings — one IndexSettings
 	// per cluster-keyed entry — and yields each. Lets `settings get
-	// --include-defaults -o ndjson` honour CLAUDE.md §6 on a busy cluster
-	// where the full nested-defaults payload is multiple MB.
+	// --include-defaults -o ndjson` stream on a busy cluster where the
+	// full nested-defaults payload is multiple MB.
 	GetSettingsStream(ctx context.Context, req types.IndexSettingsGetRequest, yield func(types.IndexSettings) error) error
 }
 
@@ -234,8 +234,8 @@ type AliasInspector interface {
 	Aliases(ctx context.Context, filter types.AliasFilter) ([]types.Alias, error)
 	// AliasesStream decodes /_cat/aliases?format=json one row at a
 	// time and invokes yield for each parsed Alias. Honours the same
-	// CLAUDE.md §6 contract as IndicesStream — a 5k-alias cluster
-	// emits the first row before the cluster has finished sending.
+	// streaming contract as IndicesStream — a 5k-alias cluster emits
+	// the first row before the cluster has finished sending.
 	AliasesStream(ctx context.Context, filter types.AliasFilter, yield func(types.Alias) error) error
 }
 
@@ -330,7 +330,7 @@ type ClusterDiagnoser interface {
 // equivalent) on purpose: the policy body shapes are fundamentally
 // different, and a neutral "lifecycle" interface would force a lossy
 // translation in both directions — exactly the lowest-common-denominator
-// CLAUDE.md §3 warns against.
+// trap the project's design rules warn against.
 //
 // Errors mirror IndexTemplateUpdater: ErrUnreachable on transport
 // failure, ErrAuth/ErrForbidden on 401/403, ErrUnsupported when the
@@ -404,7 +404,7 @@ type SnapshotInspector interface {
 	// SnapshotsStream fans out across the resolved repository set and
 	// invokes yield for each parsed snapshot as it arrives. yield
 	// returning a non-nil error stops iteration and surfaces the error
-	// from the call. Honours the same CLAUDE.md §6 streaming contract as
+	// from the call. Honours the same streaming contract as
 	// IndicesStream — `snapshot list --output ndjson` against a fleet
 	// with thousands of snapshots emits the first row before the cluster
 	// has finished sending.
@@ -757,6 +757,62 @@ type MappingsInspector interface {
 	GetMappings(ctx context.Context, filter types.MappingFilter) ([]types.IndexMapping, error)
 }
 
+// DocCounter wraps GET /<index>/_count — the cluster's authoritative
+// per-index doc count. /_cat/indices' docs.count column lags refreshes
+// by tens of seconds (it's read off the local node's segment cache, not
+// recomputed per call), and `migrate verify` / `migrate cutover` run in
+// the exact window where that lag matters. Both ES and OS expose the
+// same envelope ({count, _shards: {...}}) so one capability covers both.
+//
+// Implementations forward request.Indices as the path's <index> segment
+// (comma-joined) and IgnoreUnavailable as ?ignore_unavailable=true so a
+// missing source index in a multi-pair verify lands as a 0/0 row rather
+// than a hard 404.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrNotFound on a 404 with a literal index name and
+//     IgnoreUnavailable=false
+//   - generic wrapped error on other 4xx/5xx with the cluster's body in
+//     the message
+type DocCounter interface {
+	Count(ctx context.Context, req types.CountRequest) (types.CountResult, error)
+}
+
+// Reindexer wraps POST /_reindex?wait_for_completion=false — the
+// task-based reindex submission. Lives on the *target* cluster: the
+// target reads from the source via `source.remote`, so the capability
+// holds on the connection that does the writing. The cluster's response
+// is a task ID; polling /_tasks/<id> is delegated to TaskInspector
+// (the existing capability covers it) and to the business layer's
+// reindex poller, which folds the task envelope into the typed
+// ReindexTaskStatus.
+//
+// SubmitReindex returns a ReindexSubmit with the cluster-side TaskID;
+// it does not block on completion — that would force a single
+// long-running request to hold a connection open for hours. The
+// capability is small: submission and per-task polling. CancelReindex
+// is intentionally NOT a method here — the existing TasksCanceller
+// surface covers /_tasks/<id>/_cancel and the reindex action is one
+// of the actions that capability already cancels.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 400 from the cluster when the source
+//     URL is not in reindex.remote.whitelist — the same condition
+//     migrate check reports as a blocker)
+type Reindexer interface {
+	SubmitReindex(ctx context.Context, req types.ReindexSubmitRequest) (types.ReindexSubmit, error)
+	// ReindexTaskStatus reads /_tasks/<task_id> and returns the
+	// reindex-shaped status block. The cluster reports the same
+	// envelope on ES and OS; the adapter walks `task.status` plus the
+	// outer `completed` / `cancellable` / `cancelled` flags.
+	ReindexTaskStatus(ctx context.Context, taskID string) (types.ReindexTaskStatus, error)
+}
+
 // RemoteReindexInspector reads the cluster's `reindex.remote.whitelist`
 // configuration via GET /_cluster/settings?include_defaults=true. Both
 // ES and OS use the same setting name — without it, a /_reindex call
@@ -773,6 +829,101 @@ type MappingsInspector interface {
 // Errors mirror ClusterSettingsInspector.
 type RemoteReindexInspector interface {
 	RemoteReindexWhitelist(ctx context.Context) (types.RemoteReindexWhitelist, error)
+}
+
+// NodeBootstrapInspector wraps the per-node bootstrap-check posture the
+// cluster reports through its /_nodes endpoints — the JVM mlockall
+// state (jvm.mem.using_memory_lock), the process-level
+// max_file_descriptors, and the OS-side vm.max_map_count when the
+// cluster surfaces it. /_cat/nodes carries none of these, and the
+// existing NodeStats wraps configured heap + host RAM rather than
+// kernel/process limits, so a fresh capability is the cleanest fit.
+//
+// Used by esops-doctor's bootstrap_memory_lock and bootstrap-check
+// parity rules (file descriptors, mlockall, max_map_count). Adapters
+// fan across /_nodes/jvm and /_nodes/process in parallel and merge by
+// node ID — both endpoints share the same envelope shape on ES and
+// OS, so one capability covers both dialects.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type NodeBootstrapInspector interface {
+	NodeBootstrap(ctx context.Context) ([]types.NodeBootstrap, error)
+}
+
+// ClusterSettingsFullInspector wraps GET /_cluster/settings without the
+// narrow shape ClusterSettingsInspector imposes. Returns the full
+// persistent/transient (and optionally defaults) envelopes as flat-key
+// maps so a hygiene rule can reach for any key the cluster reports —
+// awareness attributes, destructive_requires_name, script policy,
+// reindex remote whitelist, etc. — without each one demanding its own
+// typed view.
+//
+// IncludeDefaults flips the cluster's ?include_defaults=true query
+// param. Off by default: the defaults tree is large (tens of KB on a
+// minimal cluster) and most rules don't need it. Adapters always send
+// flat_settings=true so the returned maps are keyed by the cluster's
+// dotted-path names ("cluster.routing.allocation.awareness.attributes")
+// rather than the nested-object form, which would force every consumer
+// to walk into Persistent["cluster"].(map[string]any)["routing"].….
+//
+// Errors mirror ClusterSettingsInspector.
+type ClusterSettingsFullInspector interface {
+	GetClusterSettingsFull(ctx context.Context, includeDefaults bool) (types.ClusterSettingsFull, error)
+}
+
+// AllocationInspector wraps /_cat/allocation — the per-node shard
+// count and disk breakdown the cluster keeps separate from
+// /_cat/nodes. Used by esops-doctor's shard_count_per_node rule (the
+// ~600-shard-per-node recommendation) and by any future hygiene rule
+// that wants the same per-node summary without summing /_cat/shards
+// rows in the consumer.
+//
+// Distinct capability from NodeInspector so the existing Nodes() call
+// stays cheap — a /_cat/nodes consumer doesn't pay for a second
+// /_cat/allocation request it didn't ask for. Both ES and OS expose
+// the same column set; one capability covers both dialects.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type AllocationInspector interface {
+	AllocationByNode(ctx context.Context) ([]types.NodeAllocation, error)
+}
+
+// TransportTLSInspector wraps the cluster-side view of node-to-node
+// transport TLS posture. Distinct from the existing TLSPosture surface
+// (which mixes client-side connection facts the operator's config
+// owns) because what the cluster reports about *its own* transport
+// security has to come from the cluster, not from inferring on the
+// HTTP-client side.
+//
+// Sources differ per dialect — ES's /_nodes/settings exposes
+// `xpack.security.transport.ssl.enabled` and `verification_mode`; OS
+// exposes `plugins.security.ssl.transport.enforce_hostname_verification`
+// and the per-node SSL config — so the adapter is the right place to
+// normalise the difference. Both endpoints are read-only; this is the
+// strict /_nodes/settings GET, not a probe.
+//
+// Aggregation is all-or-nothing across the reachable node set:
+// Enabled is true only when every node reports transport TLS as
+// enabled. One misconfigured node in a fleet of ten is the exact
+// case esops-doctor's node_to_node_encryption rule has to flag, so
+// surfacing a majority vote as "enabled" would defeat the rule's
+// purpose.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type TransportTLSInspector interface {
+	TransportTLS(ctx context.Context) (types.TransportTLS, error)
 }
 
 // Client is the composite surface returned by the cluster factory: the
@@ -821,4 +972,10 @@ type Client struct {
 	Documents           DocumentInspector
 	Mappings            MappingsInspector
 	RemoteReindex       RemoteReindexInspector
+	DocCount            DocCounter
+	Reindex             Reindexer
+	NodeBootstrap       NodeBootstrapInspector
+	ClusterSettingsAll  ClusterSettingsFullInspector
+	Allocation          AllocationInspector
+	TransportTLS        TransportTLSInspector
 }

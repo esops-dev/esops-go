@@ -506,5 +506,7 @@ func formatISMError(body []byte) string {
 }
 
 // Compile-time guarantee that this Client satisfies the ISM capability.
-// ILM intentionally not implemented — see CLAUDE.md §3 and the factory.
+// ILM intentionally not implemented — ILM and ISM are deliberately
+// kept as separate, dialect-specific capabilities; the factory wires
+// the unsupportedILM stub on the OS branch.
 var _ esopsclient.ISMManager = (*Client)(nil)

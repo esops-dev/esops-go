@@ -752,6 +752,16 @@ type SecurityUser struct {
 	BackendRoles []string `json:"backend_roles,omitempty"  yaml:"backend_roles,omitempty"`
 	FullName     string   `json:"full_name,omitempty"      yaml:"full_name,omitempty"`
 	Email        string   `json:"email,omitempty"          yaml:"email,omitempty"`
+	// PasswordChangedAt carries the cluster-reported timestamp of the
+	// user's last password change, when the cluster exposes it. Empty
+	// when the cluster does not surface the field — neither ES's
+	// /_security/user nor the OpenSearch security plugin's
+	// /_plugins/_security/api/internalusers expose this on every
+	// supported version, so a missing value is "the cluster did not
+	// tell us", not "never changed". Doctor's default-credentials rule
+	// uses a non-empty value as evidence that the password is no
+	// longer the shipped default.
+	PasswordChangedAt string `json:"password_changed_at,omitempty"  yaml:"password_changed_at,omitempty"`
 }
 
 // SecurityRole is the normalised view of a role definition. We surface
@@ -834,17 +844,45 @@ type SecurityAudit struct {
 }
 
 // TLSPosture is what the context's connection looks like from the
-// client's side. Not from the cluster — the cluster can't tell us
-// whether we set `insecure: true` locally. Scheme is derived from the
-// first configured URL; InsecureSkipVerify and CACertSet surface the
-// two config knobs that weaken or strengthen trust; AuthType and
-// ClientCertSet surface which credential the tool is presenting.
+// client's side. Scheme is derived from the first configured URL;
+// InsecureSkipVerify and CACertSet surface the two config knobs that
+// weaken or strengthen trust; AuthType and ClientCertSet surface which
+// credential the tool is presenting.
+//
+// TransportTLSEnabled / TransportTLSVerified are server-side fields —
+// distinct from the client-side fields above. They mirror what the
+// cluster reports about its own node-to-node transport TLS config and
+// are populated only by callers that consulted TransportTLSInspector
+// (esops-doctor's node_to_node_encryption rule). Left unset (omitempty)
+// when the caller didn't fan out to the cluster — the rest of the
+// posture is meaningful without them.
 type TLSPosture struct {
 	Scheme             string `json:"scheme"                       yaml:"scheme"`
 	InsecureSkipVerify bool   `json:"insecure_skip_verify"         yaml:"insecure_skip_verify"`
 	CACertSet          bool   `json:"cacert_set"                   yaml:"cacert_set"`
 	AuthType           string `json:"auth_type"                    yaml:"auth_type"`
 	ClientCertSet      bool   `json:"client_cert_set"              yaml:"client_cert_set"`
+
+	TransportTLSEnabled  bool `json:"transport_tls_enabled,omitempty"  yaml:"transport_tls_enabled,omitempty"`
+	TransportTLSVerified bool `json:"transport_tls_verified,omitempty" yaml:"transport_tls_verified,omitempty"`
+}
+
+// TransportTLS is the cluster-side view of node-to-node transport TLS
+// posture, returned by TransportTLSInspector. Distinct from TLSPosture
+// because the latter mixes client-side connection facts (Scheme,
+// InsecureSkipVerify, …) that only the operator's config knows; this
+// type carries only what the cluster reports about itself, so an
+// inspector that reads /_nodes/settings has somewhere clean to put it.
+//
+// Enabled is true when every reachable node reports transport TLS as
+// enabled — homogeneity matters here, since one misconfigured node is
+// the exact case the rule has to flag, so we do not fudge a majority
+// vote into a green outcome. Verified mirrors the same all-or-nothing
+// aggregation over the verification-mode setting (ES) /
+// enforce_hostname_verification (OS).
+type TransportTLS struct {
+	Enabled  bool `json:"transport_tls_enabled"            yaml:"transport_tls_enabled"`
+	Verified bool `json:"transport_tls_verified,omitempty" yaml:"transport_tls_verified,omitempty"`
 }
 
 // HotThreadsRequest narrows a HotThreadsInspector.HotThreads call. A
@@ -1483,8 +1521,8 @@ type ShardAnalysis struct {
 // fundamentally different: ILM hangs a `phases` map off the policy, ISM
 // uses a `states` array with explicit transitions. Surfacing one neutral
 // "lifecycle policy" type would force a lossy translation in both
-// directions and is exactly the kind of lowest-common-denominator that
-// CLAUDE.md §3 warns against.
+// directions and is exactly the kind of lowest-common-denominator trap
+// the project's design rules warn against.
 //
 // Definition carries the inner `policy` block (phases + _meta) verbatim
 // as a decoded map so renderers can pretty-print it without re-parsing.
@@ -2328,11 +2366,12 @@ type DeprecationIssue struct {
 // document IDs; an empty slice returns every document in the index.
 //
 // The shape is deliberately small. A full DSL surface would push the
-// capability towards "general-purpose search" — exactly what
-// CLAUDE.md §3 / §15 ("do not invent a lowest-common-denominator")
-// warns against. Operator-managed metadata indices (esops-doctor
-// waivers, annotations, config) are the target use case; they fit in
-// a single 10k-document _search and do not need scrolling.
+// capability towards "general-purpose search" — outside esops's
+// scope, and the kind of lowest-common-denominator the project's
+// design rules warn against. Operator-managed metadata indices
+// (esops-doctor waivers, annotations, config) are the target use
+// case; they fit in a single 10k-document _search and do not need
+// scrolling.
 type DocumentListRequest struct {
 	Index string   // required; literal index name, no patterns
 	IDs   []string // optional; empty = every document in the index
@@ -2524,4 +2563,344 @@ type MigrationPlan struct {
 	Blockers         int                  `json:"blockers"           yaml:"blockers"`
 	Warnings         int                  `json:"warnings"           yaml:"warnings"`
 	Status           string               `json:"status"             yaml:"status"`
+}
+
+// CountRequest scopes a DocCounter.Count call to one or more indices.
+// IgnoreUnavailable maps to ?ignore_unavailable=true so a list with one
+// missing index returns a count for the rest rather than a 404. Used by
+// `migrate verify` and `migrate cutover` for fresh per-index doc counts —
+// /_cat/indices' `docs.count` lags refreshes by tens of seconds, which
+// is the exact window cutover/verify run in.
+type CountRequest struct {
+	Indices           []string
+	IgnoreUnavailable bool
+}
+
+// CountResult is the cluster's view of /<index>/_count. Both ES and OS
+// return the same envelope ({count, _shards: {total, successful, failed,
+// skipped}}); one shape covers both adapters.
+type CountResult struct {
+	Count    int64           `json:"count"             yaml:"count"`
+	Shards   CountShardsInfo `json:"shards,omitempty"  yaml:"shards,omitempty"`
+}
+
+// CountShardsInfo mirrors the cluster's `_shards` block on the count
+// response. Surfaced because a verify reading a partial shard set
+// (Failed > 0 or Skipped > 0) is not authoritative — the renderer
+// flags it.
+type CountShardsInfo struct {
+	Total      int `json:"total"      yaml:"total"`
+	Successful int `json:"successful" yaml:"successful"`
+	Failed     int `json:"failed"     yaml:"failed"`
+	Skipped    int `json:"skipped,omitempty" yaml:"skipped,omitempty"`
+}
+
+// ReindexSubmitRequest is the input to a remote /_reindex submission.
+// The reindex runs on the *target* cluster — Source* describes the
+// remote fetch the target performs, the rest of the fields shape the
+// reindex body itself. Adapters submit with ?wait_for_completion=false
+// and return the cluster's task ID; polling is the business layer's
+// job.
+//
+// The capability deliberately does not own the source-side credentials
+// indirection (env / file / keyring). Those are resolved in the
+// business layer from the source context's auth config; the adapter
+// receives a literal username / password / headers map.
+type ReindexSubmitRequest struct {
+	// SourceIndex is the index pattern on the source cluster. The
+	// cluster's /_reindex source.index honours the same comma /
+	// wildcard syntax /_search does.
+	SourceIndex string
+
+	// SourceRemoteHost is the URL the *target* will use to fetch from
+	// the source. Includes scheme and port — "https://es-src:9200".
+	// This must match an entry in the target's reindex.remote.whitelist
+	// (see migrate check).
+	SourceRemoteHost string
+
+	// Optional source-side auth carried in the request body to the
+	// target. Headers covers bearer/api-key auth as raw header pairs
+	// (e.g. "Authorization": "ApiKey ...").
+	SourceUsername string
+	SourcePassword string
+	SourceHeaders  map[string]string
+
+	// SourceConnectTimeout / SourceSocketTimeout map to the cluster's
+	// source.remote.connect_timeout / socket_timeout. Zero = cluster
+	// default.
+	SourceConnectTimeout time.Duration
+	SourceSocketTimeout  time.Duration
+
+	// TargetIndex is the destination on the target cluster. Reindex
+	// will create the index lazily; pre-creating with the correct
+	// settings/mappings is the operator's job (the translator from
+	// `migrate plan` is the input to that work).
+	TargetIndex string
+
+	// Conflicts maps to the cluster's `conflicts` field — "abort"
+	// (default) stops on the first version_conflict, "proceed"
+	// continues and counts the failures.
+	Conflicts string
+
+	// SizeLimit caps total docs copied. 0 = no cap.
+	SizeLimit int64
+
+	// RequestsPerSecond throttles the reindex. -1 = unbounded; 0 =
+	// cluster default; positive = explicit cap.
+	RequestsPerSecond float64
+
+	// Slices controls source-side slicing. "auto" lets the cluster
+	// pick (recommended); a positive integer pins it; "" = unsliced.
+	Slices string
+
+	// WaitForActiveShards forwards the cluster's
+	// ?wait_for_active_shards param. "" = cluster default ("1"),
+	// "all" / a positive integer otherwise.
+	WaitForActiveShards string
+}
+
+// ReindexSubmit captures the cluster's response to a deferred /_reindex
+// submission. The cluster returns {"task": "<node_id>:<task_number>"};
+// the adapter normalises that into TaskID. Action is "migrate-reindex"
+// for log/output consistency.
+type ReindexSubmit struct {
+	Action      string `json:"action"        yaml:"action"`
+	TaskID      string `json:"task_id"       yaml:"task_id"`
+	SourceIndex string `json:"source_index"  yaml:"source_index"`
+	TargetIndex string `json:"target_index"  yaml:"target_index"`
+}
+
+// ReindexTaskStatus is the polling view of a deferred /_reindex via
+// /_tasks/<task_id>. The composed `task.status` block carries the
+// reindex-specific progress fields; the surrounding envelope adds
+// completion, cancellable/cancelled flags, and any failures[] entries.
+//
+// Failures are surfaced as a slice of preformatted "<index>[<id>]:
+// <reason>" strings — the cluster's failure objects vary in shape
+// across versions and dialects, and a flat string list is the form
+// the renderer + log lines need.
+type ReindexTaskStatus struct {
+	TaskID            string   `json:"task_id"                       yaml:"task_id"`
+	Completed         bool     `json:"completed"                     yaml:"completed"`
+	Total             int64    `json:"total"                         yaml:"total"`
+	Created           int64    `json:"created"                       yaml:"created"`
+	Updated           int64    `json:"updated"                       yaml:"updated"`
+	Deleted           int64    `json:"deleted"                       yaml:"deleted"`
+	Batches           int64    `json:"batches"                       yaml:"batches"`
+	VersionConflicts  int64    `json:"version_conflicts"             yaml:"version_conflicts"`
+	Noops             int64    `json:"noops"                         yaml:"noops"`
+	BulkRetries       int64    `json:"retries_bulk"                  yaml:"retries_bulk"`
+	SearchRetries     int64    `json:"retries_search"                yaml:"retries_search"`
+	ThrottledMillis   int64    `json:"throttled_millis,omitempty"    yaml:"throttled_millis,omitempty"`
+	RequestsPerSecond float64  `json:"requests_per_second,omitempty" yaml:"requests_per_second,omitempty"`
+	StartTimeMillis   int64    `json:"start_time_millis,omitempty"   yaml:"start_time_millis,omitempty"`
+	RunningTimeNanos  int64    `json:"running_time_nanos,omitempty"  yaml:"running_time_nanos,omitempty"`
+	Cancellable       bool     `json:"cancellable,omitempty"         yaml:"cancellable,omitempty"`
+	Cancelled         bool     `json:"cancelled,omitempty"           yaml:"cancelled,omitempty"`
+	Failures          []string `json:"failures,omitempty"            yaml:"failures,omitempty"`
+}
+
+// MigrationReindexRequest is the operator-facing migrate-layer request:
+// which indices to copy, throughput knobs, and dry-run support.
+// Multi-index requests fan out as one ReindexSubmit per source index;
+// each task is polled to completion before the next is submitted so a
+// shared cluster's reindex slot stays bounded by the operator's
+// expectation, not multiplied by --indices' resolved cardinality.
+type MigrationReindexRequest struct {
+	SourceContext       string
+	TargetContext       string
+	Indices             string  // pattern: comma list / wildcards
+	TargetSuffix        string  // appended to source name when --to-suffix is set
+	TargetIndexLiteral  string  // explicit target name; mutually exclusive with TargetSuffix
+	Conflicts           string  // "abort" / "proceed"
+	RequestsPerSecond   float64 // -1 = unbounded; 0 = cluster default
+	Slices              string  // "auto" or a positive integer; "" = default
+	WaitForActiveShards string  // "" / "all" / "<N>"
+	SizeLimit           int64
+	DryRun              bool
+	PollInterval        time.Duration
+}
+
+// MigrationReindexEntry is the per-source-index outcome line in a
+// MigrationReindexResult. Status is one of MigrationStatusOK / Warn /
+// Block; Error carries the cluster-supplied reason when the entry is
+// not OK so a saved JSON record stays self-contained.
+type MigrationReindexEntry struct {
+	SourceIndex string            `json:"source_index"          yaml:"source_index"`
+	TargetIndex string            `json:"target_index"          yaml:"target_index"`
+	TaskID      string            `json:"task_id,omitempty"     yaml:"task_id,omitempty"`
+	DryRun      bool              `json:"dry_run,omitempty"     yaml:"dry_run,omitempty"`
+	Status      string            `json:"status"                yaml:"status"`
+	Detail      string            `json:"detail,omitempty"      yaml:"detail,omitempty"`
+	Stats       ReindexTaskStatus `json:"stats"                 yaml:"stats"`
+}
+
+// MigrationReindexResult is the structured outcome of `migrate reindex`.
+// The footer mirrors the check / plan reports — Blockers and Warnings
+// are the count of per-index entries at each level so a CI script can
+// flag a partial run without parsing the entries[] array.
+type MigrationReindexResult struct {
+	Action   string                  `json:"action"            yaml:"action"`
+	Source   MigrationEndpoint       `json:"source"            yaml:"source"`
+	Target   MigrationEndpoint       `json:"target"            yaml:"target"`
+	DryRun   bool                    `json:"dry_run"           yaml:"dry_run"`
+	Indices  []MigrationReindexEntry `json:"indices"           yaml:"indices"`
+	Status   string                  `json:"status"            yaml:"status"`
+	Blockers int                     `json:"blockers"          yaml:"blockers"`
+	Warnings int                     `json:"warnings"          yaml:"warnings"`
+}
+
+// MigrationVerifyRequest is the input to `migrate verify`. The pairs
+// are resolved up-front by the business layer from --indices so the
+// cluster-side calls hit literal names — verify on a 20k-index pattern
+// would otherwise issue 20k _count calls in the worst case, with no
+// way to distinguish "not yet copied" from "doesn't exist on source".
+type MigrationVerifyRequest struct {
+	SourceContext string
+	TargetContext string
+	Indices       string // pattern resolved against source
+	TargetSuffix  string // applied to source name to derive target
+}
+
+// MigrationVerifyEntry is one per-index row of a verify report. Diff
+// is signed (Source - Target): positive means the target is behind,
+// negative is the rare "target has more" case (manual writes during
+// the reindex window) — both are surfaced rather than abs'd so a
+// captured JSON record reads unambiguously.
+type MigrationVerifyEntry struct {
+	SourceIndex string `json:"source_index"      yaml:"source_index"`
+	TargetIndex string `json:"target_index"      yaml:"target_index"`
+	SourceCount int64  `json:"source_count"      yaml:"source_count"`
+	TargetCount int64  `json:"target_count"      yaml:"target_count"`
+	Diff        int64  `json:"diff"              yaml:"diff"`
+	Status      string `json:"status"            yaml:"status"`
+	Detail      string `json:"detail,omitempty"  yaml:"detail,omitempty"`
+}
+
+// MigrationVerifyResult is the structured outcome of `migrate verify`.
+type MigrationVerifyResult struct {
+	Action   string                 `json:"action"   yaml:"action"`
+	Source   MigrationEndpoint      `json:"source"   yaml:"source"`
+	Target   MigrationEndpoint      `json:"target"   yaml:"target"`
+	Indices  []MigrationVerifyEntry `json:"indices"  yaml:"indices"`
+	Status   string                 `json:"status"   yaml:"status"`
+	Blockers int                    `json:"blockers" yaml:"blockers"`
+	Warnings int                    `json:"warnings" yaml:"warnings"`
+}
+
+// MigrationCutoverRequest is the input to a single-cluster atomic
+// alias swap. Alias, FromIndex, and ToIndex are literal names on the
+// target cluster — `migrate cutover` rejects patterns at the CLI
+// layer so the swap touches exactly what the operator typed.
+//
+// BlockWrites flips index.blocks.write=true on FromIndex *before* the
+// swap so any in-flight writer on the alias gets a clear refusal
+// rather than silently appending to the soon-to-be-orphaned old
+// index. KeepWriteBlock leaves the block on after the swap; the
+// default is to remove it again so the old index stays read-only-but-
+// not-write-blocked (operators clean up later with `index delete`).
+type MigrationCutoverRequest struct {
+	Context        string
+	Alias          string
+	FromIndex      string
+	ToIndex        string
+	BlockWrites    bool
+	KeepWriteBlock bool
+	DryRun         bool
+}
+
+// MigrationCutoverStep is one row in MigrationCutoverResult.Steps —
+// the per-step outcome of the cutover sequence so a captured JSON
+// record explains *why* a swap stopped where it did.
+type MigrationCutoverStep struct {
+	Name   string `json:"name"             yaml:"name"`
+	Status string `json:"status"           yaml:"status"`
+	Detail string `json:"detail,omitempty" yaml:"detail,omitempty"`
+}
+
+// MigrationCutoverResult is the structured outcome of `migrate cutover`.
+// Acknowledged is the cluster's own ack on the alias-swap call; on a
+// dry-run it is always false and the steps[] log carries the
+// "would-do" detail.
+type MigrationCutoverResult struct {
+	Action       string                 `json:"action"               yaml:"action"`
+	Context      string                 `json:"context"              yaml:"context"`
+	Alias        string                 `json:"alias"                yaml:"alias"`
+	FromIndex    string                 `json:"from_index"           yaml:"from_index"`
+	ToIndex      string                 `json:"to_index"             yaml:"to_index"`
+	DryRun       bool                   `json:"dry_run"              yaml:"dry_run"`
+	Acknowledged bool                   `json:"acknowledged"         yaml:"acknowledged"`
+	Steps        []MigrationCutoverStep `json:"steps"                yaml:"steps"`
+	Status       string                 `json:"status"               yaml:"status"`
+}
+
+// NodeBootstrap is the per-node view of bootstrap-check posture the
+// cluster exposes through its /_nodes/{jvm,process,os} endpoints. Used
+// by esops-doctor's bootstrap_memory_lock / file-descriptor /
+// max_map_count rules — these are the operator-tuned kernel and JVM
+// limits whose absence the cluster either refuses to start with (in
+// production mode) or warns loudly about (in development). Surfacing
+// them lets a hygiene rule flag the same misconfiguration the cluster
+// would have rejected at startup but didn't because the operator
+// flipped to single-node mode.
+//
+// Numeric fields are zero when the cluster did not report a value.
+// MaxMapCount in particular is only present on some cluster versions
+// (it's an OS-side reading the cluster does not always relay through
+// /_nodes); a zero value is "the cluster did not tell us", not "the
+// kernel says zero". BootstrapWarnings is a verbatim list of warning
+// strings the cluster surfaces (when it does — newer ES tucks them
+// behind /_migration/deprecations rather than /_nodes); empty when
+// the cluster reports a clean bootstrap or omits the field.
+type NodeBootstrap struct {
+	Name               string   `json:"name"                            yaml:"name"`
+	MlockallEnabled    bool     `json:"mlockall_enabled"                yaml:"mlockall_enabled"`
+	MaxFileDescriptors int64    `json:"max_file_descriptors,omitempty"  yaml:"max_file_descriptors,omitempty"`
+	MaxMapCount        int64    `json:"max_map_count,omitempty"         yaml:"max_map_count,omitempty"`
+	BootstrapWarnings  []string `json:"bootstrap_warnings,omitempty"    yaml:"bootstrap_warnings,omitempty"`
+}
+
+// ClusterSettingsFull is the un-narrowed view of /_cluster/settings —
+// the persistent and transient scopes plus the cluster's own defaults
+// when the caller asked for them. Distinct from ClusterSettingsView,
+// which is shaped narrowly for the drain/uncordon path's single
+// allocation-exclude key; rules that need to inspect any other key
+// (cluster.routing.allocation.awareness.attributes,
+// action.destructive_requires_name, script.allowed_types,
+// reindex.remote.whitelist, cluster.max_shards_per_node, …) need the
+// full envelope so they can drill in without each one demanding its
+// own typed view.
+//
+// Maps are flat-key strings → cluster-reported value when the caller
+// requested flat_settings=true (the default at the adapter layer).
+// Defaults is empty unless the caller asked for include_defaults; the
+// cluster's default tree is large and rarely interesting outside of
+// drift/awareness rules that explicitly want to compare against it.
+type ClusterSettingsFull struct {
+	Persistent map[string]any `json:"persistent"          yaml:"persistent"`
+	Transient  map[string]any `json:"transient"           yaml:"transient"`
+	Defaults   map[string]any `json:"defaults,omitempty"  yaml:"defaults,omitempty"`
+}
+
+// NodeAllocation is the per-node row /_cat/allocation reports — shard
+// count and disk breakdown keyed by node name. Distinct from Node
+// (which wraps /_cat/nodes) because /_cat/allocation also reports rows
+// for the cluster's "UNASSIGNED" pseudo-node, and because adding the
+// shard count to /_cat/nodes would force every Nodes() caller to pay
+// for a second cluster call they don't need.
+//
+// Used by esops-doctor's shard_count_per_node rule (the ~600-shard-
+// per-node ceiling). Numeric fields are bytes; zero when the cluster
+// did not report a value (coordinating-only nodes legitimately omit
+// the disk columns).
+type NodeAllocation struct {
+	Name             string `json:"name"                          yaml:"name"`
+	Shards           int    `json:"shards"                        yaml:"shards"`
+	DiskIndicesBytes int64  `json:"disk_indices_bytes,omitempty"  yaml:"disk_indices_bytes,omitempty"`
+	DiskUsedBytes    int64  `json:"disk_used_bytes,omitempty"     yaml:"disk_used_bytes,omitempty"`
+	DiskAvailBytes   int64  `json:"disk_avail_bytes,omitempty"    yaml:"disk_avail_bytes,omitempty"`
+	DiskTotalBytes   int64  `json:"disk_total_bytes,omitempty"    yaml:"disk_total_bytes,omitempty"`
+	DiskPercent      int    `json:"disk_percent,omitempty"        yaml:"disk_percent,omitempty"`
+	Host             string `json:"host,omitempty"                yaml:"host,omitempty"`
+	IP               string `json:"ip,omitempty"                  yaml:"ip,omitempty"`
 }
