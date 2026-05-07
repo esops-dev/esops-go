@@ -77,7 +77,7 @@ func runLicense(ctx context.Context, cmd *cli.Command) error {
 	// Render first, then evaluate the warning. Operators piping to
 	// jq still get the licence document; the non-zero exit signals
 	// the alarm without losing the data.
-	return checkLicenseExpiry(lic.ExpiresAt, int(warnDays), time.Now())
+	return checkLicenseExpiry(lic.ExpiresAt, warnDays, time.Now())
 }
 
 // checkLicenseExpiry compares ExpiresAt against now+warnDays and
