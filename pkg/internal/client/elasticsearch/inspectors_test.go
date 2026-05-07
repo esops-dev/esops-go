@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -210,6 +211,55 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 				"acknowledged": json.RawMessage(`true`),
 				"persistent":   json.RawMessage(`{"cluster.foo":"bar"}`),
 				"transient":    json.RawMessage(`{}`),
+			},
+		},
+		{
+			name: "AuditConfig",
+			in: types.AuditConfig{
+				Enabled:       true,
+				Outputs:       []string{"index"},
+				EventsInclude: []string{"access_denied"},
+				EventsExclude: []string{"connection_granted"},
+				IgnoreUsers:   []string{"kibana_system"},
+			},
+			want: map[string]json.RawMessage{
+				"enabled":        json.RawMessage(`true`),
+				"outputs":        json.RawMessage(`["index"]`),
+				"events_include": json.RawMessage(`["access_denied"]`),
+				"events_exclude": json.RawMessage(`["connection_granted"]`),
+				"ignore_users":   json.RawMessage(`["kibana_system"]`),
+			},
+		},
+		{
+			name: "AuditWarning",
+			in: types.AuditWarning{
+				Timestamp: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+				Layer:     "rest",
+				Type:      "authentication_failed",
+				Count:     1,
+			},
+			want: map[string]json.RawMessage{
+				"timestamp": json.RawMessage(`"2026-04-01T10:00:00Z"`),
+				"layer":     json.RawMessage(`"rest"`),
+				"type":      json.RawMessage(`"authentication_failed"`),
+				"count":     json.RawMessage(`1`),
+			},
+		},
+		{
+			name: "Realm",
+			in: types.Realm{
+				Name:       "corp_ldap",
+				Type:       "ldap",
+				Order:      10,
+				Enabled:    true,
+				Deprecated: false,
+			},
+			want: map[string]json.RawMessage{
+				"name":    json.RawMessage(`"corp_ldap"`),
+				"type":    json.RawMessage(`"ldap"`),
+				"order":   json.RawMessage(`10`),
+				"enabled": json.RawMessage(`true`),
+				// "deprecated" is omitempty and absent here.
 			},
 		},
 	}

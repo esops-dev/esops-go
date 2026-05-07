@@ -41,6 +41,12 @@ type Client struct {
 	tlsSettingsTime time.Time
 	tlsSettingsSnap nodesTLSSettingsWire
 	tlsSettingsTTL  time.Duration
+
+	// version is the cluster's reported version captured at construct
+	// time (the GET / probe number from the factory). Used by the
+	// deprecated-realms computation; empty when the probe did not
+	// supply one — version-aware code treats that as "do not flag".
+	version string
 }
 
 // Options bundles the transport-shaping knobs the upstream OS client
@@ -53,6 +59,12 @@ type Options struct {
 
 	// CompressRequestBody gzips outbound bodies.
 	CompressRequestBody bool
+
+	// Version is the cluster's reported version (the GET / probe
+	// number — e.g. "2.11.0"). Threaded through so version-aware
+	// adapter logic (deprecated realms) can answer without a second
+	// round trip. Empty falls through to "treat as not deprecated".
+	Version string
 }
 
 // New builds a client against the given addresses with auth carried by
@@ -88,7 +100,7 @@ func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper
 	if err != nil {
 		return nil, fmt.Errorf("opensearch client: %w", err)
 	}
-	return &Client{api: c}, nil
+	return &Client{api: c, version: opts.Version}, nil
 }
 
 // Health implements client.HealthInspector.
@@ -885,9 +897,11 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 		mappings  []types.SecurityRoleMapping
 		tenants   []types.SecurityTenant
 		anonymous *types.AnonymousAccessPosture
+		realms    []types.Realm
 		mNote     string
 		tNote     string
 		aNote     string
+		rNote     string
 	)
 	err = clientutil.RunParallel(
 		func() error {
@@ -910,6 +924,11 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 			anonymous, aNote = p, n
 			return e
 		},
+		func() error {
+			rs, n, e := c.fetchOSRealmsForAudit(ctx)
+			realms, rNote = rs, n
+			return e
+		},
 	)
 	if err != nil {
 		return report, err
@@ -918,6 +937,7 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.RoleMappings = mappings
 	report.Tenants = tenants
 	report.Anonymous = anonymous
+	report.Realms = realms
 	if mNote != "" {
 		report.Status.Notes = append(report.Status.Notes, mNote)
 	}
@@ -927,7 +947,45 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	if aNote != "" {
 		report.Status.Notes = append(report.Status.Notes, aNote)
 	}
+	if rNote != "" {
+		report.Status.Notes = append(report.Status.Notes, rNote)
+	}
 	return report, nil
+}
+
+// fetchOSRealmsForAudit wraps Realms() in the partial-failure pattern
+// the audit collector uses for every auxiliary read. /_plugins/_security/api/securityconfig
+// is admin-cert-gated on most production OS deployments, so a 403 from
+// a basic-auth/non-admin caller is the common path; lands as a note
+// rather than aborting the audit.
+func (c *Client) fetchOSRealmsForAudit(ctx context.Context) ([]types.Realm, string, error) {
+	realms, err := c.Realms(ctx)
+	if err != nil {
+		if errors.Is(err, esopsclient.ErrForbidden) {
+			return nil, "realms: forbidden — /_plugins/_security/api/securityconfig requires admin TLS certs", nil
+		}
+		if errors.Is(err, esopsclient.ErrAuth) {
+			return nil, "", err
+		}
+		if errors.Is(err, esopsclient.ErrUnsupported) {
+			return nil, "realms: security plugin endpoint not exposed", nil
+		}
+		return nil, "realms: " + truncateNote(err.Error()), nil
+	}
+	return realms, "", nil
+}
+
+// truncateNote clips a long error string into a one-line preview safe
+// for embedding in Status.Notes — matches the snippet helper in the ES
+// adapter without dragging it across the package boundary.
+func truncateNote(s string) string {
+	const max = 120
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > max {
+		s = s[:max-1] + "…"
+	}
+	return s
 }
 
 func (c *Client) fetchOSUsers(ctx context.Context) ([]types.SecurityUser, bool, string, error) {

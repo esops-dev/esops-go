@@ -1324,7 +1324,37 @@ func auditTable(w io.Writer, a types.SecurityAudit, wide bool) error {
 			return err
 		}
 	}
+
+	// Section 8: realms. The configured authentication chain — what
+	// an audit reading "how does this cluster identify a request?"
+	// has to know. Empty when the realms read was forbidden (admin-
+	// cert gating on OS) or when nothing is configured; the absence
+	// is loud via Status.Notes in either case.
+	if len(a.Realms) > 0 {
+		if err := renderRealms(w, a.Realms, wide); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// renderRealms prints the configured-realm table. Default columns are
+// the load-bearing tuple (order, type, name, enabled) plus a
+// deprecation marker; -o wide adds nothing extra here because the type
+// already carries everything operator-relevant — the realm-specific
+// config (LDAP URLs, SAML metadata) is intentionally not surfaced by
+// the capability.
+func renderRealms(w io.Writer, realms []types.Realm, wide bool) error {
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "REALMS")
+	rw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(rw, "ORDER\tTYPE\tNAME\tENABLED\tDEPRECATED")
+	for _, r := range realms {
+		_, _ = fmt.Fprintf(rw, "%d\t%s\t%s\t%t\t%t\n",
+			r.Order, dashIfEmpty(r.Type), dashIfEmpty(r.Name), r.Enabled, r.Deprecated)
+	}
+	_ = wide // wide adds no extra column for realms today
+	return rw.Flush()
 }
 
 func renderRoleMappings(w io.Writer, mappings []types.SecurityRoleMapping, wide bool) error {
@@ -3596,6 +3626,47 @@ func IndexCacheClear(w io.Writer, r types.IndexCacheClearResult, f Format) error
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
+}
+
+// Realms renders the cluster's configured authentication realm chain
+// for `ops realms list`. Default table columns are the load-bearing
+// tuple (order, type, name, enabled, deprecated). Wide is the same
+// today — the capability deliberately doesn't surface realm-level
+// config (LDAP URLs, SAML metadata, OIDC client IDs), so there is no
+// extra column to widen into. JSON/YAML emit the neutral []Realm slice
+// unchanged so a captured listing is diffable across runs.
+//
+// The business layer sorts by Order → Type → Name before returning,
+// so the renderer does not re-sort.
+func Realms(w io.Writer, realms []types.Realm, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(realms)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(realms)
+	case FormatWide:
+		return realmsTable(w, realms, true)
+	case FormatTable, "":
+		return realmsTable(w, realms, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func realmsTable(w io.Writer, realms []types.Realm, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "ORDER\tTYPE\tNAME\tENABLED\tDEPRECATED")
+	for _, r := range realms {
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%t\t%t\n",
+			r.Order, dashIfEmpty(r.Type), dashIfEmpty(r.Name), r.Enabled, r.Deprecated)
+	}
+	_ = wide
+	return tw.Flush()
 }
 
 func indexCacheClearTable(w io.Writer, r types.IndexCacheClearResult, wide bool) error {

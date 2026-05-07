@@ -33,6 +33,7 @@ func Audit(ctx context.Context, a client.SecurityAuditor, cc config.Context) (ty
 	sortSecurityRoleMappings(report.RoleMappings)
 	sortSecurityAPIKeys(report.APIKeys)
 	sortSecurityTenants(report.Tenants)
+	sortSecurityRealms(report.Realms)
 	return types.SecurityAudit{
 		TLS:          tlsFromContext(cc),
 		Status:       report.Status,
@@ -42,6 +43,7 @@ func Audit(ctx context.Context, a client.SecurityAuditor, cc config.Context) (ty
 		RoleMappings: report.RoleMappings,
 		APIKeys:      report.APIKeys,
 		Tenants:      report.Tenants,
+		Realms:       report.Realms,
 	}, nil
 }
 
@@ -121,5 +123,23 @@ func sortSecurityTenants(tenants []types.SecurityTenant) {
 			return !tenants[i].Reserved
 		}
 		return tenants[i].Name < tenants[j].Name
+	})
+}
+
+// sortSecurityRealms keeps the audit's realm chain in evaluation
+// order — Order, then Type, then Name — matching how the cluster
+// itself walks the chain. Distinct from the user/role sort (reserved-
+// last) because there's no "reserved" realm flag to group on; the
+// natural reader order for realms is "what does the cluster try
+// first?".
+func sortSecurityRealms(realms []types.Realm) {
+	sort.SliceStable(realms, func(i, j int) bool {
+		if realms[i].Order != realms[j].Order {
+			return realms[i].Order < realms[j].Order
+		}
+		if realms[i].Type != realms[j].Type {
+			return realms[i].Type < realms[j].Type
+		}
+		return realms[i].Name < realms[j].Name
 	})
 }

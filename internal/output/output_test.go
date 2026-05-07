@@ -2642,3 +2642,61 @@ func TestIndexCacheClear_wideListsFields(t *testing.T) {
 		}
 	}
 }
+
+func sampleRealms() []types.Realm {
+	return []types.Realm{
+		{Name: "file", Type: "file", Order: 0, Enabled: true},
+		{Name: "native", Type: "native", Order: 1, Enabled: true},
+		{Name: "corp_ldap", Type: "ldap", Order: 10, Enabled: false, Deprecated: true},
+	}
+}
+
+func TestRealms_tableHasHeaderAndRows(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Realms(&buf, sampleRealms(), output.FormatTable); err != nil {
+		t.Fatalf("Realms: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ORDER", "TYPE", "NAME", "ENABLED", "DEPRECATED", "file", "native", "corp_ldap"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRealms_jsonIsArrayShape(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Realms(&buf, sampleRealms(), output.FormatJSON); err != nil {
+		t.Fatalf("Realms: %v", err)
+	}
+	out := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(out, "[") || !strings.HasSuffix(out, "]") {
+		t.Errorf("expected top-level JSON array, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"deprecated": true`) {
+		t.Errorf("expected deprecated:true to round-trip in JSON, got:\n%s", out)
+	}
+}
+
+func TestRealms_rejectsUnknownFormat(t *testing.T) {
+	var buf bytes.Buffer
+	err := output.Realms(&buf, sampleRealms(), output.Format("ndjson"))
+	if err == nil {
+		t.Errorf("expected error on unsupported format, got nil")
+	}
+}
+
+func TestAudit_tableShowsRealmsSectionWhenPresent(t *testing.T) {
+	a := sampleAudit()
+	a.Realms = sampleRealms()
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, a, output.FormatTable); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"REALMS", "corp_ldap", "file", "native"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("audit table missing %q:\n%s", want, out)
+		}
+	}
+}

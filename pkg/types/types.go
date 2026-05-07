@@ -718,6 +718,14 @@ type SecurityReport struct {
 	RoleMappings []SecurityRoleMapping   `json:"role_mappings,omitempty" yaml:"role_mappings,omitempty"`
 	APIKeys      []SecurityAPIKey        `json:"api_keys,omitempty"      yaml:"api_keys,omitempty"`
 	Tenants      []SecurityTenant        `json:"tenants,omitempty"       yaml:"tenants,omitempty"`
+	// Realms is the configured authentication realm chain — the
+	// dialect-neutral view of "how does this cluster identify a
+	// request?". Populated by the audit pipeline calling RealmsInspector
+	// alongside the user/role reads. A 403 on the realms read (common
+	// on OS without admin certs) lands as a Status.Notes entry rather
+	// than an error and Realms stays empty — same partial-failure
+	// pattern API keys and role mappings follow.
+	Realms []Realm `json:"realms,omitempty" yaml:"realms,omitempty"`
 }
 
 // SecurityStatus captures whether the cluster exposes a security model
@@ -907,6 +915,7 @@ type SecurityAudit struct {
 	RoleMappings []SecurityRoleMapping   `json:"role_mappings,omitempty"   yaml:"role_mappings,omitempty"`
 	APIKeys      []SecurityAPIKey        `json:"api_keys,omitempty"        yaml:"api_keys,omitempty"`
 	Tenants      []SecurityTenant        `json:"tenants,omitempty"         yaml:"tenants,omitempty"`
+	Realms       []Realm                 `json:"realms,omitempty"          yaml:"realms,omitempty"`
 }
 
 // TLSPosture is what the context's connection looks like from the
@@ -3175,4 +3184,154 @@ type IndexCacheClearResult struct {
 	Total      int      `json:"shards_total"         yaml:"shards_total"`
 	Successful int      `json:"shards_successful"    yaml:"shards_successful"`
 	Failed     int      `json:"shards_failed"        yaml:"shards_failed"`
+}
+
+// AuditConfig is the neutral view of the cluster's audit-logging
+// configuration — whether audit is enabled, which sinks the events
+// land in, and the include/exclude/ignore-users filters that shape
+// what gets recorded. Fed by the audit-logging-enabled hygiene rule
+// (does the cluster even capture an audit trail?) and the
+// recent-audit-log-warnings rule (is anything failing in the trail?).
+//
+// Sources differ per dialect:
+//   - ES reads /_cluster/settings filtered to xpack.security.audit.*
+//   - OS reads /_plugins/_security/audit/config (security plugin)
+//
+// so the adapter normalises both into this shape.
+//
+// Outputs is the set of sinks the cluster ships records to. The
+// values "index" and "logfile" mirror the ES/OS naming and are kept
+// stable across dialects: an empty slice means the cluster did not
+// report any sink (most commonly because audit is disabled). Empty
+// EventsInclude/EventsExclude/IgnoreUsers slices mean the cluster
+// reported nothing for that filter — distinct from "an empty list
+// was explicitly set" only at the wire level, which the audit rule
+// does not need to distinguish.
+type AuditConfig struct {
+	Enabled       bool     `json:"enabled"                  yaml:"enabled"`
+	Outputs       []string `json:"outputs,omitempty"        yaml:"outputs,omitempty"`
+	EventsInclude []string `json:"events_include,omitempty" yaml:"events_include,omitempty"`
+	EventsExclude []string `json:"events_exclude,omitempty" yaml:"events_exclude,omitempty"`
+	IgnoreUsers   []string `json:"ignore_users,omitempty"   yaml:"ignore_users,omitempty"`
+}
+
+// AuditWarningsRequest narrows a recent-audit-log-warnings tail to
+// the time window and result count the consumer can usefully digest.
+// Since trims to entries with @timestamp >= Since (zero = no lower
+// bound, the cluster decides what "recent" means by index lifetime).
+// Limit caps the number of returned rows so a busy cluster does not
+// drown the rule; zero falls through to the adapter's safe default.
+type AuditWarningsRequest struct {
+	Since time.Time
+	Limit int
+}
+
+// AuditWarning is one entry from the audit-log tail, normalised
+// across ES and OS. Only metadata fields are surfaced — Timestamp,
+// Layer, Type, Count — by design: the audit log records request
+// bodies and document IDs that callers must not see through this
+// capability.
+//
+// Layer is the wire layer the event came from ("rest", "transport",
+// "ip_filter", …) lowercased so consumer matches stay stable across
+// dialects (OS reports "REST"/"TRANSPORT" upper-case, ES uses
+// lowercase). Type is the event type (e.g., "authentication_failed"
+// on ES, "FAILED_LOGIN" on OS, also lowercased) — the rule decides
+// which types qualify as warnings.
+//
+// Count is 1 for a single entry; non-1 when the adapter ever
+// summarises into buckets (a future extension — the field is in the
+// type now so the consumer doesn't have to migrate later).
+type AuditWarning struct {
+	Timestamp time.Time `json:"timestamp"        yaml:"timestamp"`
+	Layer     string    `json:"layer,omitempty"  yaml:"layer,omitempty"`
+	Type      string    `json:"type,omitempty"   yaml:"type,omitempty"`
+	Count     int       `json:"count"            yaml:"count"`
+}
+
+// Realm is one configured authentication realm — the dialect-neutral
+// view of "how does this cluster identify a request?". Fed by the
+// deprecated-realms hygiene rule (does this cluster still rely on a
+// realm type the next major drops?) and any future identity-posture
+// audit.
+//
+// Sources differ per dialect:
+//   - ES walks /_cluster/settings filtered to xpack.security.authc.realms.*
+//     across persistent → transient → defaults, where each realm is
+//     keyed as `xpack.security.authc.realms.<type>.<name>` with order
+//     and enabled fields inside.
+//   - OS reads /_plugins/_security/api/securityconfig and walks the
+//     dynamic.authc map: each authc domain carries an http_authenticator
+//     and authentication_backend block plus order/http_enabled.
+//
+// Type is the cluster's own realm/backend label — "native", "file",
+// "ldap", "saml", "oidc", "kerberos" on ES; "internal", "ldap",
+// "kerberos", "noop" plus an http authenticator hint ("basic",
+// "openid", "saml", "jwt", …) on OS. Order is the cluster's evaluation
+// order (lower wins). Enabled is whether the cluster will actually
+// consult the realm; a disabled-but-present realm is information, not
+// a failure.
+//
+// Deprecated is true when the realm type is marked deprecated for the
+// cluster's reported version. The flag is computed against the cluster's
+// own version rather than a static catalog so a future deprecation
+// (say, removing a realm type in ES 10) lands without esops bookkeeping
+// in every consumer.
+type Realm struct {
+	Name       string `json:"name"                  yaml:"name"`
+	Type       string `json:"type"                  yaml:"type"`
+	Order      int    `json:"order"                 yaml:"order"`
+	Enabled    bool   `json:"enabled"               yaml:"enabled"`
+	Deprecated bool   `json:"deprecated,omitempty"  yaml:"deprecated,omitempty"`
+}
+
+// APIKey is the richer ES-only view of one API key from
+// /_security/api_key, returned by APIKeyInspector. Distinct from
+// SecurityAPIKey (which the audit pipeline produces with the older
+// string-shaped Creation/Expiration) so callers wanting the age-based
+// hygiene rule can reach for typed time.Time values without re-parsing.
+//
+// Creation is the cluster-reported creation timestamp — always set when
+// the cluster surfaced a key. Expiration is nil when the key has no
+// expiry set (the operator-relevant signal "this key never expires").
+// LastAuth is nil when the cluster does not report it: ES did not
+// surface last-authentication on every supported version, and a
+// missing value is "the cluster did not tell us", not "never used".
+//
+// RoleTemplates carries the configured role-template names attached to
+// the key (the request shape ES accepts at creation time). Empty when
+// the key was created without a role-templates block — i.e. the key
+// inherits its owner's roles directly.
+type APIKey struct {
+	ID            string     `json:"id"                       yaml:"id"`
+	Name          string     `json:"name"                     yaml:"name"`
+	Username      string     `json:"username,omitempty"       yaml:"username,omitempty"`
+	Realm         string     `json:"realm,omitempty"          yaml:"realm,omitempty"`
+	Creation      time.Time  `json:"creation"                 yaml:"creation"`
+	Expiration    *time.Time `json:"expiration,omitempty"     yaml:"expiration,omitempty"`
+	LastAuth      *time.Time `json:"last_auth,omitempty"      yaml:"last_auth,omitempty"`
+	Invalidated   bool       `json:"invalidated,omitempty"    yaml:"invalidated,omitempty"`
+	RoleTemplates []string   `json:"role_templates,omitempty" yaml:"role_templates,omitempty"`
+}
+
+// ServiceToken is the ES-only view of one credential issued for a
+// service account, returned by ServiceTokenInspector. ES lets a service
+// account hold both index-stored tokens (mutable, listed via
+// /_security/service/<ns>/<svc>/credential) and file-realm tokens
+// (declared on disk in service_tokens). The capability surfaces both;
+// Source distinguishes them so the operator can tell which credential
+// is rotated through the API and which is bound to a node's
+// configuration.
+//
+// Creation is the cluster-reported creation timestamp for index-stored
+// tokens; the zero time for file-realm tokens, which the cluster does
+// not timestamp. Namespace and Service together form the parent
+// service account ("elastic/fleet-server"); Name is the per-credential
+// identifier.
+type ServiceToken struct {
+	Name      string    `json:"name"                yaml:"name"`
+	Namespace string    `json:"namespace"           yaml:"namespace"`
+	Service   string    `json:"service"             yaml:"service"`
+	Creation  time.Time `json:"creation,omitempty"  yaml:"creation,omitempty"`
+	Source    string    `json:"source"              yaml:"source"`
 }

@@ -1010,6 +1010,149 @@ type IndexCacheClearer interface {
 	ClearCache(ctx context.Context, req types.IndexCacheClearRequest) (types.IndexCacheClearResult, error)
 }
 
+// AuditLogInspector reports the cluster's audit-logging configuration
+// and a recent-events tail — the two reads esops-doctor's
+// audit-logging-enabled and recent-audit-log-warnings rules need.
+// Split into two methods so the "is audit even on" check (one cheap
+// settings read) doesn't pay for the tail's _search round trip when
+// the rule short-circuits on a disabled config.
+//
+// Sources differ per dialect:
+//   - ES reads /_cluster/settings filtered to xpack.security.audit.*
+//     for the config and the .security_audit_log-* index pattern for
+//     the tail.
+//   - OS reads /_plugins/_security/audit/config for the config and
+//     the audit_log index for the tail.
+//
+// The tail reader returns only metadata (timestamp, layer, type,
+// count) by design — the audit log records request bodies and
+// document IDs which the capability deliberately does not surface.
+// Consumers that want more detail must read the underlying index
+// themselves, where the cluster's existing access controls apply.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the cluster lacks the underlying surface
+//     (ES with xpack.security.audit unavailable; OS without the
+//     security plugin's audit config endpoint registered)
+//   - generic wrapped error on other 4xx/5xx with the cluster's body
+//     in the message
+//
+// AuditWarnings returns an empty slice (not an error) when the audit
+// log index does not exist on the cluster yet — a fresh deployment
+// with audit just-enabled hasn't populated it, and that is a valid
+// "nothing to report" outcome rather than a failure.
+type AuditLogInspector interface {
+	AuditConfig(ctx context.Context) (types.AuditConfig, error)
+	AuditWarnings(ctx context.Context, req types.AuditWarningsRequest) ([]types.AuditWarning, error)
+}
+
+// RealmsInspector reports the cluster's configured authentication
+// realms — the dialect-neutral view of "how does this cluster identify
+// a request?". Used by the deprecated-realms hygiene rule and any
+// future identity-posture audit.
+//
+// Sources differ per dialect:
+//   - ES merges /_xpack/usage?filter_path=security.realms (the
+//     authoritative list of loaded realms, including yaml-only ones)
+//     with /_cluster/settings filtered to xpack.security.authc.realms.*
+//     for any per-realm runtime overrides. Either source alone misses
+//     cases — settings alone misses elasticsearch.yml-declared realms,
+//     usage alone misses runtime overrides.
+//   - OS reads /_plugins/_security/api/securityconfig and walks the
+//     dynamic.authc map (authc/authz domains).
+//
+// Important caveat for OpenSearch consumers: the security plugin gates
+// /_plugins/_security/api/securityconfig behind admin TLS certs (the
+// plugin's restapi role / admin DN list — see the OS security plugin
+// docs). Operators authenticated with basic auth, an API token, or a
+// non-admin client cert hit a 403 here and the capability returns
+// ErrForbidden. ErrForbidden is not "no realms configured" — consumers
+// (notably the deprecated-realms rule) should treat it as
+// inconclusive, not as a green-light absence.
+//
+// Implementations sort the result deterministically by Order, then
+// Type, then Name, so a captured slice is stable across runs. A
+// cluster with security disabled or no realm configuration returns an
+// empty slice rather than an error — "nothing configured" is a valid
+// posture, not a failure mode.
+//
+// The Deprecated field on each Realm is computed against the cluster's
+// reported version. Adapters do not maintain a static deprecation list
+// in the public API; the version-aware mapping lives behind the
+// adapter so future deprecations land without consumer bookkeeping.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403 (a forbidden read is reported
+//     as an auth error rather than an empty slice — the operator
+//     wants the difference between "cluster has no realms" and "I
+//     can't see them")
+//   - ErrUnsupported when the cluster surface is unavailable (OS
+//     without the security plugin)
+//   - generic wrapped error on other 4xx/5xx with the cluster's body
+//     in the message
+type RealmsInspector interface {
+	Realms(ctx context.Context) ([]types.Realm, error)
+}
+
+// APIKeyInspector reports active API keys from the cluster's native
+// security store. ES-only: the OpenSearch security plugin has no
+// equivalent first-class concept, and the OS adapter returns
+// ErrUnsupported on every method so the dialect mismatch surfaces as
+// exit code 6 rather than a silent empty slice.
+//
+// Distinct from SecurityAuditor.Audit's APIKeys block: that one
+// flattens the cluster's response into the older SecurityAPIKey shape
+// (string-typed Creation/Expiration) for the audit table. APIKeyInspector
+// is the typed-time companion the age-based hygiene rule needs —
+// stale-key detection wants time.Time, not RFC3339 strings to re-parse.
+//
+// Source endpoint: GET /_security/api_key?owner=false. Requires the
+// cluster privilege manage_api_key (or read_security on newer ES); a
+// 403 returns ErrForbidden. Implementations sort the result
+// deterministically by Creation desc, then ID, so a captured slice is
+// stable across runs.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the adapter is the OS one
+//   - generic wrapped error on other 4xx/5xx with the cluster's body
+//     in the message
+type APIKeyInspector interface {
+	APIKeys(ctx context.Context) ([]types.APIKey, error)
+}
+
+// ServiceTokenInspector reports the credentials issued for the
+// cluster's service accounts — the ES-only "service token" surface
+// (sibling of API keys, used by Fleet, APM Server, and similar
+// integrations). The OS adapter returns ErrUnsupported on every method.
+//
+// The cluster's API is per-service-account: GET /_security/service
+// lists every (namespace, service) pair; GET /_security/service/<ns>/<svc>/credential
+// lists the credentials of one. Implementations fan out across the
+// listed accounts and merge into a single slice — the typical fleet
+// has a handful of service accounts, so the fan-out is cheap and the
+// caller gets a flat, cluster-wide view rather than nested per-account
+// maps.
+//
+// Source distinguishes index-stored tokens (mutable, rotated via the
+// API — Source="index") from file-realm tokens declared on disk in
+// service_tokens (Source="file"). The credential's name is the only
+// piece operators can act on without root access to the node, so the
+// capability surfaces nothing else from the file form.
+//
+// Errors mirror APIKeyInspector. A per-service forbidden read does not
+// abort the whole call: the implementation skips that account and
+// continues; the caller receives the credentials it could enumerate.
+// A blanket 403 on /_security/service (no read_security at all)
+// returns ErrForbidden.
+type ServiceTokenInspector interface {
+	ServiceTokens(ctx context.Context) ([]types.ServiceToken, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -1065,4 +1208,8 @@ type Client struct {
 	TransportTLS        TransportTLSInspector
 	HTTPTLS             HTTPTLSInspector
 	IndexCacheClear     IndexCacheClearer
+	AuditLog            AuditLogInspector
+	Realms              RealmsInspector
+	APIKeys             APIKeyInspector
+	ServiceTokens       ServiceTokenInspector
 }
