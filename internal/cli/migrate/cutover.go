@@ -68,9 +68,13 @@ the read-only steps (verify-target-exists, inspect-alias) and prints
 				Name:  "block-writes",
 				Usage: "Set index.blocks.write=true on --from before the swap (recommended for live aliases)",
 			},
+			&cli.DurationFlag{
+				Name:  "drain-delay",
+				Usage: "Pause between the write-block and the alias swap so in-flight bulk requests drain (e.g. '500ms', '2s'). 0 = no pause. Only honoured when --block-writes is set.",
+			},
 			&cli.BoolFlag{
 				Name:  "keep-write-block",
-				Usage: "Do not clear the write-block after the swap (leaves --from read-only-but-not-deletable)",
+				Usage: "Do not clear the write-block after the swap (leaves --from read-only). The cutover surfaces a manual-cleanup reminder; no background TTL applies.",
 			},
 		},
 		Action: runCutover,
@@ -104,6 +108,7 @@ func runCutover(ctx context.Context, cmd *cli.Command) error {
 		BlockWrites:    cmd.Bool("block-writes"),
 		KeepWriteBlock: cmd.Bool("keep-write-block"),
 		DryRun:         cmd.Bool("dry-run"),
+		DrainDelay:     cmd.Duration("drain-delay"),
 	})
 	if err != nil {
 		return err

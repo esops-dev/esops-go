@@ -2625,12 +2625,6 @@ type ReindexSubmitRequest struct {
 	SourcePassword string
 	SourceHeaders  map[string]string
 
-	// SourceConnectTimeout / SourceSocketTimeout map to the cluster's
-	// source.remote.connect_timeout / socket_timeout. Zero = cluster
-	// default.
-	SourceConnectTimeout time.Duration
-	SourceSocketTimeout  time.Duration
-
 	// TargetIndex is the destination on the target cluster. Reindex
 	// will create the index lazily; pre-creating with the correct
 	// settings/mappings is the operator's job (the translator from
@@ -2706,6 +2700,13 @@ type ReindexTaskStatus struct {
 // each task is polled to completion before the next is submitted so a
 // shared cluster's reindex slot stays bounded by the operator's
 // expectation, not multiplied by --indices' resolved cardinality.
+//
+// Resume is set by `esops migrate reindex --resume`. When true, the
+// orchestrator looks up persisted state under $XDG_STATE_HOME/esops/
+// keyed by (source-context, target-context, target-suffix-or-literal)
+// and continues polling any task IDs that did not complete in the prior
+// run. The new fan-out is skipped — resume is "finish what was started",
+// not "start over with the same flags".
 type MigrationReindexRequest struct {
 	SourceContext       string
 	TargetContext       string
@@ -2718,6 +2719,7 @@ type MigrationReindexRequest struct {
 	WaitForActiveShards string  // "" / "all" / "<N>"
 	SizeLimit           int64
 	DryRun              bool
+	Resume              bool
 	PollInterval        time.Duration
 }
 
@@ -2760,6 +2762,13 @@ type MigrationVerifyRequest struct {
 	TargetContext string
 	Indices       string // pattern resolved against source
 	TargetSuffix  string // applied to source name to derive target
+	// TargetIndexLiteral pins the target side to a single literal name —
+	// only valid when the source-side resolution returns one index. The
+	// flag mirrors `migrate reindex --to-index`; without it, an operator
+	// who reindexed `logs` → `logs-fixed` via --to-index has no way to
+	// verify the pair (suffix-based pairing produces the wrong target
+	// name).
+	TargetIndexLiteral string
 }
 
 // MigrationVerifyEntry is one per-index row of a verify report. Diff
@@ -2807,6 +2816,14 @@ type MigrationCutoverRequest struct {
 	BlockWrites    bool
 	KeepWriteBlock bool
 	DryRun         bool
+	// DrainDelay is a short pause inserted between setting
+	// index.blocks.write=true on FromIndex and performing the alias
+	// swap. The block only refuses *new* writes; bulk requests already
+	// in flight on individual shards may still complete after the
+	// settings call returns. A small delay lets those drain so the
+	// orphan index doesn't receive a write the operator thought was
+	// already cut over. Zero = no pause (the original behaviour).
+	DrainDelay time.Duration
 }
 
 // MigrationCutoverStep is one row in MigrationCutoverResult.Steps —

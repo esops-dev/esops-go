@@ -45,6 +45,10 @@ Verify-then-cutover is one runbook command:
 				Name:  "to-suffix",
 				Usage: "Append to each source index name to derive the target index (e.g. '-v2')",
 			},
+			&cli.StringFlag{
+				Name:  "to-index",
+				Usage: "Explicit target index name; only valid when --indices resolves to one source. Mirrors `migrate reindex --to-index`.",
+			},
 		),
 		Action: runVerify,
 	}
@@ -57,10 +61,11 @@ func runVerify(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	res, err := esopsmigrate.Verify(ctx, s.Source, s.Target, types.MigrationVerifyRequest{
-		SourceContext: s.Source.Context,
-		TargetContext: s.Target.Context,
-		Indices:       cmd.String("indices"),
-		TargetSuffix:  cmd.String("to-suffix"),
+		SourceContext:      s.Source.Context,
+		TargetContext:      s.Target.Context,
+		Indices:            cmd.String("indices"),
+		TargetSuffix:       cmd.String("to-suffix"),
+		TargetIndexLiteral: cmd.String("to-index"),
 	})
 	if err != nil {
 		return err

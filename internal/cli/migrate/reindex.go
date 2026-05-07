@@ -90,7 +90,11 @@ submitted, and exits without firing /_reindex.`,
 			&cli.DurationFlag{
 				Name:  "poll-interval",
 				Value: esopsmigrate.DefaultReindexPollInterval,
-				Usage: "How often /_tasks/<id> is polled while a reindex runs",
+				Usage: "How often /_tasks/<id> is polled while a reindex runs (clamped to 1s minimum)",
+			},
+			&cli.BoolFlag{
+				Name:  "resume",
+				Usage: "Resume a prior interrupted run from $XDG_STATE_HOME/esops/migrate; do not submit new reindexes",
 			},
 		),
 		Action: runReindex,
@@ -98,6 +102,9 @@ submitted, and exits without firing /_reindex.`,
 }
 
 func runReindex(ctx context.Context, cmd *cli.Command) error {
+	if v := cmd.Duration("poll-interval"); v > 0 && v < esopsmigrate.MinReindexPollIntervalCLI {
+		return client.UsageError("poll-interval: must be >= %s (got %s) — sub-second polling brown-outs the cluster master", esopsmigrate.MinReindexPollIntervalCLI, v)
+	}
 	s, err := prepareTwin(ctx, cmd, cmdsetup.FormatsStandard)
 	if err != nil {
 		return err
@@ -109,11 +116,7 @@ func runReindex(ctx context.Context, cmd *cli.Command) error {
 	// forwarded into the target's source.remote block; surface that
 	// up-front rather than letting the cluster reject the source
 	// fetch with an opaque 401 mid-reindex.
-	srcAuthType, err := resolveSourceAuthType(cmd, s.Source.Context)
-	if err != nil {
-		return err
-	}
-	if ok, reason := sourceAuthIsForwardable(srcAuthType); !ok {
+	if ok, reason := sourceAuthIsForwardable(s.Source.AuthType); !ok {
 		return client.UsageError("source context %q: %s", s.Source.Context, reason)
 	}
 
@@ -129,6 +132,7 @@ func runReindex(ctx context.Context, cmd *cli.Command) error {
 		WaitForActiveShards: cmd.String("wait-for-active-shards"),
 		SizeLimit:           int64(cmd.Int("size")),
 		DryRun:              cmd.Bool("dry-run"),
+		Resume:              cmd.Bool("resume"),
 		PollInterval:        cmd.Duration("poll-interval"),
 	}
 

@@ -76,11 +76,14 @@ $ esops migrate reindex --source local-es --target local-os --to-suffix=-v2 \
 - `--slices auto`
 - `--requests-per-second N`
 - `--conflicts proceed` (default: abort)
+- `--poll-interval` — how often `/_tasks/<id>` is polled (minimum `1s`; sub-second polling is rejected up-front)
+- `--resume` — pick up an interrupted run from `$XDG_STATE_HOME/esops/migrate`. SIGINT during a reindex cancels the cluster-side task (`POST /_tasks/<id>/_cancel`) and persists state so a subsequent `--resume` continues polling instead of starting fresh.
 - `--dry-run`
 
 **Common use cases**
 - Version upgrade or cross-dialect migration
 - Controlled reindex with throttling
+- Resume a long-running reindex after a network blip or accidental Ctrl-C
 
 ---
 
@@ -91,6 +94,10 @@ Compares document counts between source and target after reindex.
 ```sh
 $ esops migrate verify --source local-es --target local-os --to-suffix=-v2
 ```
+
+**Key flags**
+- `--source`, `--target` (required)
+- `--to-suffix` or `--to-index` — same pairing rules as `migrate reindex`. Use `--to-index` when the original reindex used a literal target name.
 
 **Common use cases**
 - Confirm reindex completed successfully before cutover
@@ -104,12 +111,14 @@ Atomic alias swap on a single cluster (typically the target).
 
 ```sh
 $ esops migrate cutover --context local-es --alias logs \
-  --from logs --to logs-v2 --block-writes
+  --from logs --to logs-v2 --block-writes --drain-delay=500ms
 ```
 
 **Flags**
 - `--alias`, `--from`, `--to` (all required, literal names)
-- `--block-writes` — temporarily block writes on old index
+- `--block-writes` — set `index.blocks.write=true` on `--from` before the swap so any in-flight writers get a clear refusal. The block applies the moment the cluster commits the settings update; bulk requests already in flight on individual shards may still complete after that, so combine with `--drain-delay` if traffic is high.
+- `--drain-delay DURATION` — pause between the write-block and the alias swap so in-flight writes drain (e.g. `500ms`, `2s`). Only honoured when `--block-writes` is set; default 0.
+- `--keep-write-block` — leave `--from` write-blocked after the swap (read-only). The cutover surfaces a manual-cleanup reminder in the steps log; there is no background TTL.
 - `--dry-run`
 
 **Common use cases**
