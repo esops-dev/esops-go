@@ -338,6 +338,31 @@ func TestAudit_securityDisabledKeepsStatus(t *testing.T) {
 	}
 }
 
+func TestAudit_passesRealmsThroughAndSorts(t *testing.T) {
+	report := sampleReport()
+	report.Realms = []types.Realm{
+		// Deliberately jumbled — sortSecurityRealms should put native (order=1)
+		// before corp_ldap (order=10) regardless of input order.
+		{Name: "corp_ldap", Type: "ldap", Order: 10, Enabled: true},
+		{Name: "native", Type: "native", Order: 1, Enabled: true},
+		{Name: "file", Type: "file", Order: 0, Enabled: true},
+	}
+	fake := &fakeSecurityAuditor{report: report}
+	got, err := ops.Audit(context.Background(), fake, sampleContext())
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if len(got.Realms) != 3 {
+		t.Fatalf("got %d realms, want 3", len(got.Realms))
+	}
+	wantOrder := []string{"file", "native", "corp_ldap"}
+	for i, r := range got.Realms {
+		if r.Name != wantOrder[i] {
+			t.Errorf("realms[%d] = %q, want %q (sorted by Order)", i, r.Name, wantOrder[i])
+		}
+	}
+}
+
 func userNames(us []types.SecurityUser) []string {
 	out := make([]string, len(us))
 	for i, u := range us {

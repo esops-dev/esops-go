@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -118,9 +118,9 @@ func readBundle(t *testing.T, buf *bytes.Buffer) map[string][]byte {
 
 func TestDiag_writesManifestAndArtifacts(t *testing.T) {
 	fake := &fakeDiagnoser{responses: map[string]fakeResp{
-		"/":                                    {body: []byte(`{"cluster":"ok"}`), status: 200},
-		"/_cluster/health?level=indices":       {body: []byte(`{"status":"green"}`), status: 200},
-		"/_nodes/hot_threads":                  {body: []byte("Hot threads at 2026-04-24\n"), status: 200},
+		"/":                              {body: []byte(`{"cluster":"ok"}`), status: 200},
+		"/_cluster/health?level=indices": {body: []byte(`{"status":"green"}`), status: 200},
+		"/_nodes/hot_threads":            {body: []byte("Hot threads at 2026-04-24\n"), status: 200},
 	}}
 	var buf bytes.Buffer
 	manifest, err := ops.Diag(context.Background(), esClient(fake), types.DiagRequest{}, &buf)
@@ -326,6 +326,92 @@ func TestDiag_errorsWhenClientHasNoDiagCapability(t *testing.T) {
 	}, types.DiagRequest{}, &buf)
 	if err == nil {
 		t.Fatalf("expected error when client.Diag is nil")
+	}
+}
+
+func TestDiag_includesCCRAndLicenseAndRemoteSettingsOnES(t *testing.T) {
+	// CCR (stats + auto-follow), licence, and configured cluster.remote.*
+	// settings are part of the bundle on ES — the support-ticket
+	// signal these collectors carry is too valuable to leave to a
+	// follow-up `--include-ccr` flag.
+	fake := &fakeDiagnoser{responses: map[string]fakeResp{
+		"/_ccr/stats":       {body: []byte(`{"follow_stats":{"indices":[]}}`), status: 200},
+		"/_ccr/auto_follow": {body: []byte(`{"patterns":[]}`), status: 200},
+		"/_license":         {body: []byte(`{"license":{"status":"active","type":"basic"}}`), status: 200},
+	}}
+	var buf bytes.Buffer
+	_, err := ops.Diag(context.Background(), esClient(fake), types.DiagRequest{}, &buf)
+	if err != nil {
+		t.Fatalf("Diag: %v", err)
+	}
+
+	calls := fake.callsSnapshot()
+	wantPaths := []string{
+		"/_ccr/stats",
+		"/_ccr/auto_follow",
+		"/_license",
+		"/_cluster/settings?include_defaults=true&filter_path=*.cluster.remote.*",
+	}
+	for _, want := range wantPaths {
+		var hit bool
+		for _, p := range calls {
+			if p == want {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			t.Errorf("collector did not call %q (calls: %v)", want, calls)
+		}
+	}
+
+	files := readBundle(t, &buf)
+	for _, want := range []string{"ccr_stats.json", "ccr_auto_follow.json", "license.json", "cluster_remote_settings.json"} {
+		if _, ok := files[want]; !ok {
+			t.Errorf("bundle missing %q (files: %v)", want, keys(files))
+		}
+	}
+}
+
+func TestDiag_skipsCCRAndLicenseOnOpenSearch(t *testing.T) {
+	// The collector plan filters dialect-specific endpoints before
+	// firing. Confirm the OS branch never touches /_ccr/* or /_license
+	// — those would 404 on every OpenSearch cluster.
+	fake := &fakeDiagnoser{}
+	var buf bytes.Buffer
+	if _, err := ops.Diag(context.Background(), osClient(fake), types.DiagRequest{}, &buf); err != nil {
+		t.Fatalf("Diag: %v", err)
+	}
+	for _, p := range fake.callsSnapshot() {
+		if strings.HasPrefix(p, "/_ccr/") || p == "/_license" {
+			t.Errorf("ES-only endpoint %q hit on OpenSearch cluster", p)
+		}
+	}
+}
+
+func TestDiag_includesClusterRemoteSettingsOnBothDialects(t *testing.T) {
+	// /_cluster/settings?...filter_path=*.cluster.remote.* is shared
+	// across dialects: an OpenSearch cluster with a configured remote
+	// must surface the same support-ticket signal as ES.
+	for _, factory := range map[string]func(client.ClusterDiagnoser) *client.Client{
+		"es": esClient,
+		"os": osClient,
+	} {
+		fake := &fakeDiagnoser{}
+		var buf bytes.Buffer
+		if _, err := ops.Diag(context.Background(), factory(fake), types.DiagRequest{}, &buf); err != nil {
+			t.Fatalf("Diag: %v", err)
+		}
+		var hit bool
+		for _, p := range fake.callsSnapshot() {
+			if p == "/_cluster/settings?include_defaults=true&filter_path=*.cluster.remote.*" {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			t.Errorf("cluster_remote_settings collector did not fire (calls: %v)", fake.callsSnapshot())
+		}
 	}
 }
 

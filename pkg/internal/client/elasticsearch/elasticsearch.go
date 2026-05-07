@@ -43,6 +43,12 @@ type Client struct {
 	tlsSettingsTime time.Time
 	tlsSettingsSnap nodesTLSSettingsWire
 	tlsSettingsTTL  time.Duration
+
+	// version is the cluster's reported version captured at construct
+	// time (the GET / probe number from the factory). Used by the
+	// deprecated-realms computation. Empty when the probe did not
+	// supply one — version-aware code treats that as "do not flag".
+	version string
 }
 
 // Options bundles the transport-shaping knobs the upstream ES client
@@ -62,6 +68,15 @@ type Options struct {
 	// links. Off by default; the upstream's default has stayed off
 	// across versions and operators expect that.
 	CompressRequestBody bool
+
+	// Version is the cluster's reported version (the GET / probe
+	// number — e.g. "8.13.0"). Threaded through from the factory so
+	// version-aware adapter logic — notably the deprecated-realms
+	// computation — can answer "is this realm type deprecated for the
+	// version on the wire?" without a second round trip. Empty when
+	// the probe did not return a version; version-aware code falls
+	// through to "treat as not deprecated" rather than guessing.
+	Version string
 }
 
 // New builds a client against the given addresses with auth carried by
@@ -97,7 +112,7 @@ func New(addrs []string, provider auth.Provider, httpTransport http.RoundTripper
 	if err != nil {
 		return nil, fmt.Errorf("elasticsearch client: %w", err)
 	}
-	return &Client{api: c}, nil
+	return &Client{api: c, version: opts.Version}, nil
 }
 
 // Health implements client.HealthInspector.
@@ -1140,9 +1155,11 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 		mappings  []types.SecurityRoleMapping
 		keys      []types.SecurityAPIKey
 		anonymous *types.AnonymousAccessPosture
+		realms    []types.Realm
 		mNote     string
 		kNote     string
 		aNote     string
+		rNote     string
 	)
 	err = clientutil.RunParallel(
 		func() error {
@@ -1165,6 +1182,11 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 			anonymous, aNote = p, n
 			return e
 		},
+		func() error {
+			rs, n, e := c.fetchESRealmsForAudit(ctx)
+			realms, rNote = rs, n
+			return e
+		},
 	)
 	if err != nil {
 		return report, err
@@ -1173,6 +1195,7 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.RoleMappings = mappings
 	report.APIKeys = keys
 	report.Anonymous = anonymous
+	report.Realms = realms
 	if mNote != "" {
 		report.Status.Notes = append(report.Status.Notes, mNote)
 	}
@@ -1182,7 +1205,37 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	if aNote != "" {
 		report.Status.Notes = append(report.Status.Notes, aNote)
 	}
+	if rNote != "" {
+		report.Status.Notes = append(report.Status.Notes, rNote)
+	}
 	return report, nil
+}
+
+// fetchESRealmsForAudit wraps Realms() in the partial-failure pattern
+// the audit collector uses for every auxiliary read: a 403 lands as
+// "realms: forbidden" in Status.Notes rather than aborting the audit.
+// The capability surface itself surfaces ErrForbidden — the audit
+// collector translates that to a note so partial visibility beats
+// dropping the whole run.
+func (c *Client) fetchESRealmsForAudit(ctx context.Context) ([]types.Realm, string, error) {
+	realms, err := c.Realms(ctx)
+	if err != nil {
+		if errors.Is(err, esopsclient.ErrForbidden) {
+			return nil, "realms: forbidden — needs cluster-settings read access", nil
+		}
+		// Auth failure is the same blanket-bad-credentials case the
+		// rest of the audit treats as fatal — bubble up.
+		if errors.Is(err, esopsclient.ErrAuth) {
+			return nil, "", err
+		}
+		// Unsupported / version-specific endpoint gaps land as a note;
+		// the audit shouldn't fail because /_xpack/usage isn't there
+		// on a basic-license cluster (the underlying reader already
+		// falls through to settings, but a hostile body or unrelated
+		// 5xx still arrives here).
+		return nil, "realms: " + snippet([]byte(err.Error())), nil
+	}
+	return realms, "", nil
 }
 
 // fetchESUsers returns (users, note, disabled, err). When disabled is

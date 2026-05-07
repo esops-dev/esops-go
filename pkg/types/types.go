@@ -718,6 +718,14 @@ type SecurityReport struct {
 	RoleMappings []SecurityRoleMapping   `json:"role_mappings,omitempty" yaml:"role_mappings,omitempty"`
 	APIKeys      []SecurityAPIKey        `json:"api_keys,omitempty"      yaml:"api_keys,omitempty"`
 	Tenants      []SecurityTenant        `json:"tenants,omitempty"       yaml:"tenants,omitempty"`
+	// Realms is the configured authentication realm chain — the
+	// dialect-neutral view of "how does this cluster identify a
+	// request?". Populated by the audit pipeline calling RealmsInspector
+	// alongside the user/role reads. A 403 on the realms read (common
+	// on OS without admin certs) lands as a Status.Notes entry rather
+	// than an error and Realms stays empty — same partial-failure
+	// pattern API keys and role mappings follow.
+	Realms []Realm `json:"realms,omitempty" yaml:"realms,omitempty"`
 }
 
 // SecurityStatus captures whether the cluster exposes a security model
@@ -907,6 +915,7 @@ type SecurityAudit struct {
 	RoleMappings []SecurityRoleMapping   `json:"role_mappings,omitempty"   yaml:"role_mappings,omitempty"`
 	APIKeys      []SecurityAPIKey        `json:"api_keys,omitempty"        yaml:"api_keys,omitempty"`
 	Tenants      []SecurityTenant        `json:"tenants,omitempty"         yaml:"tenants,omitempty"`
+	Realms       []Realm                 `json:"realms,omitempty"          yaml:"realms,omitempty"`
 }
 
 // TLSPosture is what the context's connection looks like from the
@@ -2670,14 +2679,14 @@ type MigrationPlanTotals struct {
 
 // MigrationPlan is the structured outcome of `migrate plan`.
 type MigrationPlan struct {
-	Source           MigrationEndpoint    `json:"source"             yaml:"source"`
-	Target           MigrationEndpoint    `json:"target"             yaml:"target"`
-	ThroughputDPS    int                  `json:"throughput_dps"     yaml:"throughput_dps"`
-	Indices          []MigrationIndexPlan `json:"indices"            yaml:"indices"`
-	Totals           MigrationPlanTotals  `json:"totals"             yaml:"totals"`
-	Blockers         int                  `json:"blockers"           yaml:"blockers"`
-	Warnings         int                  `json:"warnings"           yaml:"warnings"`
-	Status           string               `json:"status"             yaml:"status"`
+	Source        MigrationEndpoint    `json:"source"             yaml:"source"`
+	Target        MigrationEndpoint    `json:"target"             yaml:"target"`
+	ThroughputDPS int                  `json:"throughput_dps"     yaml:"throughput_dps"`
+	Indices       []MigrationIndexPlan `json:"indices"            yaml:"indices"`
+	Totals        MigrationPlanTotals  `json:"totals"             yaml:"totals"`
+	Blockers      int                  `json:"blockers"           yaml:"blockers"`
+	Warnings      int                  `json:"warnings"           yaml:"warnings"`
+	Status        string               `json:"status"             yaml:"status"`
 }
 
 // CountRequest scopes a DocCounter.Count call to one or more indices.
@@ -2695,8 +2704,8 @@ type CountRequest struct {
 // return the same envelope ({count, _shards: {total, successful, failed,
 // skipped}}); one shape covers both adapters.
 type CountResult struct {
-	Count    int64           `json:"count"             yaml:"count"`
-	Shards   CountShardsInfo `json:"shards,omitempty"  yaml:"shards,omitempty"`
+	Count  int64           `json:"count"             yaml:"count"`
+	Shards CountShardsInfo `json:"shards,omitempty"  yaml:"shards,omitempty"`
 }
 
 // CountShardsInfo mirrors the cluster's `_shards` block on the count
@@ -3175,4 +3184,396 @@ type IndexCacheClearResult struct {
 	Total      int      `json:"shards_total"         yaml:"shards_total"`
 	Successful int      `json:"shards_successful"    yaml:"shards_successful"`
 	Failed     int      `json:"shards_failed"        yaml:"shards_failed"`
+}
+
+// AuditConfig is the neutral view of the cluster's audit-logging
+// configuration — whether audit is enabled, which sinks the events
+// land in, and the include/exclude/ignore-users filters that shape
+// what gets recorded. Fed by the audit-logging-enabled hygiene rule
+// (does the cluster even capture an audit trail?) and the
+// recent-audit-log-warnings rule (is anything failing in the trail?).
+//
+// Sources differ per dialect:
+//   - ES reads /_cluster/settings filtered to xpack.security.audit.*
+//   - OS reads /_plugins/_security/audit/config (security plugin)
+//
+// so the adapter normalises both into this shape.
+//
+// Outputs is the set of sinks the cluster ships records to. The
+// values "index" and "logfile" mirror the ES/OS naming and are kept
+// stable across dialects: an empty slice means the cluster did not
+// report any sink (most commonly because audit is disabled). Empty
+// EventsInclude/EventsExclude/IgnoreUsers slices mean the cluster
+// reported nothing for that filter — distinct from "an empty list
+// was explicitly set" only at the wire level, which the audit rule
+// does not need to distinguish.
+type AuditConfig struct {
+	Enabled       bool     `json:"enabled"                  yaml:"enabled"`
+	Outputs       []string `json:"outputs,omitempty"        yaml:"outputs,omitempty"`
+	EventsInclude []string `json:"events_include,omitempty" yaml:"events_include,omitempty"`
+	EventsExclude []string `json:"events_exclude,omitempty" yaml:"events_exclude,omitempty"`
+	IgnoreUsers   []string `json:"ignore_users,omitempty"   yaml:"ignore_users,omitempty"`
+}
+
+// AuditWarningsRequest narrows a recent-audit-log-warnings tail to
+// the time window and result count the consumer can usefully digest.
+// Since trims to entries with @timestamp >= Since (zero = no lower
+// bound, the cluster decides what "recent" means by index lifetime).
+// Limit caps the number of returned rows so a busy cluster does not
+// drown the rule; zero falls through to the adapter's safe default.
+type AuditWarningsRequest struct {
+	Since time.Time
+	Limit int
+}
+
+// AuditWarning is one entry from the audit-log tail, normalised
+// across ES and OS. Only metadata fields are surfaced — Timestamp,
+// Layer, Type, Count — by design: the audit log records request
+// bodies and document IDs that callers must not see through this
+// capability.
+//
+// Layer is the wire layer the event came from ("rest", "transport",
+// "ip_filter", …) lowercased so consumer matches stay stable across
+// dialects (OS reports "REST"/"TRANSPORT" upper-case, ES uses
+// lowercase). Type is the event type (e.g., "authentication_failed"
+// on ES, "FAILED_LOGIN" on OS, also lowercased) — the rule decides
+// which types qualify as warnings.
+//
+// Count is 1 for a single entry; non-1 when the adapter ever
+// summarises into buckets (a future extension — the field is in the
+// type now so the consumer doesn't have to migrate later).
+type AuditWarning struct {
+	Timestamp time.Time `json:"timestamp"        yaml:"timestamp"`
+	Layer     string    `json:"layer,omitempty"  yaml:"layer,omitempty"`
+	Type      string    `json:"type,omitempty"   yaml:"type,omitempty"`
+	Count     int       `json:"count"            yaml:"count"`
+}
+
+// Realm is one configured authentication realm — the dialect-neutral
+// view of "how does this cluster identify a request?". Fed by the
+// deprecated-realms hygiene rule (does this cluster still rely on a
+// realm type the next major drops?) and any future identity-posture
+// audit.
+//
+// Sources differ per dialect:
+//   - ES walks /_cluster/settings filtered to xpack.security.authc.realms.*
+//     across persistent → transient → defaults, where each realm is
+//     keyed as `xpack.security.authc.realms.<type>.<name>` with order
+//     and enabled fields inside.
+//   - OS reads /_plugins/_security/api/securityconfig and walks the
+//     dynamic.authc map: each authc domain carries an http_authenticator
+//     and authentication_backend block plus order/http_enabled.
+//
+// Type is the cluster's own realm/backend label — "native", "file",
+// "ldap", "saml", "oidc", "kerberos" on ES; "internal", "ldap",
+// "kerberos", "noop" plus an http authenticator hint ("basic",
+// "openid", "saml", "jwt", …) on OS. Order is the cluster's evaluation
+// order (lower wins). Enabled is whether the cluster will actually
+// consult the realm; a disabled-but-present realm is information, not
+// a failure.
+//
+// Deprecated is true when the realm type is marked deprecated for the
+// cluster's reported version. The flag is computed against the cluster's
+// own version rather than a static catalog so a future deprecation
+// (say, removing a realm type in ES 10) lands without esops bookkeeping
+// in every consumer.
+type Realm struct {
+	Name       string `json:"name"                  yaml:"name"`
+	Type       string `json:"type"                  yaml:"type"`
+	Order      int    `json:"order"                 yaml:"order"`
+	Enabled    bool   `json:"enabled"               yaml:"enabled"`
+	Deprecated bool   `json:"deprecated,omitempty"  yaml:"deprecated,omitempty"`
+}
+
+// APIKey is the richer ES-only view of one API key from
+// /_security/api_key, returned by APIKeyInspector. Distinct from
+// SecurityAPIKey (which the audit pipeline produces with the older
+// string-shaped Creation/Expiration) so callers wanting the age-based
+// hygiene rule can reach for typed time.Time values without re-parsing.
+//
+// Creation is the cluster-reported creation timestamp — always set when
+// the cluster surfaced a key. Expiration is nil when the key has no
+// expiry set (the operator-relevant signal "this key never expires").
+// LastAuth is nil when the cluster does not report it: ES did not
+// surface last-authentication on every supported version, and a
+// missing value is "the cluster did not tell us", not "never used".
+//
+// RoleTemplates carries the configured role-template names attached to
+// the key (the request shape ES accepts at creation time). Empty when
+// the key was created without a role-templates block — i.e. the key
+// inherits its owner's roles directly.
+type APIKey struct {
+	ID            string     `json:"id"                       yaml:"id"`
+	Name          string     `json:"name"                     yaml:"name"`
+	Username      string     `json:"username,omitempty"       yaml:"username,omitempty"`
+	Realm         string     `json:"realm,omitempty"          yaml:"realm,omitempty"`
+	Creation      time.Time  `json:"creation"                 yaml:"creation"`
+	Expiration    *time.Time `json:"expiration,omitempty"     yaml:"expiration,omitempty"`
+	LastAuth      *time.Time `json:"last_auth,omitempty"      yaml:"last_auth,omitempty"`
+	Invalidated   bool       `json:"invalidated,omitempty"    yaml:"invalidated,omitempty"`
+	RoleTemplates []string   `json:"role_templates,omitempty" yaml:"role_templates,omitempty"`
+}
+
+// ServiceToken is the ES-only view of one credential issued for a
+// service account, returned by ServiceTokenInspector. ES lets a service
+// account hold both index-stored tokens (mutable, listed via
+// /_security/service/<ns>/<svc>/credential) and file-realm tokens
+// (declared on disk in service_tokens). The capability surfaces both;
+// Source distinguishes them so the operator can tell which credential
+// is rotated through the API and which is bound to a node's
+// configuration.
+//
+// Creation is the cluster-reported creation timestamp for index-stored
+// tokens; the zero time for file-realm tokens, which the cluster does
+// not timestamp. Namespace and Service together form the parent
+// service account ("elastic/fleet-server"); Name is the per-credential
+// identifier.
+type ServiceToken struct {
+	Name      string    `json:"name"                yaml:"name"`
+	Namespace string    `json:"namespace"           yaml:"namespace"`
+	Service   string    `json:"service"             yaml:"service"`
+	Creation  time.Time `json:"creation,omitempty"  yaml:"creation,omitempty"`
+	Source    string    `json:"source"              yaml:"source"`
+}
+
+// FieldCapsRequest narrows a FieldCapsInspector.FieldCaps call. Index
+// is forwarded to the cluster as the path's <index> segment
+// (comma-joined; empty or "*" lists every visible index). Fields
+// narrows the cluster-side response to a specific field set; empty
+// requests "*" — every mapped field — which is what the deprecated-
+// field-types and mapping-drift rules want.
+//
+// IncludeUnmapped surfaces fields that exist in some indices of the
+// matched pattern but not others; off by default because the cluster
+// then includes "unmapped" entries in `Types` which most consumers
+// have to filter out.
+type FieldCapsRequest struct {
+	Index           string
+	Fields          []string
+	IncludeUnmapped bool
+}
+
+// FieldCaps is the neutral view of one field's metadata across the
+// matched index pattern. The cluster's /_field_caps response groups
+// the data by field name; this type is the per-field row.
+//
+// Types is the union of all field types seen across the matched
+// indices. A homogeneous mapping has one entry; a pattern that
+// straddles types (e.g. one index with `keyword`, another with `text`)
+// has multiple — the canonical signal mapping-drift rules look for.
+//
+// MetadataField mirrors the cluster's `metadata_field` flag: true for
+// `_id`, `_routing`, `_source`, etc. Searchable/Aggregatable are the
+// per-field capabilities the cluster reports.
+//
+// Indices is populated only when the field is heterogeneous across the
+// pattern — the cluster lists which indices contributed each type
+// variant. For homogeneous fields this is empty (the cluster omits it).
+type FieldCaps struct {
+	Field         string   `json:"field"                    yaml:"field"`
+	Types         []string `json:"types"                    yaml:"types"`
+	Searchable    bool     `json:"searchable"               yaml:"searchable"`
+	Aggregatable  bool     `json:"aggregatable"             yaml:"aggregatable"`
+	MetadataField bool     `json:"metadata_field,omitempty" yaml:"metadata_field,omitempty"`
+	Indices       []string `json:"indices,omitempty"        yaml:"indices,omitempty"`
+}
+
+// FieldCapsSummary is the richer return shape from
+// FieldCapsInspector.FieldCapsSummary — the per-field flattened slice
+// plus the cluster's top-level "indices" list (every index that
+// matched the request pattern). The slice form (`FieldCaps()`) is
+// kept as the primary surface because most rules only want the
+// per-field rows; consumers that need to render "23 indices analysed"
+// or that want to know if a request narrowed past zero indices reach
+// for the summary instead.
+//
+// MatchedIndices is the cluster's verbatim "indices" array — sorted
+// and deduplicated by the cluster, surfaced as-is so a captured slice
+// is stable across runs.
+type FieldCapsSummary struct {
+	Fields         []FieldCaps `json:"fields"          yaml:"fields"`
+	MatchedIndices []string    `json:"matched_indices" yaml:"matched_indices"`
+}
+
+// FieldCardinalityRequest narrows a FieldCardinalityInspector.Cardinality
+// call. Each (Index, Field) pair runs as a separate /_search with a
+// single `cardinality` aggregation; the implementation runs them
+// sequentially under MaxFieldsToScan and IndexLimit, so a runaway
+// rule stays polite to the cluster.
+//
+// Indices is the comma-separated index pattern forwarded as the path
+// segment. Fields is the literal list of fields the rule wants
+// counted; cardinality is computed per (index, field) pair.
+//
+// Precision is the optional `precision_threshold` for the cluster's
+// HyperLogLog estimator (the cluster's default is 3000). Zero leaves
+// the cluster's default in place; values >40000 are silently capped by
+// the cluster.
+//
+// MaxFieldsToScan caps the per-call total (len(Indices) × len(Fields))
+// before the request fans out; 0 = no cap. IndexLimit caps the number
+// of indices touched in one call (resolved client-side from the
+// pattern); 0 = no cap. Both are belt-and-braces — the rule that
+// invokes this should also pass a pre-narrowed Indices list.
+type FieldCardinalityRequest struct {
+	Indices         string
+	Fields          []string
+	Precision       int
+	MaxFieldsToScan int
+	IndexLimit      int
+}
+
+// FieldCardinality is the neutral view of one field's cardinality on
+// one index — the result of one (index, field) /_search round trip.
+//
+// Cardinality is the cluster's aggregation result; for HyperLogLog
+// this is an approximation, surfaced through Precision. "exact" is
+// reserved for a future code path that runs `terms` rather than
+// `cardinality` (we don't run that now — it's listed in the type so
+// the rule's table column has a stable shape).
+//
+// Sampled is true when the implementation ran the agg against a
+// random-sample subset of the index rather than the full document
+// set. Today's adapter never samples — Sampled is always false — but
+// the field is on the type so the rule consumer can rely on the
+// shape and a future sampling path can land without a type bump.
+type FieldCardinality struct {
+	Field       string `json:"field"                yaml:"field"`
+	Index       string `json:"index"                yaml:"index"`
+	Cardinality int64  `json:"cardinality"          yaml:"cardinality"`
+	Sampled     bool   `json:"sampled,omitempty"    yaml:"sampled,omitempty"`
+	Precision   string `json:"precision,omitempty"  yaml:"precision,omitempty"`
+}
+
+// RestoreEvent is the neutral view of one snapshot-restore observation,
+// returned by SnapshotRestoreHistoryInspector. The capability has two
+// sources: the cluster's task history (in-flight + recently completed
+// restores via /_tasks?actions=cluster:admin/snapshot/restore*) and
+// the convention-based `.esops-doctor-restore-tests` index that
+// operators or runbooks write to when they exercise a verified restore.
+//
+// Source distinguishes the two — "task_history" for the cluster-derived
+// view (always best-effort: a cluster that hasn't restored anything
+// recently reports an empty slice, which is a valid "no evidence"
+// outcome) and "convention_index" for the runbook-driven path. The
+// rule consumer treats an empty slice as "no evidence" rather than
+// "never restored" — the difference matters when the lookback window
+// is short.
+//
+// State is the cluster's reported state when known: "in_progress",
+// "success", "failed". CompletedAt is nil for in-flight tasks.
+type RestoreEvent struct {
+	SnapshotID  string     `json:"snapshot_id"            yaml:"snapshot_id"`
+	Repository  string     `json:"repository"             yaml:"repository"`
+	StartedAt   time.Time  `json:"started_at"             yaml:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	State       string     `json:"state"                  yaml:"state"`
+	Indices     []string   `json:"indices,omitempty"      yaml:"indices,omitempty"`
+	Source      string     `json:"source"                 yaml:"source"`
+}
+
+// SnapshotRestoreHistoryRequest narrows a SnapshotRestoreHistoryInspector
+// call. Lookback bounds how far back to look at task history (0 = "no
+// limit / whatever the cluster still has"). ConventionIndex names the
+// convention-based index when non-empty; empty falls back to the
+// default `.esops-doctor-restore-tests`.
+//
+// IncludeTaskHistory and IncludeConventionIndex toggle the two
+// sources independently. The default zero value (both false) is a
+// usage error: the implementation requires at least one source —
+// silently no-op'ing on a fully zero request would mask a coding
+// mistake in the rule.
+type SnapshotRestoreHistoryRequest struct {
+	Lookback               time.Duration
+	ConventionIndex        string
+	IncludeTaskHistory     bool
+	IncludeConventionIndex bool
+}
+
+// RemoteCluster is the neutral view of one cross-cluster remote, returned
+// by RemoteClusterInspector.RemoteClusters. The cluster's /_remote/info
+// endpoint is shared across ES and OS — both dialects return the same
+// envelope keyed by remote-cluster name.
+//
+// Mode is "sniff" (the cluster connects to seed hosts and discovers the
+// rest of the remote) or "proxy" (the cluster connects through a single
+// gateway and lets the gateway route). NumNodesConnected is the live
+// count the cluster reports — zero on a configured-but-unreachable
+// remote, which is the operator-facing signal CCS readiness rules look
+// for. SkipUnavailable mirrors the cluster's `skip_unavailable` flag:
+// true means a remote outage does not fail searches that target it,
+// false means it does.
+type RemoteCluster struct {
+	Name              string   `json:"name"                yaml:"name"`
+	Mode              string   `json:"mode"                yaml:"mode"`
+	Connected         bool     `json:"connected"           yaml:"connected"`
+	NumNodesConnected int      `json:"num_nodes_connected" yaml:"num_nodes_connected"`
+	SeedHosts         []string `json:"seed_hosts,omitempty" yaml:"seed_hosts,omitempty"`
+	SkipUnavailable   bool     `json:"skip_unavailable"    yaml:"skip_unavailable"`
+}
+
+// FollowerStats is the neutral view of one cross-cluster-replication
+// follower index, returned by RemoteClusterInspector.FollowerStats.
+// CCR is Elasticsearch-only — the OS adapter returns ErrUnsupported on
+// FollowerStats so the matching doctor rule auto-skips with a stable
+// "not applicable on this dialect" reason.
+//
+// FollowerLagOps is the cluster's reported `operations_written_lag`
+// (number of ops the follower is behind the leader). LastReadFailure
+// is the cluster's last-read-error string when present, empty when the
+// follower is healthy. Paused is true when the operator has paused
+// replication via /_ccr/follow/_pause.
+type FollowerStats struct {
+	Index           string `json:"index"                       yaml:"index"`
+	LeaderIndex     string `json:"leader_index"                yaml:"leader_index"`
+	LeaderCluster   string `json:"leader_cluster"              yaml:"leader_cluster"`
+	FollowerLagOps  int64  `json:"follower_lag_ops"            yaml:"follower_lag_ops"`
+	LastReadFailure string `json:"last_read_failure,omitempty" yaml:"last_read_failure,omitempty"`
+	Paused          bool   `json:"paused,omitempty"            yaml:"paused,omitempty"`
+}
+
+// AutoFollowPattern is the neutral view of one Elasticsearch CCR
+// auto-follow pattern, returned by RemoteClusterInspector.AutoFollowPatterns.
+// Auto-follow patterns instruct the cluster to create a follower
+// index automatically every time the leader cluster creates a new
+// index matching one of LeaderIndexPatterns.
+//
+// Active mirrors the cluster's `active` flag — true when the pattern
+// is currently consulted, false when paused (typically during a
+// maintenance window). FollowIndexPattern is the cluster's template
+// for the follower-side index name; an empty string means the
+// cluster's default ("the leader's name") applies.
+//
+// CCR is Elasticsearch-only; the OpenSearch adapter returns
+// ErrUnsupported on AutoFollowPatterns so the matching doctor rule
+// auto-skips with a stable "not applicable on this dialect" reason.
+type AutoFollowPattern struct {
+	Name                string   `json:"name"                              yaml:"name"`
+	RemoteCluster       string   `json:"remote_cluster"                    yaml:"remote_cluster"`
+	LeaderIndexPatterns []string `json:"leader_index_patterns"             yaml:"leader_index_patterns"`
+	FollowIndexPattern  string   `json:"follow_index_pattern,omitempty"    yaml:"follow_index_pattern,omitempty"`
+	Active              bool     `json:"active"                            yaml:"active"`
+}
+
+// LicenseStatus is the neutral view of an Elasticsearch license,
+// returned by LicenseInspector.License. ES-only: OpenSearch has no
+// equivalent commercial-license surface, so the OS adapter returns
+// ErrUnsupported and the matching doctor rule is dialect-tagged
+// `[elasticsearch]`.
+//
+// Status is the cluster's reported license state: "active", "expired",
+// or "invalid". Type is the licence tier ("basic", "standard", "gold",
+// "platinum", "enterprise", "trial"). ExpiresAt is nil for licences
+// that never expire (the basic tier is the canonical case), populated
+// for time-bound licences. MaxNodes is the licence's node cap; zero
+// when the licence is not node-bound.
+type LicenseStatus struct {
+	Status    string     `json:"status"               yaml:"status"`
+	Type      string     `json:"type"                 yaml:"type"`
+	IssuedTo  string     `json:"issued_to,omitempty"  yaml:"issued_to,omitempty"`
+	Issuer    string     `json:"issuer,omitempty"     yaml:"issuer,omitempty"`
+	IssuedAt  time.Time  `json:"issued_at"            yaml:"issued_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
+	MaxNodes  int        `json:"max_nodes,omitempty"  yaml:"max_nodes,omitempty"`
+	UID       string     `json:"uid,omitempty"        yaml:"uid,omitempty"`
 }

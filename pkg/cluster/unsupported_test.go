@@ -69,6 +69,38 @@ func TestUnsupportedDeprecations_ReturnsUnsupported(t *testing.T) {
 	}
 }
 
+func TestUnsupportedAPIKeys_ReturnsUnsupported(t *testing.T) {
+	stub := unsupportedAPIKeys{}
+	ctx := context.Background()
+
+	got, err := stub.APIKeys(ctx)
+	if !errors.Is(err, client.ErrUnsupported) {
+		t.Errorf("APIKeys err = %v, want ErrUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "Elasticsearch-only") {
+		t.Errorf("APIKeys err = %q, want hint mentioning 'Elasticsearch-only'", err.Error())
+	}
+	if got != nil {
+		t.Errorf("APIKeys = %v, want nil on unsupported", got)
+	}
+}
+
+func TestUnsupportedServiceTokens_ReturnsUnsupported(t *testing.T) {
+	stub := unsupportedServiceTokens{}
+	ctx := context.Background()
+
+	got, err := stub.ServiceTokens(ctx)
+	if !errors.Is(err, client.ErrUnsupported) {
+		t.Errorf("ServiceTokens err = %v, want ErrUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "Elasticsearch-only") {
+		t.Errorf("ServiceTokens err = %q, want hint mentioning 'Elasticsearch-only'", err.Error())
+	}
+	if got != nil {
+		t.Errorf("ServiceTokens = %v, want nil on unsupported", got)
+	}
+}
+
 // Compile-time guarantees that the stubs satisfy the capability
 // interfaces. A future capability addition that breaks the contract
 // will fail here, not deep in the factory call site.
@@ -76,4 +108,6 @@ var (
 	_ client.ILMManager           = unsupportedILM{}
 	_ client.ISMManager           = unsupportedISM{}
 	_ client.DeprecationInspector = unsupportedDeprecations{}
+	_ client.APIKeyInspector      = unsupportedAPIKeys{}
+	_ client.ServiceTokenInspector = unsupportedServiceTokens{}
 )
