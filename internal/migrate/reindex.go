@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -20,9 +21,37 @@ import (
 // doesn't issue 4000+ status calls.
 const DefaultReindexPollInterval = 5 * time.Second
 
+// MinReindexPollIntervalCLI is the lower bound the CLI layer enforces
+// on --poll-interval. The cluster's master rate-limits /_tasks reads
+// north of a couple of Hz; 1s leaves plenty of headroom and keeps an
+// operator who passes "1ms" by mistake from brown-outing a master.
+//
+// Lives at the CLI boundary rather than the orchestrator so unit tests
+// can drive the loop with sub-second intervals without crossing the
+// validation the operator would.
+const MinReindexPollIntervalCLI = 1 * time.Second
+
+// MaxReindexPollFailures caps consecutive transient failures during
+// /_tasks polling. A flapping master, a temporary 503, or a routing
+// blip recovers in seconds; a dead cluster never recovers and the
+// orchestrator should not loop until the operator's session ends.
+// 50 ticks at 5s each ≈ 4 minutes — long enough to ride out a real
+// incident, short enough that "the cluster is gone" surfaces while the
+// operator is still at the keyboard.
+const MaxReindexPollFailures = 50
+
+// reindexCancelTimeout bounds the best-effort POST /_tasks/<id>/_cancel
+// the orchestrator issues when its parent context is cancelled. The
+// original ctx is already done at that point, so the cancel runs on a
+// fresh background context with this timeout — long enough for one
+// HTTP round-trip, short enough that a hung cluster doesn't keep the
+// CLI from exiting after the operator hit Ctrl-C.
+const reindexCancelTimeout = 10 * time.Second
+
 // Reindex submits a deferred /_reindex per source-resolved index on
 // the target cluster, then polls /_tasks/<id> until each completes.
-// The reindex itself runs cluster-side; this function is the orchestrator.
+// The reindex itself runs cluster-side; this function is the
+// orchestrator.
 //
 // Multi-index requests are processed sequentially: one task at a time.
 // Concurrency knobs belong on the cluster (slices/requests-per-second
@@ -32,15 +61,26 @@ const DefaultReindexPollInterval = 5 * time.Second
 //
 // On context cancellation the in-flight task is cancelled cluster-side
 // via /_tasks/<id>/_cancel; the function returns ctx.Err() so SIGINT
-// propagates as exit 130. (Not implemented yet via a separate cancel
-// capability — uses the cluster's cancel endpoint via the Tasks
-// canceller wired alongside the reindexer in the same client.)
+// propagates as exit 130. The cancel runs on a fresh background context
+// (the parent is already done) bounded by reindexCancelTimeout.
+//
+// State is persisted to $XDG_STATE_HOME/esops/migrate/ after every
+// task ID is captured so a SIGINT or crashed shell can be recovered
+// with `esops migrate reindex --resume`.
 func Reindex(ctx context.Context, src, tgt Endpoint, req types.MigrationReindexRequest) (types.MigrationReindexResult, error) {
 	if err := validateReindexEndpoints(src, tgt); err != nil {
 		return types.MigrationReindexResult{}, err
 	}
 	if err := validateReindexRequest(req); err != nil {
 		return types.MigrationReindexResult{}, err
+	}
+	pollInterval := req.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = DefaultReindexPollInterval
+	}
+
+	if req.Resume {
+		return resumeReindex(ctx, src, tgt, req, pollInterval)
 	}
 
 	indices, err := src.Indices.Indices(ctx, types.IndexFilter{
@@ -71,9 +111,13 @@ func Reindex(ctx context.Context, src, tgt Endpoint, req types.MigrationReindexR
 	// across runs.
 	sort.SliceStable(indices, func(i, j int) bool { return indices[i].Name < indices[j].Name })
 
-	pollInterval := req.PollInterval
-	if pollInterval <= 0 {
-		pollInterval = DefaultReindexPollInterval
+	state := ReindexState{
+		Action:        "migrate-reindex",
+		SourceContext: src.Context,
+		TargetContext: tgt.Context,
+		TargetSuffix:  req.TargetSuffix,
+		TargetLiteral: req.TargetIndexLiteral,
+		StartedAt:     time.Now().UTC(),
 	}
 
 	for _, ix := range indices {
@@ -91,14 +135,14 @@ func Reindex(ctx context.Context, src, tgt Endpoint, req types.MigrationReindexR
 		}
 
 		submit, err := tgt.Reindex.SubmitReindex(ctx, types.ReindexSubmitRequest{
-			SourceIndex:         ix.Name,
-			SourceRemoteHost:    src.URL,
-			SourceUsername:      src.Auth.Username,
-			SourcePassword:      src.Auth.Password,
-			SourceHeaders:       src.Auth.remoteHeaders(),
-			TargetIndex:         entry.TargetIndex,
-			Conflicts:           req.Conflicts,
-			SizeLimit:           req.SizeLimit,
+			SourceIndex:      ix.Name,
+			SourceRemoteHost: src.URL,
+			SourceUsername:   src.Auth.Username,
+			SourcePassword:   src.Auth.Password,
+			SourceHeaders:    src.Auth.remoteHeaders(),
+			TargetIndex:      entry.TargetIndex,
+			Conflicts:        req.Conflicts,
+			SizeLimit:        req.SizeLimit,
 			RequestsPerSecond:   req.RequestsPerSecond,
 			Slices:              req.Slices,
 			WaitForActiveShards: req.WaitForActiveShards,
@@ -119,52 +163,212 @@ func Reindex(ctx context.Context, src, tgt Endpoint, req types.MigrationReindexR
 		}
 		entry.TaskID = submit.TaskID
 
-		status, pollErr := pollReindexTask(ctx, tgt.Reindex, submit.TaskID, pollInterval)
-		entry.Stats = status
-		switch {
-		case pollErr != nil:
-			if errors.Is(pollErr, context.Canceled) || errors.Is(pollErr, context.DeadlineExceeded) {
-				return result, pollErr
-			}
-			entry.Status = types.MigrationStatusBlock
-			entry.Detail = fmt.Sprintf("polling failed: %v", pollErr)
-		case len(status.Failures) > 0:
-			entry.Status = types.MigrationStatusBlock
-			entry.Detail = summariseFailures(status.Failures)
-		case status.VersionConflicts > 0 && req.Conflicts == "proceed":
-			entry.Status = types.MigrationStatusWarn
-			entry.Detail = fmt.Sprintf("%d version conflicts skipped (conflicts=proceed)", status.VersionConflicts)
-		case status.Cancelled:
-			entry.Status = types.MigrationStatusBlock
-			entry.Detail = "task cancelled before completion"
-		default:
-			entry.Status = types.MigrationStatusOK
-			entry.Detail = fmt.Sprintf("created=%d updated=%d deleted=%d", status.Created, status.Updated, status.Deleted)
+		// Persist as soon as the task ID is known so a SIGINT between
+		// submit and poll is recoverable. The save is best-effort —
+		// log a warning but keep going if disk is unavailable.
+		state.Entries = appendOrReplaceStateEntry(state.Entries, ReindexStateEntry{
+			SourceIndex: ix.Name,
+			TargetIndex: entry.TargetIndex,
+			TaskID:      submit.TaskID,
+		})
+		if err := SaveReindexState(state); err != nil {
+			logging.Logger().Warn("migrate.reindex.state_save_failed", "err", err)
 		}
-		result.Indices = append(result.Indices, entry)
+
+		final := pollAndFinaliseEntry(ctx, tgt, entry, submit.TaskID, pollInterval, req.Conflicts)
+		if errors.Is(final.pollErr, context.Canceled) || errors.Is(final.pollErr, context.DeadlineExceeded) {
+			// SIGINT mid-task: best-effort cancel cluster-side, then
+			// propagate ctx.Err() so the CLI exits 130. State is
+			// already persisted; --resume picks up where we left off.
+			result.Indices = append(result.Indices, final.MigrationReindexEntry)
+			cancelRemoteTask(tgt, submit.TaskID)
+			return result, final.pollErr
+		}
+		if errors.Is(final.pollErr, client.ErrAuth) || errors.Is(final.pollErr, client.ErrForbidden) {
+			result.Indices = append(result.Indices, final.MigrationReindexEntry)
+			return result, final.pollErr
+		}
+
+		// Mark this entry's state row complete (whether OK or blocker —
+		// "the task is done, don't try to resume it" is the contract).
+		// Carry the final Status + Detail too so a `--resume` after a
+		// partial run reproduces the original outcome instead of
+		// upgrading every Completed row to OK.
+		state.Entries = appendOrReplaceStateEntry(state.Entries, ReindexStateEntry{
+			SourceIndex: ix.Name,
+			TargetIndex: final.TargetIndex,
+			TaskID:      submit.TaskID,
+			Completed:   true,
+			Status:      final.Status,
+			Detail:      final.Detail,
+		})
+		if err := SaveReindexState(state); err != nil {
+			logging.Logger().Warn("migrate.reindex.state_save_failed", "err", err)
+		}
+
+		result.Indices = append(result.Indices, final.MigrationReindexEntry)
 	}
 
-	switch {
-	case anyEntryStatus(result.Indices, types.MigrationStatusBlock) > 0:
-		result.Status = types.MigrationStatusBlock
-	case anyEntryStatus(result.Indices, types.MigrationStatusWarn) > 0:
-		result.Status = types.MigrationStatusWarn
-	default:
-		result.Status = types.MigrationStatusOK
+	finaliseAggregate(&result)
+
+	// Successful, non-dry-run runs clean up state so a follow-up resume
+	// against the same key surfaces "nothing to resume" rather than a
+	// stale file.
+	if !req.DryRun && result.Status != types.MigrationStatusBlock {
+		_ = ClearReindexState(src.Context, tgt.Context, req.TargetSuffix, req.TargetIndexLiteral)
 	}
-	result.Blockers = anyEntryStatus(result.Indices, types.MigrationStatusBlock)
-	result.Warnings = anyEntryStatus(result.Indices, types.MigrationStatusWarn)
 	return result, nil
+}
+
+// resumeReindex re-loads a prior reindex's state and polls every
+// not-yet-completed task ID to finality. Submissions are not repeated:
+// resume's contract is "finish what was started", not "start over with
+// the same flags". An entry without a TaskID indicates the cluster
+// never accepted the original submit; resume reports it as a blocker
+// so the operator re-runs the original command for that index.
+func resumeReindex(ctx context.Context, src, tgt Endpoint, req types.MigrationReindexRequest, pollInterval time.Duration) (types.MigrationReindexResult, error) {
+	state, err := LoadReindexState(src.Context, tgt.Context, req.TargetSuffix, req.TargetIndexLiteral)
+	if err != nil {
+		if errors.Is(err, ErrNoReindexState) {
+			return types.MigrationReindexResult{}, client.UsageError("--resume found no state for source=%q target=%q (suffix=%q literal=%q)", src.Context, tgt.Context, req.TargetSuffix, req.TargetIndexLiteral)
+		}
+		return types.MigrationReindexResult{}, err
+	}
+
+	result := types.MigrationReindexResult{
+		Action: "migrate-reindex",
+		Source: src.summary(),
+		Target: tgt.summary(),
+	}
+
+	for _, e := range state.Entries {
+		entry := types.MigrationReindexEntry{
+			SourceIndex: e.SourceIndex,
+			TargetIndex: e.TargetIndex,
+			TaskID:      e.TaskID,
+		}
+		if e.Completed {
+			// Replay the original verdict so a partial run that
+			// produced a per-row block doesn't silently upgrade to OK
+			// on resume. Older state files (schema 1, before this
+			// field) carry an empty Status; fall back to OK for
+			// backwards compatibility — the same observable behaviour
+			// the prior implementation produced.
+			if e.Status == "" {
+				entry.Status = types.MigrationStatusOK
+				entry.Detail = "previously completed"
+			} else {
+				entry.Status = e.Status
+				entry.Detail = e.Detail
+				if entry.Detail == "" {
+					entry.Detail = "previously completed (status preserved from original run)"
+				}
+			}
+			result.Indices = append(result.Indices, entry)
+			continue
+		}
+		if e.TaskID == "" {
+			entry.Status = types.MigrationStatusBlock
+			entry.Detail = "no task_id captured during the original run; re-run without --resume to retry"
+			result.Indices = append(result.Indices, entry)
+			continue
+		}
+
+		final := pollAndFinaliseEntry(ctx, tgt, entry, e.TaskID, pollInterval, req.Conflicts)
+		if errors.Is(final.pollErr, context.Canceled) || errors.Is(final.pollErr, context.DeadlineExceeded) {
+			result.Indices = append(result.Indices, final.MigrationReindexEntry)
+			cancelRemoteTask(tgt, e.TaskID)
+			return result, final.pollErr
+		}
+		if errors.Is(final.pollErr, client.ErrAuth) || errors.Is(final.pollErr, client.ErrForbidden) {
+			result.Indices = append(result.Indices, final.MigrationReindexEntry)
+			return result, final.pollErr
+		}
+
+		state.Entries = appendOrReplaceStateEntry(state.Entries, ReindexStateEntry{
+			SourceIndex: e.SourceIndex,
+			TargetIndex: e.TargetIndex,
+			TaskID:      e.TaskID,
+			Completed:   true,
+			Status:      final.Status,
+			Detail:      final.Detail,
+		})
+		if err := SaveReindexState(state); err != nil {
+			logging.Logger().Warn("migrate.reindex.state_save_failed", "err", err)
+		}
+		result.Indices = append(result.Indices, final.MigrationReindexEntry)
+	}
+
+	finaliseAggregate(&result)
+	if result.Status != types.MigrationStatusBlock {
+		_ = ClearReindexState(src.Context, tgt.Context, req.TargetSuffix, req.TargetIndexLiteral)
+	}
+	return result, nil
+}
+
+// finalisedEntry pairs a per-index outcome with the polling error that
+// produced it. Kept private — callers fold into MigrationReindexResult.
+type finalisedEntry struct {
+	types.MigrationReindexEntry
+	pollErr error
+}
+
+// pollAndFinaliseEntry blocks on /_tasks/<id> until terminal, then
+// renders the per-index status / detail row. The polling error is
+// returned alongside the entry so callers can branch on auth /
+// cancellation without re-classifying the detail string.
+func pollAndFinaliseEntry(ctx context.Context, tgt Endpoint, entry types.MigrationReindexEntry, taskID string, pollInterval time.Duration, conflicts string) finalisedEntry {
+	status, pollErr := pollReindexTask(ctx, tgt.Reindex, taskID, pollInterval)
+	entry.Stats = status
+	switch {
+	case pollErr != nil:
+		if errors.Is(pollErr, context.Canceled) || errors.Is(pollErr, context.DeadlineExceeded) {
+			entry.Status = types.MigrationStatusBlock
+			entry.Detail = "polling cancelled; cluster-side task cancel requested"
+			return finalisedEntry{MigrationReindexEntry: entry, pollErr: pollErr}
+		}
+		if errors.Is(pollErr, client.ErrNotFound) {
+			entry.Status = types.MigrationStatusBlock
+			entry.Detail = fmt.Sprintf("task %s no longer exists on the cluster — cannot recover", taskID)
+			return finalisedEntry{MigrationReindexEntry: entry, pollErr: pollErr}
+		}
+		entry.Status = types.MigrationStatusBlock
+		entry.Detail = fmt.Sprintf("polling failed: %v", pollErr)
+		return finalisedEntry{MigrationReindexEntry: entry, pollErr: pollErr}
+	case len(status.Failures) > 0:
+		entry.Status = types.MigrationStatusBlock
+		entry.Detail = summariseFailures(status.Failures)
+	case status.VersionConflicts > 0 && conflicts == "proceed":
+		entry.Status = types.MigrationStatusWarn
+		entry.Detail = fmt.Sprintf("%d version conflicts skipped (conflicts=proceed)", status.VersionConflicts)
+	case status.Cancelled:
+		entry.Status = types.MigrationStatusBlock
+		entry.Detail = "task cancelled before completion"
+	default:
+		entry.Status = types.MigrationStatusOK
+		entry.Detail = fmt.Sprintf("created=%d updated=%d deleted=%d", status.Created, status.Updated, status.Deleted)
+	}
+	return finalisedEntry{MigrationReindexEntry: entry}
 }
 
 // pollReindexTask blocks until the cluster reports the task as
 // completed (or cancelled), returning the final status block. A
 // transient cluster error during polling (a 503 during a master flap)
-// is retried on the next tick — auth failures are fatal because they
-// won't fix themselves.
+// is retried with exponential backoff up to MaxReindexPollFailures
+// consecutive failures — auth failures, ErrNotFound, and context
+// cancellation are fatal because they won't fix themselves.
+//
+// Backoff doubles each consecutive failure, capped at the cluster-side
+// 1Hz floor (interval × 8) so a flapping master sees us back off but
+// the polling rate doesn't drift to "every 10 minutes" once the master
+// recovers.
 func pollReindexTask(ctx context.Context, r client.Reindexer, taskID string, interval time.Duration) (types.ReindexTaskStatus, error) {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+
+	const maxBackoff = 8
+	consecutiveFailures := 0
+	backoffShift := 0
 
 	var last types.ReindexTaskStatus
 	for {
@@ -176,19 +380,61 @@ func pollReindexTask(ctx context.Context, r client.Reindexer, taskID string, int
 
 		status, err := r.ReindexTaskStatus(ctx, taskID)
 		if err != nil {
-			if errors.Is(err, client.ErrAuth) || errors.Is(err, client.ErrForbidden) {
+			if errors.Is(err, client.ErrAuth) || errors.Is(err, client.ErrForbidden) || errors.Is(err, client.ErrNotFound) {
 				return last, err
 			}
-			// Transient: keep going. The next tick may succeed.
-			timer.Reset(interval)
+			consecutiveFailures++
+			if consecutiveFailures >= MaxReindexPollFailures {
+				return last, fmt.Errorf("reindex task %s: %d consecutive transient errors (last: %w)", taskID, consecutiveFailures, err)
+			}
+			// Exponential backoff: interval * 2^backoffShift, capped.
+			backoffShift++
+			if backoffShift > maxBackoff {
+				backoffShift = maxBackoff
+			}
+			timer.Reset(interval << backoffShift)
 			continue
 		}
+		// Successful read resets backoff so the next blip starts from
+		// the configured interval again.
+		consecutiveFailures = 0
+		backoffShift = 0
 		last = status
 		if status.Completed || status.Cancelled {
 			return status, nil
 		}
 		timer.Reset(interval)
 	}
+}
+
+// cancelRemoteTask issues a best-effort POST /_tasks/<id>/_cancel on a
+// fresh background context. The parent context is already cancelled at
+// the call site (that's why we're cancelling), so we can't reuse it.
+// All errors are logged-and-swallowed — the operator already knows
+// they pressed Ctrl-C; failing the cancel doesn't change what they need
+// to do (the cluster will eventually time the task out on its own).
+func cancelRemoteTask(tgt Endpoint, taskID string) {
+	if tgt.TasksCancel == nil {
+		logging.Logger().Warn("migrate.reindex.cancel_skipped",
+			"reason", "TasksCancel capability not wired",
+			"task_id", taskID,
+		)
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.Background(), reindexCancelTimeout)
+	defer cancel()
+	_, err := tgt.TasksCancel.CancelTasks(cctx, types.TasksCancelRequest{
+		TaskIDs:           []string{taskID},
+		WaitForCompletion: false,
+	})
+	if err != nil {
+		logging.Logger().Warn("migrate.reindex.cancel_failed",
+			"task_id", taskID,
+			"err", err,
+		)
+		return
+	}
+	logging.Logger().Info("migrate.reindex.cancel_requested", "task_id", taskID)
 }
 
 // validateReindexEndpoints surfaces a clear "wiring bug" message when
@@ -267,8 +513,38 @@ func resolveTargetIndex(req types.MigrationReindexRequest, sourceName string, si
 	return sourceName
 }
 
+// appendOrReplaceStateEntry merges a new entry by SourceIndex so a
+// re-save after polling completion replaces the prior submission row
+// instead of appending a duplicate. Order is preserved so a captured
+// state file reads top-to-bottom in submission order.
+func appendOrReplaceStateEntry(entries []ReindexStateEntry, e ReindexStateEntry) []ReindexStateEntry {
+	for i, prev := range entries {
+		if prev.SourceIndex == e.SourceIndex {
+			entries[i] = e
+			return entries
+		}
+	}
+	return append(entries, e)
+}
+
+// finaliseAggregate sets the result's Status / Blockers / Warnings from
+// its per-entry rows. Kept as a helper so the live and resume paths
+// produce identical aggregates.
+func finaliseAggregate(result *types.MigrationReindexResult) {
+	switch {
+	case anyEntryStatus(result.Indices, types.MigrationStatusBlock) > 0:
+		result.Status = types.MigrationStatusBlock
+	case anyEntryStatus(result.Indices, types.MigrationStatusWarn) > 0:
+		result.Status = types.MigrationStatusWarn
+	default:
+		result.Status = types.MigrationStatusOK
+	}
+	result.Blockers = anyEntryStatus(result.Indices, types.MigrationStatusBlock)
+	result.Warnings = anyEntryStatus(result.Indices, types.MigrationStatusWarn)
+}
+
 // anyEntryStatus counts entries with the given status. Used for the
-// report's Blockers / Warnings footer.
+// result's Blockers / Warnings footer.
 func anyEntryStatus(entries []types.MigrationReindexEntry, status string) int {
 	n := 0
 	for _, e := range entries {

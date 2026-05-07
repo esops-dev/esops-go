@@ -105,7 +105,7 @@ func Prepare(ctx context.Context, cmd *cli.Command, spec Spec) (Setup, error) {
 	}
 	ApplyContextOverrides(&cc, cmd)
 
-	if err := checkProtection(cc, cmd, spec.Destructive); err != nil {
+	if err := CheckProtection(cc, cmd, spec.Destructive); err != nil {
 		return Setup{}, err
 	}
 
@@ -179,12 +179,17 @@ func resolveFormat(cmd *cli.Command, configDefault string, supported []output.Fo
 	return "", fmt.Errorf("output format %q is not supported for this command (accepted: %s)", f, strings.Join(names, ", "))
 }
 
-// checkProtection enforces the per-context protection tier. Dry-runs
+// CheckProtection enforces the per-context protection tier. Dry-runs
 // and read-only operations are always allowed; destructive operations
 // against a `prod` context require an explicit acknowledgement flag,
 // and `staging` requires `--no-prompt` (CI-safe) since we don't yet
 // have an interactive prompter.
-func checkProtection(cc config.Context, cmd *cli.Command, destructive bool) error {
+//
+// Public so multi-context commands (e.g. `esops migrate reindex`, which
+// gates against both source and target tiers) can apply the same rule
+// without re-implementing it. Single-context commands get the same
+// check via Prepare.
+func CheckProtection(cc config.Context, cmd *cli.Command, destructive bool) error {
 	if !destructive {
 		return nil
 	}

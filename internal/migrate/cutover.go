@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -21,11 +23,17 @@ import (
 //  3. (Optional) Block writes on FromIndex via index.blocks.write=true
 //     so any writer on the alias gets a clear refusal during the
 //     swap, rather than silently appending to the soon-to-be-orphan.
+//     The block applies the moment the cluster commits the settings
+//     update, but bulk requests already in flight on individual shards
+//     may still complete after PutSettings returns. DrainDelay inserts
+//     a short sleep to let those drain before the alias swap.
 //  4. POST /_aliases with {add: alias→ToIndex, remove: alias←FromIndex}
 //     in a single body. The cluster applies both actions in one
 //     cluster-state update — atomic from every reader's perspective.
 //  5. (Optional) Remove the write-block from FromIndex unless
-//     KeepWriteBlock is set.
+//     KeepWriteBlock is set. KeepWriteBlock leaves the old index
+//     read-only and surfaces a manual-cleanup reminder in the steps[]
+//     log — there is no background TTL.
 //
 // Each step produces one MigrationCutoverStep row; a failed step
 // short-circuits the rest of the sequence and the result's Status is
@@ -75,6 +83,25 @@ func Cutover(ctx context.Context, ep Endpoint, req types.MigrationCutoverRequest
 			result.Status = types.MigrationStatusBlock
 			return result, nil
 		}
+		// Optional drain pause — the block refuses *new* writes from
+		// the moment the cluster commits the settings update, but bulk
+		// requests already in flight on individual shards may still
+		// complete after PutSettings returns. A short sleep lets those
+		// land before the alias swaps off the now-write-blocked index.
+		//
+		// On cancellation mid-drain we MUST attempt to clear the
+		// write-block before returning — otherwise the operator's
+		// FromIndex is left write-blocked with no swap to show for it.
+		// The rollback uses a fresh background context so a cancelled
+		// parent doesn't also kill the cleanup call.
+		if !req.DryRun && req.DrainDelay > 0 {
+			result.Steps = append(result.Steps, drainPause(ctx, req))
+			if err := ctx.Err(); err != nil {
+				result.Steps = append(result.Steps, rollbackWriteBlockAfterCancel(ep, req))
+				result.Status = types.MigrationStatusBlock
+				return result, err
+			}
+		}
 	} else {
 		result.Steps = append(result.Steps, types.MigrationCutoverStep{
 			Name:   "block-writes",
@@ -104,11 +131,24 @@ func Cutover(ctx context.Context, ep Endpoint, req types.MigrationCutoverRequest
 		step, _ := setWriteBlock(ctx, ep, req, false)
 		result.Steps = append(result.Steps, step)
 	} else if req.BlockWrites && req.KeepWriteBlock {
+		// The operator has asked to leave the old index write-blocked
+		// so it stays read-only for forensic / rollback purposes. A
+		// reminder row prompts manual cleanup later — there is no
+		// background TTL here, and the block survives a cluster
+		// restart, so an unnoticed --keep-write-block is a long-lived
+		// foot-gun.
+		detail := fmt.Sprintf("--keep-write-block set: %s remains write-blocked. Clean up manually with `esops index settings set --indices %s --set index.blocks.write=null` (or `esops index delete` once the read window closes).", req.FromIndex, req.FromIndex)
 		result.Steps = append(result.Steps, types.MigrationCutoverStep{
 			Name:   "unblock-writes",
 			Status: skippedStatus,
-			Detail: "skipped (--keep-write-block set)",
+			Detail: detail,
 		})
+		logging.Logger().Info("migrate.cutover.keep_write_block",
+			"context", ep.Context,
+			"alias", req.Alias,
+			"from_index", req.FromIndex,
+			"reminder", "manual cleanup required",
+		)
 	}
 
 	// Status is the worst of the steps. A swap that succeeded but the
@@ -362,6 +402,69 @@ func buildWriteBlockBody(enable bool) ([]byte, error) {
 		},
 	}
 	return json.Marshal(body)
+}
+
+// rollbackWriteBlockAfterCancel issues a best-effort PutSettings to
+// clear index.blocks.write on FromIndex when the parent context was
+// cancelled mid-drain. The parent ctx is already done — we can't reuse
+// it for the cleanup call — so a fresh background context bounded by
+// rollbackTimeout is used. All errors are logged-and-folded into the
+// returned step row; the caller surfaces the original cancellation as
+// the headline error and this row explains what happened to the block.
+func rollbackWriteBlockAfterCancel(ep Endpoint, req types.MigrationCutoverRequest) types.MigrationCutoverStep {
+	cctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	body, _ := buildWriteBlockBody(false)
+	_, err := ep.IndexSettingsSet.PutSettings(cctx, types.IndexSettingsUpdateRequest{
+		Indices: []string{req.FromIndex},
+		Body:    body,
+	})
+	if err != nil {
+		logging.Logger().Warn("migrate.cutover.drain_rollback_failed",
+			"context", ep.Context,
+			"from_index", req.FromIndex,
+			"err", err,
+		)
+		return types.MigrationCutoverStep{
+			Name:   "rollback-write-block",
+			Status: types.MigrationStatusWarn,
+			Detail: fmt.Sprintf("drain cancelled and write-block rollback failed; %s remains write-blocked: %v", req.FromIndex, err),
+		}
+	}
+	return types.MigrationCutoverStep{
+		Name:   "rollback-write-block",
+		Status: types.MigrationStatusOK,
+		Detail: fmt.Sprintf("drain cancelled; write-block on %s rolled back", req.FromIndex),
+	}
+}
+
+// rollbackTimeout bounds the best-effort cleanup PutSettings issued
+// when the drain pause is cancelled. Long enough for one HTTP round
+// trip on a stressed cluster, short enough that a hung master doesn't
+// keep the CLI from exiting after the operator hit Ctrl-C.
+const rollbackTimeout = 10 * time.Second
+
+// drainPause sleeps for req.DrainDelay or until ctx is cancelled,
+// whichever comes first. Returned as a step so the report shows the
+// pause happened — operators reading a captured run want a record that
+// the drain was real, not silently elided.
+func drainPause(ctx context.Context, req types.MigrationCutoverRequest) types.MigrationCutoverStep {
+	timer := time.NewTimer(req.DrainDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return types.MigrationCutoverStep{
+			Name:   "drain-pause",
+			Status: types.MigrationStatusOK,
+			Detail: fmt.Sprintf("waited %s for in-flight writes on %s to settle before swapping the alias", req.DrainDelay, req.FromIndex),
+		}
+	case <-ctx.Done():
+		return types.MigrationCutoverStep{
+			Name:   "drain-pause",
+			Status: types.MigrationStatusBlock,
+			Detail: fmt.Sprintf("drain pause cancelled after waiting (%v)", ctx.Err()),
+		}
+	}
 }
 
 // worstStepStatus returns the worst severity across the step list.

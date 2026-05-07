@@ -3,6 +3,7 @@ package migrate_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
@@ -12,15 +13,24 @@ import (
 
 // fakeCounter serves canned per-index counts. Calls record what was
 // asked for so we can assert IgnoreUnavailable / index pairing.
+//
+// Verify's per-pair fan-out invokes Count concurrently on the same
+// fake (one goroutine per source index plus one per target index), so
+// gotReqs needs a mutex — without it the race detector trips on the
+// slice append.
 type fakeCounter struct {
 	counts   map[string]int64
 	failedOn string
 	err      error
-	gotReqs  []types.CountRequest
+
+	mu      sync.Mutex
+	gotReqs []types.CountRequest
 }
 
 func (f *fakeCounter) Count(_ context.Context, req types.CountRequest) (types.CountResult, error) {
+	f.mu.Lock()
 	f.gotReqs = append(f.gotReqs, req)
+	f.mu.Unlock()
 	if f.err != nil {
 		return types.CountResult{}, f.err
 	}

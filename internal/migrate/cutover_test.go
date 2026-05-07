@@ -1,9 +1,11 @@
 package migrate_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
 	"github.com/esops-dev/esops-go/pkg/client"
@@ -239,5 +241,64 @@ func TestCutover_KeepWriteBlockSkipsCleanup(t *testing.T) {
 	// Only one settings call (the block-on); no cleanup.
 	if len(su.gotBodies) != 1 {
 		t.Errorf("expected 1 settings call with --keep-write-block, got %d", len(su.gotBodies))
+	}
+}
+
+// TestCutover_DrainCancelRollsBackWriteBlock — Ctrl-C during the drain
+// pause must clear the write-block on FromIndex; otherwise the
+// operator is left with a write-blocked index and no swap to show for
+// it. Best-effort: the rollback uses a fresh background context and
+// runs even though the parent ctx is already done.
+func TestCutover_DrainCancelRollsBackWriteBlock(t *testing.T) {
+	ep, au, su := mkCutoverEndpoint(true, "open", []string{"logs"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after the drain pause has begun but before it finishes.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := esopsmigrate.Cutover(ctx, ep, types.MigrationCutoverRequest{
+		Alias:       "logs",
+		FromIndex:   "logs",
+		ToIndex:     "logs-v2",
+		BlockWrites: true,
+		DrainDelay:  500 * time.Millisecond,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if res.Status != types.MigrationStatusBlock {
+		t.Errorf("status: got %q, want block", res.Status)
+	}
+
+	// PutSettings calls: block-on then rollback. Both bodies must be
+	// distinct — block-on carries true, rollback carries null.
+	if len(su.gotBodies) != 2 {
+		t.Fatalf("expected 2 settings calls (block + rollback), got %d", len(su.gotBodies))
+	}
+	if !bytes.Contains(su.gotBodies[0], []byte(`"write":true`)) {
+		t.Errorf("first body should set the block, got %s", su.gotBodies[0])
+	}
+	if !bytes.Contains(su.gotBodies[1], []byte(`"write":null`)) {
+		t.Errorf("second body should clear the block (write:null), got %s", su.gotBodies[1])
+	}
+
+	// And the alias-swap must NOT have fired.
+	if len(au.gotActions) != 0 {
+		t.Errorf("alias swap should not happen on drain cancel, got %d actions", len(au.gotActions))
+	}
+
+	// A rollback step row should be present in the report.
+	var sawRollback bool
+	for _, s := range res.Steps {
+		if s.Name == "rollback-write-block" {
+			sawRollback = true
+			break
+		}
+	}
+	if !sawRollback {
+		t.Errorf("expected rollback-write-block step in result, got steps=%v", res.Steps)
 	}
 }

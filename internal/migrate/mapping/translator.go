@@ -182,17 +182,34 @@ func walk(from, to types.Dialect, prefix string, props map[string]any, out *[]ty
 	}
 }
 
-// match looks up a rule for the given (from, to, fromType) triple.
-// Same-dialect lookups land on a (X, X, type) row; cross-dialect on
-// (ES, OS, type) etc. The first matching rule wins; the table is
-// curated so no (from, to, type) triple has more than one entry.
-func match(from, to types.Dialect, fromType string) (Rule, bool) {
+// ruleKey is the lookup key for the indexed rules table. Composite
+// (from, to, fromType) is the natural primary key — every walk-step
+// asks "given this dialect pair, does this field's `type` need
+// translation?" The table is curated so no key has more than one entry.
+type ruleKey struct {
+	from     types.Dialect
+	to       types.Dialect
+	fromType string
+}
+
+// rulesByKey is the indexed view of `rules`, built once at package
+// init. Linear scan was fine at 11 rules and small mappings, but it
+// scales O(rules × fields) and the indexed map gives O(1) lookups
+// without changing what the table looks like.
+var rulesByKey = func() map[ruleKey]Rule {
+	out := make(map[ruleKey]Rule, len(rules))
 	for _, r := range rules {
-		if r.From == from && r.To == to && r.FromType == fromType {
-			return r, true
-		}
+		out[ruleKey{r.From, r.To, r.FromType}] = r
 	}
-	return Rule{}, false
+	return out
+}()
+
+// match looks up a rule for the given (from, to, fromType) triple via
+// the indexed table. Same-dialect lookups land on a (X, X, type) row;
+// cross-dialect on (ES, OS, type) etc.
+func match(from, to types.Dialect, fromType string) (Rule, bool) {
+	r, ok := rulesByKey[ruleKey{from, to, fromType}]
+	return r, ok
 }
 
 // WorstSeverity returns the highest severity across the issue set, or

@@ -17,8 +17,8 @@ import (
 
 // twinSetup is the migrate equivalent of cmdsetup.Setup — but for two
 // contexts at once. Format applies to both reports; protection-tier
-// checks are not run because both migrate plan and migrate check are
-// read-only against both clusters.
+// checks are not run during prepareTwin because most commands here are
+// read-only. `migrate reindex` calls enforceTwinProtection itself.
 type twinSetup struct {
 	Source esopsmigrate.Endpoint
 	Target esopsmigrate.Endpoint
@@ -49,14 +49,16 @@ func twinFlags(extra ...cli.Flag) []cli.Flag {
 	return append(base, extra...)
 }
 
-// prepareTwin loads the config and builds two connected clients —
+// prepareTwin loads the config once and builds two connected clients —
 // one each for --source and --target. Errors from either probe are
 // surfaced verbatim because the operator's first reaction is "which
 // cluster failed?" and an aggregated "couldn't migrate" loses that.
 //
-// supported is the --output allowlist; we pass it through to
-// output.Parse so the CLI rejects --output ndjson up-front rather
-// than silently ignoring it later.
+// The same config.Config drives every downstream lookup the twin
+// commands need (protection tier, auth type, format default), so a
+// single LoadDefault per invocation is enough — earlier revisions
+// re-read the file for each side and each gate, which on slow
+// filesystems showed up in the trace.
 func prepareTwin(ctx context.Context, cmd *cli.Command, supported []output.Format) (twinSetup, error) {
 	srcName := cmd.String("source")
 	tgtName := cmd.String("target")
@@ -96,25 +98,23 @@ func prepareTwin(ctx context.Context, cmd *cli.Command, supported []output.Forma
 }
 
 // buildEndpoint resolves one context name into a connected
-// esopsmigrate.Endpoint. The role argument ("source" / "target")
-// only shapes the error message — the resolved capabilities are the
-// same on both sides.
+// esopsmigrate.Endpoint. The role argument ("source" / "target") only
+// shapes the error message — the resolved capabilities are the same on
+// both sides.
 //
 // All capability fields are wired up regardless of which role this is —
 // the migrate package only calls what it needs from each side, and
 // keeping the wiring symmetric makes the command actions identical.
 // Source-side auth is forwarded as EndpointAuth so the target's
 // /_reindex body can fetch from the source. mTLS / SigV4 source-side
-// auth is rejected: remote reindex's source.remote block does not
-// honour either form.
+// auth is rejected at the reindex preflight: remote reindex's
+// source.remote block does not honour either form.
 func buildEndpoint(ctx context.Context, cmd *cli.Command, cfg config.Config, name, role string) (esopsmigrate.Endpoint, error) {
 	resolved, cc, err := cfg.ResolveContext(name)
 	if err != nil {
 		return esopsmigrate.Endpoint{}, fmt.Errorf("%s context %q: %w", role, name, err)
 	}
 	cmdsetup.ApplyContextOverrides(&cc, cmd)
-
-	auth := buildEndpointAuth(cc)
 
 	c, err := cluster.New(ctx, cc)
 	if err != nil {
@@ -124,12 +124,15 @@ func buildEndpoint(ctx context.Context, cmd *cli.Command, cfg config.Config, nam
 		Context:          resolved,
 		URL:              cc.URL,
 		Info:             c.Info,
-		Auth:             auth,
+		Protection:       cc.Protection,
+		AuthType:         cc.Auth.Type,
+		Auth:             buildEndpointAuth(cc),
 		Indices:          c.Indices,
 		Mappings:         c.Mappings,
 		Whitelist:        c.RemoteReindex,
 		DocCount:         c.DocCount,
 		Reindex:          c.Reindex,
+		TasksCancel:      c.TasksCancel,
 		Health:           c.Health,
 		IndexSettingsSet: c.IndexSettingsSet,
 		AliasUpdate:      c.AliasUpdate,
@@ -144,10 +147,9 @@ func buildEndpoint(ctx context.Context, cmd *cli.Command, cfg config.Config, nam
 // signing are not forwarded — the cluster's own connector cannot use
 // either against the source. They produce an empty EndpointAuth here,
 // equivalent to "no source-side credentials"; the reindex command's
-// preflight separately surfaces the unsupported-source-auth case so
-// the operator gets a clear error without breaking other migrate
-// commands (check / plan / verify) that don't need source credentials
-// at all.
+// preflight separately surfaces the unsupported-source-auth case via
+// sourceAuthIsForwardable so check / plan / verify (which don't need
+// source credentials at all) keep working unchanged.
 func buildEndpointAuth(cc config.Context) esopsmigrate.EndpointAuth {
 	switch cc.Auth.Type {
 	case "basic":
@@ -160,9 +162,6 @@ func buildEndpointAuth(cc config.Context) esopsmigrate.EndpointAuth {
 	case "api_key":
 		return esopsmigrate.EndpointAuth{APIKey: cc.Auth.APIKey}
 	default:
-		// "", "none", "mtls", "sigv4", or anything else: empty Auth.
-		// /_reindex source.remote will fall back to anonymous access;
-		// the cluster either accepts or rejects that.
 		return esopsmigrate.EndpointAuth{}
 	}
 }
@@ -171,10 +170,10 @@ func buildEndpointAuth(cc config.Context) esopsmigrate.EndpointAuth {
 // forwarded into the target's /_reindex source.remote block. Used by
 // `migrate reindex` to surface a precise error up-front when the
 // operator points it at an mTLS or SigV4 source — those auth schemes
-// can't be carried through the cluster's source-fetch connector, so
-// the reindex would otherwise 401 mid-run with an opaque cluster
-// message. check / plan / verify don't call this; they don't use the
-// source-side credentials at all.
+// can't be carried through the cluster's source-fetch connector, so the
+// reindex would otherwise 401 mid-run with an opaque cluster message.
+// check / plan / verify don't call this; they don't use the source-side
+// credentials at all.
 func sourceAuthIsForwardable(authType string) (ok bool, reason string) {
 	switch authType {
 	case "", "none", "basic", "bearer", "api_key":
@@ -188,27 +187,12 @@ func sourceAuthIsForwardable(authType string) (ok bool, reason string) {
 	}
 }
 
-// resolveSourceAuthType reads the source context's auth.type from the
-// config file referenced by --config. The reindex preflight uses this
-// to call sourceAuthIsForwardable. We can't carry auth.type on the
-// migrate.Endpoint without leaking config types into the migrate
-// package, so the CLI re-resolves at the moment it needs the answer.
-func resolveSourceAuthType(cmd *cli.Command, contextName string) (string, error) {
-	cfg, _, err := config.LoadDefault(cmd.String("config"))
-	if err != nil {
-		return "", err
-	}
-	_, cc, err := cfg.ResolveContext(contextName)
-	if err != nil {
-		return "", err
-	}
-	return cc.Auth.Type, nil
-}
-
 // enforceTwinProtection runs the protection-tier check on both
-// endpoints when a migrate command is destructive (reindex). Twin
-// commands cannot rely on cmdsetup.Prepare's check (it operates on a
-// single context); we re-implement the same rule against each side.
+// endpoints when a migrate command is destructive (reindex). The
+// migrate.Endpoint carries the resolved Protection tier so we don't
+// have to re-load config or thread a config.Context through the
+// migrate business package; cmdsetup.CheckProtection enforces the same
+// rules cmdsetup.Prepare does for single-context commands.
 //
 // Reading state on the source is allowed against any tier; *writing*
 // to the target is what triggers the prod / staging rule. The source
@@ -216,54 +200,13 @@ func resolveSourceAuthType(cmd *cli.Command, contextName string) (string, error)
 // reads — surface that here rather than letting the cluster reject the
 // fetch mid-reindex.
 func enforceTwinProtection(cmd *cli.Command, s twinSetup) error {
-	if cmd.Bool("dry-run") {
-		return nil
-	}
 	for _, ep := range []esopsmigrate.Endpoint{s.Source, s.Target} {
-		if err := protectionGate(cmd, ep); err != nil {
-			return err
+		cc := config.Context{Protection: ep.Protection}
+		if err := cmdsetup.CheckProtection(cc, cmd, true); err != nil {
+			return fmt.Errorf("%w: %s", err, ep.Context)
 		}
 	}
 	return nil
-}
-
-// protectionGate applies the same rules cmdsetup.checkProtection does
-// to a single endpoint. Kept as a small dispatch here because we don't
-// have access to cmdsetup's resolved config.Context — only the
-// endpoint summary. The rule set lives in two places now (this and
-// cmdsetup) and the duplication is deliberate: the alternative was to
-// surface every config.Context through the endpoint, which leaks
-// cluster-side wiring for a one-off check.
-func protectionGate(cmd *cli.Command, ep esopsmigrate.Endpoint) error {
-	// We don't have the protection tier on the endpoint summary —
-	// the migrate package deliberately stays free of config types.
-	// The cli layer carries it via the resolved cc and the gate runs
-	// in buildEndpoint's caller. Here we re-resolve from the config
-	// using the endpoint context name.
-	cfg, _, err := config.LoadDefault(cmd.String("config"))
-	if err != nil {
-		return err
-	}
-	_, cc, err := cfg.ResolveContext(ep.Context)
-	if err != nil {
-		return err
-	}
-	switch cc.Protection {
-	case "", "none":
-		return nil
-	case "staging":
-		if !cmd.Bool("no-prompt") {
-			return fmt.Errorf("%w: %s is staging-protected; pass --no-prompt", cmdsetup.ErrProtected, ep.Context)
-		}
-		return nil
-	case "prod":
-		if !cmd.Bool("i-know-this-is-prod") {
-			return fmt.Errorf("%w: %s is prod-protected; pass --i-know-this-is-prod", cmdsetup.ErrProtected, ep.Context)
-		}
-		return nil
-	default:
-		return fmt.Errorf("unknown protection tier %q on context %s", cc.Protection, ep.Context)
-	}
 }
 
 // resolveFormat is the migrate-side mirror of cmdsetup's private
