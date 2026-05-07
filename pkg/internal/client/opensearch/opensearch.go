@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"context"
 
@@ -27,8 +29,18 @@ import (
 )
 
 // Client is an OS-backed implementation of the esops client capabilities.
+//
+// tlsSettings* memoise the single GET /_nodes/settings call that
+// backs both TransportTLS and HTTPTLS. See the matching
+// elasticsearch.Client doc for the rationale; the OS adapter mirrors
+// the cache so a doctor running both rules pays one round trip.
 type Client struct {
 	api *osapi.Client
+
+	tlsSettingsMu   sync.Mutex
+	tlsSettingsTime time.Time
+	tlsSettingsSnap nodesTLSSettingsWire
+	tlsSettingsTTL  time.Duration
 }
 
 // Options bundles the transport-shaping knobs the upstream OS client
@@ -862,16 +874,20 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.Status.Enabled = true
 	report.Users = users
 
-	// Step 2: roles + role_mappings + tenants in parallel — three
-	// independent reads of the security plugin's admin API. Serial
-	// would multiply latency by 3 on every audit; the plugin happily
-	// fields concurrent reads.
+	// Step 2: roles + role_mappings + tenants + anonymous-access in
+	// parallel — independent reads, serial would multiply latency by 4
+	// on every audit. Anonymous access is a /_cluster/settings probe
+	// rather than a /_plugins/_security/* read but lives here for the
+	// same reason: the audit summary should report it without an extra
+	// round trip.
 	var (
-		roles    []types.SecurityRole
-		mappings []types.SecurityRoleMapping
-		tenants  []types.SecurityTenant
-		mNote    string
-		tNote    string
+		roles     []types.SecurityRole
+		mappings  []types.SecurityRoleMapping
+		tenants   []types.SecurityTenant
+		anonymous *types.AnonymousAccessPosture
+		mNote     string
+		tNote     string
+		aNote     string
 	)
 	err = clientutil.RunParallel(
 		func() error {
@@ -889,6 +905,11 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 			tenants, tNote = t, n
 			return e
 		},
+		func() error {
+			p, n, e := c.fetchOSAnonymousAccess(ctx)
+			anonymous, aNote = p, n
+			return e
+		},
 	)
 	if err != nil {
 		return report, err
@@ -896,11 +917,15 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.Roles = roles
 	report.RoleMappings = mappings
 	report.Tenants = tenants
+	report.Anonymous = anonymous
 	if mNote != "" {
 		report.Status.Notes = append(report.Status.Notes, mNote)
 	}
 	if tNote != "" {
 		report.Status.Notes = append(report.Status.Notes, tNote)
+	}
+	if aNote != "" {
+		report.Status.Notes = append(report.Status.Notes, aNote)
 	}
 	return report, nil
 }
@@ -1079,6 +1104,125 @@ func (c *Client) fetchOSTenants(ctx context.Context) ([]types.SecurityTenant, st
 		})
 	}
 	return out, "", nil
+}
+
+// osAnonymousSettingsBlock mirrors one scope of the cluster-settings
+// response narrowed to plugins.security.authcz.anonymous_auth_enabled.
+// The cluster reports the value as a string ("true"/"false") under
+// flat-settings or as a bool under nested; we accept either via
+// parseBoolish on the way out.
+type osAnonymousSettingsBlock struct {
+	Plugins struct {
+		Security struct {
+			Authcz struct {
+				AnonymousAuthEnabled *string `json:"anonymous_auth_enabled"`
+			} `json:"authcz"`
+		} `json:"security"`
+	} `json:"plugins"`
+}
+
+// fetchOSAnonymousAccess reads /_cluster/settings narrowed to the
+// plugins.security.authcz.anonymous_auth_enabled key and resolves the
+// effective value across transient → persistent → defaults precedence.
+//
+// Roles, Username, and AuthzException stay empty: the OS security
+// plugin's anonymous identity is configured outside cluster settings
+// (in the security config indexed under .opendistro_security), and the
+// admin endpoint that exposes it requires permissions an audit user
+// rarely has. The Enabled bit alone is the load-bearing signal for
+// "should an esops-doctor anonymous-access rule fire?" — richer detail
+// can be added when a consumer needs it.
+//
+// Failure modes mirror the other audit fetchers: 401/403 return a
+// status note and a nil posture so the rest of the audit completes.
+func (c *Client) fetchOSAnonymousAccess(ctx context.Context) (*types.AnonymousAccessPosture, string, error) {
+	includeDefaults := true
+	req := &osapi.ClusterGetSettingsReq{
+		Params: osapi.ClusterGetSettingsParams{
+			IncludeDefaults: &includeDefaults,
+			FilterPath:      []string{"*.plugins.security.authcz.anonymous_auth_enabled"},
+		},
+	}
+	resp, err := c.api.Cluster.GetSettings(ctx, req)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = statusOf(resp.Inspect().Response)
+		}
+		switch status {
+		case http.StatusForbidden:
+			return nil, "anonymous: forbidden — needs monitor cluster privilege to read /_cluster/settings", nil
+		case http.StatusUnauthorized:
+			return nil, "", esopsclient.ErrAuth
+		}
+		return nil, "", classifyResponseErr(err, status)
+	}
+
+	posture := &types.AnonymousAccessPosture{Source: "default"}
+
+	// Decode each scope independently. An empty scope (filter_path
+	// matched nothing) is the common case — every miss leaves Enabled
+	// at false and Source at "default".
+	transient, err := decodeOSAnonymousScope(resp.Transient)
+	if err != nil {
+		return nil, "", err
+	}
+	persistent, err := decodeOSAnonymousScope(resp.Persistent)
+	if err != nil {
+		return nil, "", err
+	}
+	defaults, err := decodeOSAnonymousScope(resp.Defaults)
+	if err != nil {
+		return nil, "", err
+	}
+
+	switch {
+	case transient != nil:
+		posture.Enabled = *transient
+		posture.Source = "transient"
+	case persistent != nil:
+		posture.Enabled = *persistent
+		posture.Source = "persistent"
+	case defaults != nil:
+		posture.Enabled = *defaults
+		posture.Source = "default"
+	}
+
+	return posture, "", nil
+}
+
+// decodeOSAnonymousScope decodes one scope from a filtered cluster-
+// settings response. Returns (*bool) so the caller can distinguish "the
+// cluster did not report this key in this scope" (nil) from "key set
+// to false" (non-nil). An empty raw payload is the common case when
+// filter_path matched nothing in this scope; treat it as "not set".
+func decodeOSAnonymousScope(raw json.RawMessage) (*bool, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var block osAnonymousSettingsBlock
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return nil, errors.Join(errors.New("decoding cluster settings (anonymous) scope"), err)
+	}
+	if block.Plugins.Security.Authcz.AnonymousAuthEnabled == nil {
+		return nil, nil
+	}
+	v := parseBoolish(*block.Plugins.Security.Authcz.AnonymousAuthEnabled, false)
+	return &v, nil
+}
+
+// parseBoolish accepts the "true"/"false" string form OS returns from
+// /_cluster/settings as well as bare bools, falling back to def on a
+// miss. The setting has appeared as both shapes across plugin versions;
+// tolerating either keeps the audit stable.
+func parseBoolish(s string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	return def
 }
 
 // doSecurityGET drops down to the underlying opensearch-go transport so

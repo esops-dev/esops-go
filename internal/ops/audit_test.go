@@ -234,6 +234,46 @@ func TestAudit_sortsAPIKeysByNameThenID(t *testing.T) {
 	}
 }
 
+func TestAudit_passesAnonymousPostureThrough(t *testing.T) {
+	report := sampleReport()
+	authzOff := false
+	report.Anonymous = &types.AnonymousAccessPosture{
+		Enabled:        true,
+		Username:       "_anonymous",
+		Roles:          []string{"anon-reader"},
+		AuthzException: &authzOff,
+		Source:         "persistent",
+	}
+	fake := &fakeSecurityAuditor{report: report}
+	got, err := ops.Audit(context.Background(), fake, sampleContext())
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if got.Anonymous == nil {
+		t.Fatal("Anonymous = nil; expected the posture to pass through unchanged")
+	}
+	if !got.Anonymous.Enabled || got.Anonymous.Username != "_anonymous" || got.Anonymous.Source != "persistent" {
+		t.Errorf("posture = %+v, want pass-through of the report value", got.Anonymous)
+	}
+	if got.Anonymous.AuthzException == nil || *got.Anonymous.AuthzException {
+		t.Errorf("AuthzException = %v, want non-nil *false (operator override)", got.Anonymous.AuthzException)
+	}
+}
+
+func TestAudit_anonymousNilStaysNil(t *testing.T) {
+	// Nil on the report means "not collected" — must not be silently
+	// upgraded to a zeroed struct, which downstream consumers would
+	// (correctly) read as "collected and disabled".
+	fake := &fakeSecurityAuditor{report: sampleReport()}
+	got, err := ops.Audit(context.Background(), fake, sampleContext())
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if got.Anonymous != nil {
+		t.Errorf("Anonymous = %+v, want nil when the report did not carry one", got.Anonymous)
+	}
+}
+
 func TestAudit_passesTenantsThrough(t *testing.T) {
 	report := sampleReport()
 	report.Tenants = []types.SecurityTenant{

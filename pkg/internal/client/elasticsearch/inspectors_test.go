@@ -124,6 +124,42 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 			},
 		},
 		{
+			name: "HTTPTLSPosture",
+			in: types.HTTPTLSPosture{
+				Enabled:      true,
+				ClientAuth:   "required",
+				Protocols:    []string{"TLSv1.3"},
+				CipherSuites: []string{"TLS_AES_256_GCM_SHA384"},
+				PerNode: []types.NodeTLSPosture{
+					{Name: "es01", Enabled: true, ClientAuth: "required"},
+				},
+			},
+			want: map[string]json.RawMessage{
+				"enabled":       json.RawMessage(`true`),
+				"client_auth":   json.RawMessage(`"required"`),
+				"protocols":     json.RawMessage(`["TLSv1.3"]`),
+				"cipher_suites": json.RawMessage(`["TLS_AES_256_GCM_SHA384"]`),
+				"per_node":      json.RawMessage(`[{"name":"es01","enabled":true,"client_auth":"required"}]`),
+			},
+		},
+		{
+			name: "NodeTLSPosture",
+			in: types.NodeTLSPosture{
+				Name:         "es01",
+				Enabled:      true,
+				ClientAuth:   "optional",
+				Protocols:    []string{"TLSv1.2", "TLSv1.3"},
+				CipherSuites: []string{"TLS_AES_256_GCM_SHA384"},
+			},
+			want: map[string]json.RawMessage{
+				"name":          json.RawMessage(`"es01"`),
+				"enabled":       json.RawMessage(`true`),
+				"client_auth":   json.RawMessage(`"optional"`),
+				"protocols":     json.RawMessage(`["TLSv1.2","TLSv1.3"]`),
+				"cipher_suites": json.RawMessage(`["TLS_AES_256_GCM_SHA384"]`),
+			},
+		},
+		{
 			name: "IndexCacheClearResult",
 			in: types.IndexCacheClearResult{
 				Action:     "cache-clear",
@@ -238,4 +274,136 @@ func TestSecurityUserPasswordChangedAtOmitEmpty(t *testing.T) {
 	if _, present := got["password_changed_at"]; present {
 		t.Errorf("password_changed_at should be omitted when empty, payload=%s", string(b))
 	}
+}
+
+// readSliceSetting decodes flat-settings list values. With
+// flat_settings=true the cluster keeps list values as JSON arrays
+// under the dotted-path key, so the decoder hands the inspector an
+// []any. Non-string members must be skipped (a cluster bug shouldn't
+// crash the audit) and the result must be sorted (downstream
+// equality checks compare per-node lists).
+func TestReadSliceSetting(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]any
+		key  string
+		want []string
+	}{
+		{name: "nil map", in: nil, key: "x", want: nil},
+		{name: "absent key", in: map[string]any{"y": []any{"a"}}, key: "x", want: nil},
+		{name: "wrong type", in: map[string]any{"x": "not-a-list"}, key: "x", want: nil},
+		{
+			name: "string list sorted",
+			in:   map[string]any{"x": []any{"TLSv1.3", "TLSv1.2"}},
+			key:  "x",
+			want: []string{"TLSv1.2", "TLSv1.3"},
+		},
+		{
+			name: "non-string members skipped",
+			in:   map[string]any{"x": []any{"TLSv1.3", 42, true, "TLSv1.2"}},
+			key:  "x",
+			want: []string{"TLSv1.2", "TLSv1.3"},
+		},
+		{
+			name: "empty list",
+			in:   map[string]any{"x": []any{}},
+			key:  "x",
+			want: []string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := readSliceSetting(tc.in, tc.key)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// aggregateHTTPTLS is the dialect-independent collapse from per-node
+// to cluster-side posture. The rules are load-bearing for the
+// http-tls hygiene rule:
+//   - Enabled is all-or-nothing (one off node must surface)
+//   - ClientAuth becomes "mixed" when nodes disagree
+//   - Protocols/CipherSuites are the union (attacker picks weakest)
+//   - PerNode is populated only when nodes disagree on at least one
+//     field, so a uniform fleet doesn't pay the per-node JSON cost
+func TestAggregateHTTPTLS(t *testing.T) {
+	t.Run("homogeneous fleet has no per-node block", func(t *testing.T) {
+		per := []types.NodeTLSPosture{
+			{Name: "es02", Enabled: true, ClientAuth: "required", Protocols: []string{"TLSv1.3"}},
+			{Name: "es01", Enabled: true, ClientAuth: "required", Protocols: []string{"TLSv1.3"}},
+		}
+		got := aggregateHTTPTLS(per)
+		if !got.Enabled {
+			t.Errorf("Enabled = false, want true")
+		}
+		if got.ClientAuth != "required" {
+			t.Errorf("ClientAuth = %q, want %q", got.ClientAuth, "required")
+		}
+		if !reflect.DeepEqual(got.Protocols, []string{"TLSv1.3"}) {
+			t.Errorf("Protocols = %#v, want [TLSv1.3]", got.Protocols)
+		}
+		if got.PerNode != nil {
+			t.Errorf("PerNode populated for homogeneous fleet: %#v", got.PerNode)
+		}
+	})
+
+	t.Run("one node with TLS off flips Enabled and surfaces per-node", func(t *testing.T) {
+		per := []types.NodeTLSPosture{
+			{Name: "es01", Enabled: true, ClientAuth: "none"},
+			{Name: "es02", Enabled: false, ClientAuth: "none"},
+		}
+		got := aggregateHTTPTLS(per)
+		if got.Enabled {
+			t.Errorf("Enabled = true; one node off must flip the aggregate")
+		}
+		if len(got.PerNode) != 2 {
+			t.Errorf("PerNode = %#v, want both nodes surfaced", got.PerNode)
+		}
+		// Sort guarantee: per-node block is alphabetical.
+		if got.PerNode[0].Name != "es01" || got.PerNode[1].Name != "es02" {
+			t.Errorf("PerNode not sorted: %#v", got.PerNode)
+		}
+	})
+
+	t.Run("disagreement on client_auth becomes mixed", func(t *testing.T) {
+		per := []types.NodeTLSPosture{
+			{Name: "es01", Enabled: true, ClientAuth: "required"},
+			{Name: "es02", Enabled: true, ClientAuth: "optional"},
+		}
+		got := aggregateHTTPTLS(per)
+		if got.ClientAuth != "mixed" {
+			t.Errorf("ClientAuth = %q, want mixed", got.ClientAuth)
+		}
+		if got.PerNode == nil {
+			t.Errorf("PerNode must surface when nodes disagree on client_auth")
+		}
+	})
+
+	t.Run("protocols/ciphers are the union, sorted", func(t *testing.T) {
+		per := []types.NodeTLSPosture{
+			{Name: "es01", Enabled: true, ClientAuth: "none", Protocols: []string{"TLSv1.2"}, CipherSuites: []string{"TLS_AES_128_GCM_SHA256"}},
+			{Name: "es02", Enabled: true, ClientAuth: "none", Protocols: []string{"TLSv1.3"}, CipherSuites: []string{"TLS_AES_256_GCM_SHA384"}},
+		}
+		got := aggregateHTTPTLS(per)
+		if !reflect.DeepEqual(got.Protocols, []string{"TLSv1.2", "TLSv1.3"}) {
+			t.Errorf("Protocols = %#v, want [TLSv1.2 TLSv1.3]", got.Protocols)
+		}
+		want := []string{"TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"}
+		if !reflect.DeepEqual(got.CipherSuites, want) {
+			t.Errorf("CipherSuites = %#v, want %#v", got.CipherSuites, want)
+		}
+		if got.PerNode == nil {
+			t.Errorf("PerNode must surface when protocol/cipher lists differ across nodes")
+		}
+	})
+
+	t.Run("empty input yields zero value", func(t *testing.T) {
+		got := aggregateHTTPTLS(nil)
+		if !reflect.DeepEqual(got, types.HTTPTLSPosture{}) {
+			t.Errorf("empty input: got %#v, want zero value", got)
+		}
+	})
 }

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/esops-dev/esops-go/pkg/internal/clientutil"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -196,22 +197,86 @@ func (c *Client) AllocationByNode(ctx context.Context) ([]types.NodeAllocation, 
 	return out, nil
 }
 
-// nodesInfoTransportTLSWire mirrors the slice of /_nodes/settings we
-// inspect for transport-layer TLS. flat_settings=true makes the keys
-// arrive as dotted paths; we look for `xpack.security.transport.ssl.*`
-// (ES 7+) and `transport.ssl.*` (legacy / pre-xpack rebrand) and merge
-// the two so the answer doesn't depend on which configuration style
-// the operator picked.
-type nodesInfoTransportTLSWire struct {
+// nodesTLSSettingsWire mirrors the slice of /_nodes/settings we inspect
+// for transport- and HTTP-layer TLS. flat_settings=true makes the keys
+// arrive as dotted paths; the inspectors read both
+// `xpack.security.{transport,http}.ssl.*` (ES 7+) and the legacy
+// `{transport,http}.ssl.*` aliases so the answer doesn't depend on
+// which configuration style the operator picked.
+type nodesTLSSettingsWire struct {
 	Nodes map[string]struct {
 		Name     string         `json:"name"`
 		Settings map[string]any `json:"settings"`
 	} `json:"nodes"`
 }
 
-// TransportTLS implements client.TransportTLSInspector for ES. Reads
-// /_nodes/settings?flat_settings=true and aggregates the per-node
-// transport-TLS state across every reachable node. Enabled is true
+// tlsSettingsPath is the single read that backs both TransportTLS and
+// HTTPTLS. filter_path narrows the response to just the keys those
+// inspectors consume — without it, /_nodes/settings on a busy cluster
+// returns every static setting, which is wasteful and adds parse cost.
+//
+// /_nodes/settings does not accept ?include_defaults — that parameter
+// is /_cluster/settings only, and xpack.security.{transport,http}.ssl.*
+// are static node-level settings that don't surface through
+// /_cluster/settings either. Cluster-default ciphers/protocols are
+// JVM-baked and not exposed through any cluster API; rules that need
+// to flag a weak default have to know the dialect's defaults
+// out-of-band. The view here is operator-only by design.
+//
+// filter_path stops at `nodes.*.settings` rather than drilling deeper
+// into the SSL keypaths. With flat_settings=true the cluster emits
+// keys like "xpack.security.http.ssl.enabled" — the dots are literal
+// characters, not JSON-path separators, so a filter_path of
+// `nodes.*.settings.xpack.security.http.ssl.*` matches nothing and
+// silently drops the keys we came for. Stopping at `settings` keeps
+// the per-node settings map intact (still small — only operator-set
+// static keys appear without include_defaults) while skipping the
+// host/ip/version/roles/attributes the inspector doesn't read.
+const tlsSettingsPath = "/_nodes/settings?flat_settings=true&filter_path=" +
+	"nodes.*.name,nodes.*.settings"
+
+const tlsSettingsTTLDefault = 2 * time.Second
+
+// cachedNodesTLSSettings issues at most one /_nodes/settings GET per
+// TTL window per Client. TransportTLS and HTTPTLS both call through
+// here, so a doctor running both rules in sequence pays one round
+// trip rather than two. Errors are not cached: a transient transport
+// failure should not mask a recovered cluster on the next call.
+//
+// The mutex is held across the fetch deliberately. Concurrent first
+// callers serialise rather than racing on duplicate requests; in the
+// expected single-goroutine doctor flow this is a no-op, and even
+// under contention the worst case is a brief wait for the leading
+// fetch to finish, which is what we want anyway.
+func (c *Client) cachedNodesTLSSettings(ctx context.Context) (nodesTLSSettingsWire, error) {
+	c.tlsSettingsMu.Lock()
+	defer c.tlsSettingsMu.Unlock()
+	ttl := c.tlsSettingsTTL
+	if ttl <= 0 {
+		ttl = tlsSettingsTTLDefault
+	}
+	if !c.tlsSettingsTime.IsZero() && time.Since(c.tlsSettingsTime) < ttl {
+		return c.tlsSettingsSnap, nil
+	}
+	body, status, err := c.doRawGET(ctx, tlsSettingsPath)
+	if err != nil {
+		return nodesTLSSettingsWire{}, err
+	}
+	if status >= 400 {
+		return nodesTLSSettingsWire{}, clientutil.ClassifyStatus("nodes settings (tls)", status, body)
+	}
+	var wire nodesTLSSettingsWire
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nodesTLSSettingsWire{}, errors.Join(errors.New("decoding nodes settings (tls) response"), err)
+	}
+	c.tlsSettingsSnap = wire
+	c.tlsSettingsTime = time.Now()
+	return wire, nil
+}
+
+// TransportTLS implements client.TransportTLSInspector for ES.
+// Aggregates the per-node transport-TLS state across every reachable
+// node from the shared /_nodes/settings snapshot. Enabled is true
 // only when every node reports it on; one false in the fleet is
 // exactly what the rule has to flag, so the aggregation is
 // deliberately strict. Same rule for Verified, against
@@ -223,17 +288,9 @@ type nodesInfoTransportTLSWire struct {
 // vacuously true; the rule expects a populated cluster to make a
 // claim.
 func (c *Client) TransportTLS(ctx context.Context) (types.TransportTLS, error) {
-	body, status, err := c.doRawGET(ctx, "/_nodes/settings?flat_settings=true")
+	wire, err := c.cachedNodesTLSSettings(ctx)
 	if err != nil {
 		return types.TransportTLS{}, err
-	}
-	if status >= 400 {
-		return types.TransportTLS{}, clientutil.ClassifyStatus("nodes settings (transport tls)", status, body)
-	}
-
-	var wire nodesInfoTransportTLSWire
-	if err := json.Unmarshal(body, &wire); err != nil {
-		return types.TransportTLS{}, errors.Join(errors.New("decoding nodes settings (transport tls) response"), err)
 	}
 	if len(wire.Nodes) == 0 {
 		return types.TransportTLS{}, nil
@@ -261,6 +318,195 @@ func (c *Client) TransportTLS(ctx context.Context) (types.TransportTLS, error) {
 		}
 	}
 	return types.TransportTLS{Enabled: allEnabled, Verified: allEnabled && allVerified}, nil
+}
+
+// HTTPTLS implements client.HTTPTLSInspector for ES. Reads
+// /_nodes/settings?flat_settings=true and aggregates the per-node
+// HTTP-layer TLS state across every reachable node. Sibling of
+// TransportTLS — the transport layer is node-to-node, the HTTP layer
+// is what an external client connects to, so the two endpoints answer
+// independent questions and each gets its own inspector.
+//
+// Aggregation:
+//   - Enabled is true only when every node reports HTTP TLS as on. One
+//     misconfigured node is exactly what the rule has to flag, so the
+//     all-or-nothing rule mirrors TransportTLS.
+//   - ClientAuth is the homogeneous value when every node agrees;
+//     "mixed" when they disagree (the disagreement is the finding).
+//   - Protocols and CipherSuites are the sorted, deduplicated union
+//     across nodes. The attacker picks the weakest accepted by any
+//     node, so the rule evaluates the union, not the intersection.
+//
+// PerNode is populated only when nodes disagree on Enabled or
+// ClientAuth, or when their Protocols/CipherSuites differ — operators
+// reading a uniformly-configured fleet only need the aggregate, and
+// inflating the JSON with redundant per-node rows on every audit
+// would be noise.
+//
+// Reads from the same /_nodes/settings snapshot TransportTLS uses
+// (cachedNodesTLSSettings); a doctor running both rules pays one
+// round trip rather than two. The view is operator-only — cluster-
+// default ciphers/protocols are JVM-baked and not exposed through
+// any /_nodes or /_cluster API, so a rule that flags a weak default
+// has to know the dialect's defaults out-of-band rather than reading
+// them off the wire here.
+func (c *Client) HTTPTLS(ctx context.Context) (types.HTTPTLSPosture, error) {
+	wire, err := c.cachedNodesTLSSettings(ctx)
+	if err != nil {
+		return types.HTTPTLSPosture{}, err
+	}
+	if len(wire.Nodes) == 0 {
+		return types.HTTPTLSPosture{}, nil
+	}
+
+	per := make([]types.NodeTLSPosture, 0, len(wire.Nodes))
+	for _, n := range wire.Nodes {
+		enabled := readBoolSetting(n.Settings, "xpack.security.http.ssl.enabled") ||
+			readBoolSetting(n.Settings, "http.ssl.enabled")
+		// client_authentication: "required" | "optional" | "none".
+		// Default is "none" (HTTP-layer client auth is opt-in even
+		// when SSL is on); we report "" when the operator did not
+		// set it so the aggregate can distinguish "explicitly none"
+		// from "unset".
+		clientAuth := strings.ToLower(strings.TrimSpace(readStringSetting(n.Settings, "xpack.security.http.ssl.client_authentication")))
+		if clientAuth == "" {
+			clientAuth = strings.ToLower(strings.TrimSpace(readStringSetting(n.Settings, "http.ssl.client_authentication")))
+		}
+		protocols := readSliceSetting(n.Settings, "xpack.security.http.ssl.supported_protocols")
+		if len(protocols) == 0 {
+			protocols = readSliceSetting(n.Settings, "http.ssl.supported_protocols")
+		}
+		ciphers := readSliceSetting(n.Settings, "xpack.security.http.ssl.cipher_suites")
+		if len(ciphers) == 0 {
+			ciphers = readSliceSetting(n.Settings, "http.ssl.cipher_suites")
+		}
+		per = append(per, types.NodeTLSPosture{
+			Name:         n.Name,
+			Enabled:      enabled,
+			ClientAuth:   clientAuth,
+			Protocols:    protocols,
+			CipherSuites: ciphers,
+		})
+	}
+	return aggregateHTTPTLS(per), nil
+}
+
+// aggregateHTTPTLS collapses a per-node slice into the cluster-side
+// HTTPTLSPosture. Lives outside HTTPTLS so the OS adapter can share
+// it: aggregation is dialect-independent, the dialect-specific work
+// is in mapping the cluster's flat-settings vocabulary to NodeTLSPosture.
+//
+// PerNode is populated only when the nodes are not unanimous on
+// every field — a uniformly-configured fleet renders a clean
+// aggregate without the redundant per-node block.
+func aggregateHTTPTLS(per []types.NodeTLSPosture) types.HTTPTLSPosture {
+	if len(per) == 0 {
+		return types.HTTPTLSPosture{}
+	}
+	sort.Slice(per, func(i, j int) bool { return per[i].Name < per[j].Name })
+
+	allEnabled := true
+	clientAuth := per[0].ClientAuth
+	clientAuthMixed := false
+	protoSet := map[string]struct{}{}
+	cipherSet := map[string]struct{}{}
+	disagree := false
+	for i, n := range per {
+		if !n.Enabled {
+			allEnabled = false
+		}
+		if n.ClientAuth != clientAuth {
+			clientAuthMixed = true
+		}
+		for _, p := range n.Protocols {
+			protoSet[p] = struct{}{}
+		}
+		for _, c := range n.CipherSuites {
+			cipherSet[c] = struct{}{}
+		}
+		if i > 0 {
+			prev := per[i-1]
+			if prev.Enabled != n.Enabled || prev.ClientAuth != n.ClientAuth ||
+				!stringSliceEqual(prev.Protocols, n.Protocols) ||
+				!stringSliceEqual(prev.CipherSuites, n.CipherSuites) {
+				disagree = true
+			}
+		}
+	}
+	out := types.HTTPTLSPosture{Enabled: allEnabled}
+	if clientAuthMixed {
+		out.ClientAuth = "mixed"
+	} else {
+		out.ClientAuth = clientAuth
+	}
+	out.Protocols = sortedKeys(protoSet)
+	out.CipherSuites = sortedKeys(cipherSet)
+	if disagree {
+		out.PerNode = per
+	}
+	return out
+}
+
+// stringSliceEqual reports whether two string slices have the same
+// elements in the same order. Used by aggregateHTTPTLS to detect
+// per-node disagreement on protocol / cipher lists; the input slices
+// arrive sorted from readSliceSetting so order-sensitive comparison
+// is safe.
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sortedKeys returns the map's keys in alphabetic order. Stable
+// output is what scripts and golden tests expect; the union order
+// across nodes is otherwise nondeterministic.
+func sortedKeys(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// readSliceSetting pulls a flat-key setting whose value is a list of
+// strings. With flat_settings=true the cluster keeps list values as
+// JSON arrays under the dotted-path key, so the decoder hands us an
+// []any. Non-string elements are skipped — a malformed setting
+// shouldn't crash the audit; the aggregate just sees fewer entries.
+//
+// Returned slices are sorted so callers can compare per-node lists by
+// equality without taking on the cluster's emission order.
+func readSliceSetting(m map[string]any, key string) []string {
+	if m == nil {
+		return nil
+	}
+	raw, ok := m[key]
+	if !ok {
+		return nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // readBoolSetting pulls a flat-key setting and tolerates the cluster's

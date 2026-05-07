@@ -36,6 +36,7 @@ func Audit(ctx context.Context, a client.SecurityAuditor, cc config.Context) (ty
 	return types.SecurityAudit{
 		TLS:          tlsFromContext(cc),
 		Status:       report.Status,
+		Anonymous:    report.Anonymous,
 		Users:        report.Users,
 		Roles:        report.Roles,
 		RoleMappings: report.RoleMappings,

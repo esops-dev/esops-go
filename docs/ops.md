@@ -122,7 +122,7 @@ esops-users  0      p     started  es01  -
 
 ## esops ops audit
 
-One-command security posture check: TLS settings, security feature status, native users and roles.
+One-command security posture check: TLS settings, security feature status, anonymous-access posture, native users and roles.
 
 ```sh
 $ esops --context local-es-mtls ops audit
@@ -134,11 +134,19 @@ TLS
 SECURITY
   dialect:  elasticsearch
   enabled:  true
+
+ANONYMOUS
+  enabled:         false
+  username:        _anonymous
+  source:          default
 ```
+
+The `ANONYMOUS` block reports whether unauthenticated requests are accepted, the identity they would inherit, and which cluster-settings scope (`transient`, `persistent`, `default`) supplied the effective value. Section is omitted when the cluster has security disabled or the audit user can't read `/_cluster/settings`.
 
 **Common use cases**
 - Verify who can access the cluster
 - Audit for user-defined roles with broad permissions
+- Detect anonymous access left enabled on a production cluster
 
 Gracefully handles security-disabled clusters. Works on both dialects.
 
