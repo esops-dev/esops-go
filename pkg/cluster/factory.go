@@ -14,11 +14,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/config"
+	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	esadapter "github.com/esops-dev/esops-go/pkg/internal/client/elasticsearch"
 	osadapter "github.com/esops-dev/esops-go/pkg/internal/client/opensearch"
-	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -55,7 +55,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		// so business code can call s.Client.ISM.* without nil-checks
 		// and get ErrUnsupported with a clear message when the
 		// operator targeted an ES context by mistake.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: impl, ServiceTokens: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: impl, ServiceTokens: impl, FieldCaps: impl, FieldCardinality: impl, RestoreHistory: impl, RemoteClusters: impl, License: impl}, nil
 	case types.DialectOpenSearch:
 		impl, err := osadapter.New(addrs, provider, transport, osadapter.Options{
 			MaxRetries:          cc.MaxRetries,
@@ -67,7 +67,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		}
 		// ILM is Elasticsearch-only — same stubbing pattern as the ES
 		// branch above for ISM.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: unsupportedAPIKeys{}, ServiceTokens: unsupportedServiceTokens{}}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, Recovery: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: unsupportedAPIKeys{}, ServiceTokens: unsupportedServiceTokens{}, FieldCaps: impl, FieldCardinality: impl, RestoreHistory: impl, RemoteClusters: impl, License: unsupportedLicense{}}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}
@@ -150,6 +150,17 @@ type unsupportedServiceTokens struct{}
 
 func (unsupportedServiceTokens) ServiceTokens(context.Context) ([]types.ServiceToken, error) {
 	return nil, fmt.Errorf("%w: service tokens are Elasticsearch-only; OpenSearch has no equivalent first-class surface", client.ErrUnsupported)
+}
+
+// unsupportedLicense is the LicenseInspector stub installed on
+// OpenSearch clients. /_license is an Elasticsearch-only commercial-
+// licence surface; OS has no equivalent. Returning ErrUnsupported keeps
+// the dialect mismatch loud and stable (exit code 6) rather than
+// leaking a 404 from a path the cluster never advertised.
+type unsupportedLicense struct{}
+
+func (unsupportedLicense) License(context.Context) (types.LicenseStatus, error) {
+	return types.LicenseStatus{}, fmt.Errorf("%w: /_license is Elasticsearch-only; OpenSearch has no equivalent commercial-licence surface", client.ErrUnsupported)
 }
 
 // buildTransport returns the http.RoundTripper handed to the upstream

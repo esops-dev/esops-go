@@ -1153,6 +1153,178 @@ type ServiceTokenInspector interface {
 	ServiceTokens(ctx context.Context) ([]types.ServiceToken, error)
 }
 
+// FieldCapsInspector wraps GET /<indices>/_field_caps?fields=… — the
+// cheap metadata-only view of which fields exist across an index
+// pattern, what types they have, and which are searchable/aggregatable.
+// Both ES and OS expose the same envelope
+// (`{"indices":[...],"fields":{"<name>":{"<type>":{"type":"…",
+// "searchable":…,"aggregatable":…,"metadata_field":…,"indices":[...]}
+// }}}`) so one capability covers both dialects.
+//
+// Used by esops-doctor's deprecated-field-types and mapping-drift
+// rules — both want "tell me every field's type across this pattern"
+// without paying for the full /_mapping body. /_field_caps is the
+// right shape: cheap, summarises across indices, and surfaces
+// heterogeneous types in one row rather than forcing the rule to
+// diff per-index mapping trees.
+//
+// Deliberately split from FieldCardinalityInspector so the cheap rule
+// (deprecated-field-types) doesn't drag in the expensive cardinality
+// path. A rule importing FieldCapsInspector alone never accidentally
+// triggers a cardinality aggregation against a busy cluster.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 404 when a literal index name does not
+//     exist in the path)
+type FieldCapsInspector interface {
+	FieldCaps(ctx context.Context, req types.FieldCapsRequest) ([]types.FieldCaps, error)
+	// FieldCapsSummary is the richer companion that returns the
+	// per-field flattened rows plus the cluster's top-level matched-
+	// indices list. The two methods share the same wire call; a
+	// consumer that only wants the slice continues to use FieldCaps
+	// and pays no extra cost. Consumers that need to know which
+	// indices contributed (or just the count for a "23 indices
+	// analysed" header) reach for FieldCapsSummary.
+	FieldCapsSummary(ctx context.Context, req types.FieldCapsRequest) (types.FieldCapsSummary, error)
+}
+
+// FieldCardinalityInspector wraps POST /<index>/_search with a
+// `cardinality` aggregation — the expensive companion to
+// FieldCapsInspector. Both ES and OS expose the same aggregation
+// shape; one capability covers both dialects.
+//
+// Used by esops-doctor's unbounded-keyword-cardinality rule: it
+// answers "how many distinct values does this keyword field hold on
+// this index" without the rule having to compose a search body
+// itself. Implementation runs one /_search per (index, field) pair
+// with `size:0` and `track_total_hits:false` so the cluster does not
+// materialise hits.
+//
+// Cardinality runs the cluster's HyperLogLog estimator — the result
+// is approximate by construction. The rule consumer treats
+// `Precision="approximate"` as the canonical state for now; a future
+// "exact" mode would re-run with a `terms` agg, but that's not built.
+//
+// Bounded by request.MaxFieldsToScan and request.IndexLimit so a
+// runaway rule stays polite to the cluster — the capability refuses
+// to fan out past those caps with ErrUsage rather than silently
+// truncating.
+//
+// Errors mirror FieldCapsInspector. ErrUsage when neither Indices
+// nor Fields is set (a no-op call that almost certainly means the
+// rule is mis-wired).
+type FieldCardinalityInspector interface {
+	Cardinality(ctx context.Context, req types.FieldCardinalityRequest) ([]types.FieldCardinality, error)
+	// CardinalityStream is the streaming companion: yields each
+	// (index, field) result as soon as the per-pair /_search returns,
+	// rather than buffering the full slice. The contract mirrors
+	// IndicesStream/AliasesStream — yield returning a non-nil error
+	// stops iteration and surfaces the error from the call.
+	//
+	// Useful when a rule wants progress reporting on a multi-field
+	// scan (e.g. 50 fields × 10 indices), or when the caller wants to
+	// short-circuit on the first cardinality crossing some threshold
+	// rather than waiting for every pair to finish. The slice path is
+	// still the primary surface for the typical "give me the
+	// cardinality of these three fields" use case.
+	CardinalityStream(ctx context.Context, req types.FieldCardinalityRequest, yield func(types.FieldCardinality) error) error
+}
+
+// SnapshotRestoreHistoryInspector reports recent or in-flight restore
+// observations from two sources, configured per-call:
+//
+//   - The cluster's task history via
+//     GET /_tasks?actions=cluster:admin/snapshot/restore*&detailed=true,
+//     a best-effort view that surfaces in-flight restores plus what
+//     the cluster still has in its task index. A cluster that hasn't
+//     restored anything recently reports an empty slice, which is a
+//     valid "no evidence in the lookback window" outcome rather than
+//     a failure.
+//   - A convention-based index (default `.esops-doctor-restore-tests`)
+//     where operators or runbooks record verified restore events. Same
+//     read shape as DocumentInspector — one document per recorded
+//     restore — so the implementation reuses the existing read
+//     window rather than introducing a third search shape.
+//
+// The capability has no canonical cluster API to reach for: ES and OS
+// neither expose a "restore audit log" nor a "verified restore" flag,
+// so the convention-based path is the only honest answer to the
+// untested-restore rule's central question. The task-history path is
+// a nice-to-have for short-lookback "did anything restore in the last
+// hour" checks.
+//
+// Both sources are off by default — request.IncludeTaskHistory and
+// request.IncludeConventionIndex must be set explicitly. A request
+// with both false returns ErrUsage rather than silently no-op'ing, so
+// a mis-wired rule fails loud.
+//
+// Both ES and OS expose the same task and search envelope shapes; one
+// capability covers both dialects.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUsage when both source toggles are false
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message
+type SnapshotRestoreHistoryInspector interface {
+	RestoreHistory(ctx context.Context, req types.SnapshotRestoreHistoryRequest) ([]types.RestoreEvent, error)
+}
+
+// RemoteClusterInspector reports the cluster's view of every configured
+// remote — the read surface esops-doctor's CCR / CCS readiness rules
+// build on. The CCS half (RemoteClusters) is shared across ES and OS:
+// both dialects expose GET /_remote/info with the same envelope keyed
+// by remote-cluster name. The CCR half (FollowerStats,
+// AutoFollowPatterns) is Elasticsearch-only: /_ccr/stats and
+// /_ccr/auto_follow have no OpenSearch equivalent, so the OS adapter
+// returns ErrUnsupported on those methods and the doctor rule auto-
+// skips with a stable "not applicable on this dialect" reason rather
+// than failing.
+//
+// Read-only by construction: there is no Updater sibling. Configuring a
+// remote, pausing replication, or unfollowing a leader is operator
+// surface that lives elsewhere — this capability only reports.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported from FollowerStats / AutoFollowPatterns on the OS
+//     adapter; on basic-licence ES when the endpoint 404s
+//   - generic wrapped error on other 4xx/5xx with the cluster's body in
+//     the message
+type RemoteClusterInspector interface {
+	RemoteClusters(ctx context.Context) ([]types.RemoteCluster, error)
+	FollowerStats(ctx context.Context) ([]types.FollowerStats, error)
+	AutoFollowPatterns(ctx context.Context) ([]types.AutoFollowPattern, error)
+}
+
+// LicenseInspector reports the cluster's license posture from
+// GET /_license — the read surface esops-doctor's license-expiration
+// rule depends on. ES-only: OpenSearch has no equivalent commercial-
+// license surface, so the OS adapter returns ErrUnsupported on every
+// method and the matching rule is dialect-tagged `[elasticsearch]`.
+//
+// Returns one LicenseStatus per call — the cluster's currently
+// installed license. The cluster reports a basic license (always
+// active, never expiring) by default; the capability surfaces that as
+// Status="active", Type="basic", ExpiresAt=nil so the rule consumer
+// can render "no expiry concern" without a special-case branch.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the adapter is the OS one
+//   - generic wrapped error on other 4xx/5xx with the cluster's body in
+//     the message (typical case: a 404 on /_license against an ES build
+//     with the licensing module disabled)
+type LicenseInspector interface {
+	License(ctx context.Context) (types.LicenseStatus, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -1212,4 +1384,9 @@ type Client struct {
 	Realms              RealmsInspector
 	APIKeys             APIKeyInspector
 	ServiceTokens       ServiceTokenInspector
+	FieldCaps           FieldCapsInspector
+	FieldCardinality    FieldCardinalityInspector
+	RestoreHistory      SnapshotRestoreHistoryInspector
+	RemoteClusters      RemoteClusterInspector
+	License             LicenseInspector
 }

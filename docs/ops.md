@@ -28,6 +28,9 @@ See [config.md](./config.md) for context resolution, authentication, and protect
 | `settings diff`        | Drift between persistent and transient scope |
 | `unblock`              | Clear an index block (e.g. disk-watermark)   |
 | `cache-clear`          | Clear fielddata / query / request caches    |
+| `realms`               | Configured authentication realms             |
+| `remote`               | Cross-cluster remotes + CCR follower status  |
+| `license`              | Installed commercial licence (ES only)       |
 
 ---
 
@@ -468,6 +471,75 @@ The output table reports `SHARDS_OK / SHARDS_TOTAL` and a `SHARDS_FAILED` count 
 - Reclaim heap on a hot data tier before rolling restart
 
 Mutates cluster state (heap and disk-cache state, not data). Production contexts require `--i-know-this-is-prod`. Use carefully on busy clusters: a fielddata flush evicts heap in one go.
+
+## esops ops remote
+
+Lists configured remote clusters (`/_remote/info`), CCR follower lag (`/_ccr/stats`), and configured CCR auto-follow patterns (`/_ccr/auto_follow`).
+
+```sh
+$ esops ops remote
+NAME       MODE   CONNECTED  NODES  SKIP_UNAVAIL
+leader-eu  sniff  true       3      false
+
+FOLLOWERS (ok)
+INDEX             LEADER     CLUSTER    LAG_OPS  PAUSED
+logs-eu-follower  logs-eu    leader-eu  4        false
+
+AUTO_FOLLOW (ok)
+NAME      REMOTE     LEADER_PATTERNS  FOLLOW_PATTERN              ACTIVE
+eu-logs   leader-eu  logs-eu-*        {{leader_index}}-follower   true
+```
+
+The `FOLLOWERS` and `AUTO_FOLLOW` headers carry a status hint that explains an empty table:
+
+- `(ok)` — CCR is licensed and the table reflects every entry, including zero-entry clusters.
+- `(unsupported)` — OpenSearch dialect, or 404 on `/_ccr/*` from a basic-licence Elasticsearch cluster.
+- `(forbidden)` / `(unauthorized)` — the auth user lacks privilege on `/_ccr/stats`. The CCS half still renders.
+
+When `FOLLOWERS` is anything other than `ok`, the `AUTO_FOLLOW` section is suppressed (its absence is implicit). On a healthy cluster where only the auto-follow call diverges (e.g. a proxy strips the path), the section header reads `AUTO_FOLLOW (error)` with the underlying reason inline.
+
+`-o wide` adds seed hosts (CCS) and last-read-failure messages (CCR).
+
+**Common use cases**
+- Verify cross-cluster search (CCS) connectivity
+- Monitor CCR lag and pause state
+- Audit auto-follow patterns before a cutover
+
+CCS works on both dialects; CCR is Elasticsearch-only.
+
+---
+
+## esops ops license
+
+Shows the cluster's installed commercial licence (Elasticsearch only).
+
+```sh
+$ esops ops license
+STATUS  TYPE   ISSUED_TO   EXPIRES               MAX_NODES
+active  trial  ACME Corp   2026-06-06T06:34:41Z  1000
+
+# CI guard: exit non-zero if the licence is within 30 days of expiry
+$ esops ops license --warn-days 30
+STATUS  TYPE     ISSUED_TO   EXPIRES               MAX_NODES
+active  platinum ACME Corp   2026-05-20T00:00:00Z  100
+license expires in 13 days (2026-05-20T00:00:00Z) — within --warn-days=30 threshold
+$ echo $?
+1
+```
+
+**Flags**
+
+- `--warn-days N` — exit non-zero (code 1) when `ExpiresAt` is within N days of now. Already-expired licences trigger too. Basic licences (no expiry) are never flagged. Default 0 (disabled).
+
+`-o wide` adds issuer, issue date, and UID.
+
+**Common use cases**
+
+- Pre-upgrade check: `esops ops license -o json | jq .expires_at`
+- Capacity planning: confirm `max_nodes` against the actual node count from `esops ops nodes`
+- CI guard: `esops ops license --warn-days 30` in a daily scheduled job
+
+OpenSearch returns "operation not supported" (exit code 6).
 
 ---
 

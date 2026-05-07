@@ -30,6 +30,8 @@ func Command() *cli.Command {
 			unblockCommand(),
 			cacheClearCommand(),
 			realmsCommand(),
+			remoteCommand(),
+			licenseCommand(),
 		},
 	}
 }

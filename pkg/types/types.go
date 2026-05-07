@@ -2679,14 +2679,14 @@ type MigrationPlanTotals struct {
 
 // MigrationPlan is the structured outcome of `migrate plan`.
 type MigrationPlan struct {
-	Source           MigrationEndpoint    `json:"source"             yaml:"source"`
-	Target           MigrationEndpoint    `json:"target"             yaml:"target"`
-	ThroughputDPS    int                  `json:"throughput_dps"     yaml:"throughput_dps"`
-	Indices          []MigrationIndexPlan `json:"indices"            yaml:"indices"`
-	Totals           MigrationPlanTotals  `json:"totals"             yaml:"totals"`
-	Blockers         int                  `json:"blockers"           yaml:"blockers"`
-	Warnings         int                  `json:"warnings"           yaml:"warnings"`
-	Status           string               `json:"status"             yaml:"status"`
+	Source        MigrationEndpoint    `json:"source"             yaml:"source"`
+	Target        MigrationEndpoint    `json:"target"             yaml:"target"`
+	ThroughputDPS int                  `json:"throughput_dps"     yaml:"throughput_dps"`
+	Indices       []MigrationIndexPlan `json:"indices"            yaml:"indices"`
+	Totals        MigrationPlanTotals  `json:"totals"             yaml:"totals"`
+	Blockers      int                  `json:"blockers"           yaml:"blockers"`
+	Warnings      int                  `json:"warnings"           yaml:"warnings"`
+	Status        string               `json:"status"             yaml:"status"`
 }
 
 // CountRequest scopes a DocCounter.Count call to one or more indices.
@@ -2704,8 +2704,8 @@ type CountRequest struct {
 // return the same envelope ({count, _shards: {total, successful, failed,
 // skipped}}); one shape covers both adapters.
 type CountResult struct {
-	Count    int64           `json:"count"             yaml:"count"`
-	Shards   CountShardsInfo `json:"shards,omitempty"  yaml:"shards,omitempty"`
+	Count  int64           `json:"count"             yaml:"count"`
+	Shards CountShardsInfo `json:"shards,omitempty"  yaml:"shards,omitempty"`
 }
 
 // CountShardsInfo mirrors the cluster's `_shards` block on the count
@@ -3334,4 +3334,246 @@ type ServiceToken struct {
 	Service   string    `json:"service"             yaml:"service"`
 	Creation  time.Time `json:"creation,omitempty"  yaml:"creation,omitempty"`
 	Source    string    `json:"source"              yaml:"source"`
+}
+
+// FieldCapsRequest narrows a FieldCapsInspector.FieldCaps call. Index
+// is forwarded to the cluster as the path's <index> segment
+// (comma-joined; empty or "*" lists every visible index). Fields
+// narrows the cluster-side response to a specific field set; empty
+// requests "*" — every mapped field — which is what the deprecated-
+// field-types and mapping-drift rules want.
+//
+// IncludeUnmapped surfaces fields that exist in some indices of the
+// matched pattern but not others; off by default because the cluster
+// then includes "unmapped" entries in `Types` which most consumers
+// have to filter out.
+type FieldCapsRequest struct {
+	Index           string
+	Fields          []string
+	IncludeUnmapped bool
+}
+
+// FieldCaps is the neutral view of one field's metadata across the
+// matched index pattern. The cluster's /_field_caps response groups
+// the data by field name; this type is the per-field row.
+//
+// Types is the union of all field types seen across the matched
+// indices. A homogeneous mapping has one entry; a pattern that
+// straddles types (e.g. one index with `keyword`, another with `text`)
+// has multiple — the canonical signal mapping-drift rules look for.
+//
+// MetadataField mirrors the cluster's `metadata_field` flag: true for
+// `_id`, `_routing`, `_source`, etc. Searchable/Aggregatable are the
+// per-field capabilities the cluster reports.
+//
+// Indices is populated only when the field is heterogeneous across the
+// pattern — the cluster lists which indices contributed each type
+// variant. For homogeneous fields this is empty (the cluster omits it).
+type FieldCaps struct {
+	Field         string   `json:"field"                    yaml:"field"`
+	Types         []string `json:"types"                    yaml:"types"`
+	Searchable    bool     `json:"searchable"               yaml:"searchable"`
+	Aggregatable  bool     `json:"aggregatable"             yaml:"aggregatable"`
+	MetadataField bool     `json:"metadata_field,omitempty" yaml:"metadata_field,omitempty"`
+	Indices       []string `json:"indices,omitempty"        yaml:"indices,omitempty"`
+}
+
+// FieldCapsSummary is the richer return shape from
+// FieldCapsInspector.FieldCapsSummary — the per-field flattened slice
+// plus the cluster's top-level "indices" list (every index that
+// matched the request pattern). The slice form (`FieldCaps()`) is
+// kept as the primary surface because most rules only want the
+// per-field rows; consumers that need to render "23 indices analysed"
+// or that want to know if a request narrowed past zero indices reach
+// for the summary instead.
+//
+// MatchedIndices is the cluster's verbatim "indices" array — sorted
+// and deduplicated by the cluster, surfaced as-is so a captured slice
+// is stable across runs.
+type FieldCapsSummary struct {
+	Fields         []FieldCaps `json:"fields"          yaml:"fields"`
+	MatchedIndices []string    `json:"matched_indices" yaml:"matched_indices"`
+}
+
+// FieldCardinalityRequest narrows a FieldCardinalityInspector.Cardinality
+// call. Each (Index, Field) pair runs as a separate /_search with a
+// single `cardinality` aggregation; the implementation runs them
+// sequentially under MaxFieldsToScan and IndexLimit, so a runaway
+// rule stays polite to the cluster.
+//
+// Indices is the comma-separated index pattern forwarded as the path
+// segment. Fields is the literal list of fields the rule wants
+// counted; cardinality is computed per (index, field) pair.
+//
+// Precision is the optional `precision_threshold` for the cluster's
+// HyperLogLog estimator (the cluster's default is 3000). Zero leaves
+// the cluster's default in place; values >40000 are silently capped by
+// the cluster.
+//
+// MaxFieldsToScan caps the per-call total (len(Indices) × len(Fields))
+// before the request fans out; 0 = no cap. IndexLimit caps the number
+// of indices touched in one call (resolved client-side from the
+// pattern); 0 = no cap. Both are belt-and-braces — the rule that
+// invokes this should also pass a pre-narrowed Indices list.
+type FieldCardinalityRequest struct {
+	Indices         string
+	Fields          []string
+	Precision       int
+	MaxFieldsToScan int
+	IndexLimit      int
+}
+
+// FieldCardinality is the neutral view of one field's cardinality on
+// one index — the result of one (index, field) /_search round trip.
+//
+// Cardinality is the cluster's aggregation result; for HyperLogLog
+// this is an approximation, surfaced through Precision. "exact" is
+// reserved for a future code path that runs `terms` rather than
+// `cardinality` (we don't run that now — it's listed in the type so
+// the rule's table column has a stable shape).
+//
+// Sampled is true when the implementation ran the agg against a
+// random-sample subset of the index rather than the full document
+// set. Today's adapter never samples — Sampled is always false — but
+// the field is on the type so the rule consumer can rely on the
+// shape and a future sampling path can land without a type bump.
+type FieldCardinality struct {
+	Field       string `json:"field"                yaml:"field"`
+	Index       string `json:"index"                yaml:"index"`
+	Cardinality int64  `json:"cardinality"          yaml:"cardinality"`
+	Sampled     bool   `json:"sampled,omitempty"    yaml:"sampled,omitempty"`
+	Precision   string `json:"precision,omitempty"  yaml:"precision,omitempty"`
+}
+
+// RestoreEvent is the neutral view of one snapshot-restore observation,
+// returned by SnapshotRestoreHistoryInspector. The capability has two
+// sources: the cluster's task history (in-flight + recently completed
+// restores via /_tasks?actions=cluster:admin/snapshot/restore*) and
+// the convention-based `.esops-doctor-restore-tests` index that
+// operators or runbooks write to when they exercise a verified restore.
+//
+// Source distinguishes the two — "task_history" for the cluster-derived
+// view (always best-effort: a cluster that hasn't restored anything
+// recently reports an empty slice, which is a valid "no evidence"
+// outcome) and "convention_index" for the runbook-driven path. The
+// rule consumer treats an empty slice as "no evidence" rather than
+// "never restored" — the difference matters when the lookback window
+// is short.
+//
+// State is the cluster's reported state when known: "in_progress",
+// "success", "failed". CompletedAt is nil for in-flight tasks.
+type RestoreEvent struct {
+	SnapshotID  string     `json:"snapshot_id"            yaml:"snapshot_id"`
+	Repository  string     `json:"repository"             yaml:"repository"`
+	StartedAt   time.Time  `json:"started_at"             yaml:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	State       string     `json:"state"                  yaml:"state"`
+	Indices     []string   `json:"indices,omitempty"      yaml:"indices,omitempty"`
+	Source      string     `json:"source"                 yaml:"source"`
+}
+
+// SnapshotRestoreHistoryRequest narrows a SnapshotRestoreHistoryInspector
+// call. Lookback bounds how far back to look at task history (0 = "no
+// limit / whatever the cluster still has"). ConventionIndex names the
+// convention-based index when non-empty; empty falls back to the
+// default `.esops-doctor-restore-tests`.
+//
+// IncludeTaskHistory and IncludeConventionIndex toggle the two
+// sources independently. The default zero value (both false) is a
+// usage error: the implementation requires at least one source —
+// silently no-op'ing on a fully zero request would mask a coding
+// mistake in the rule.
+type SnapshotRestoreHistoryRequest struct {
+	Lookback               time.Duration
+	ConventionIndex        string
+	IncludeTaskHistory     bool
+	IncludeConventionIndex bool
+}
+
+// RemoteCluster is the neutral view of one cross-cluster remote, returned
+// by RemoteClusterInspector.RemoteClusters. The cluster's /_remote/info
+// endpoint is shared across ES and OS — both dialects return the same
+// envelope keyed by remote-cluster name.
+//
+// Mode is "sniff" (the cluster connects to seed hosts and discovers the
+// rest of the remote) or "proxy" (the cluster connects through a single
+// gateway and lets the gateway route). NumNodesConnected is the live
+// count the cluster reports — zero on a configured-but-unreachable
+// remote, which is the operator-facing signal CCS readiness rules look
+// for. SkipUnavailable mirrors the cluster's `skip_unavailable` flag:
+// true means a remote outage does not fail searches that target it,
+// false means it does.
+type RemoteCluster struct {
+	Name              string   `json:"name"                yaml:"name"`
+	Mode              string   `json:"mode"                yaml:"mode"`
+	Connected         bool     `json:"connected"           yaml:"connected"`
+	NumNodesConnected int      `json:"num_nodes_connected" yaml:"num_nodes_connected"`
+	SeedHosts         []string `json:"seed_hosts,omitempty" yaml:"seed_hosts,omitempty"`
+	SkipUnavailable   bool     `json:"skip_unavailable"    yaml:"skip_unavailable"`
+}
+
+// FollowerStats is the neutral view of one cross-cluster-replication
+// follower index, returned by RemoteClusterInspector.FollowerStats.
+// CCR is Elasticsearch-only — the OS adapter returns ErrUnsupported on
+// FollowerStats so the matching doctor rule auto-skips with a stable
+// "not applicable on this dialect" reason.
+//
+// FollowerLagOps is the cluster's reported `operations_written_lag`
+// (number of ops the follower is behind the leader). LastReadFailure
+// is the cluster's last-read-error string when present, empty when the
+// follower is healthy. Paused is true when the operator has paused
+// replication via /_ccr/follow/_pause.
+type FollowerStats struct {
+	Index           string `json:"index"                       yaml:"index"`
+	LeaderIndex     string `json:"leader_index"                yaml:"leader_index"`
+	LeaderCluster   string `json:"leader_cluster"              yaml:"leader_cluster"`
+	FollowerLagOps  int64  `json:"follower_lag_ops"            yaml:"follower_lag_ops"`
+	LastReadFailure string `json:"last_read_failure,omitempty" yaml:"last_read_failure,omitempty"`
+	Paused          bool   `json:"paused,omitempty"            yaml:"paused,omitempty"`
+}
+
+// AutoFollowPattern is the neutral view of one Elasticsearch CCR
+// auto-follow pattern, returned by RemoteClusterInspector.AutoFollowPatterns.
+// Auto-follow patterns instruct the cluster to create a follower
+// index automatically every time the leader cluster creates a new
+// index matching one of LeaderIndexPatterns.
+//
+// Active mirrors the cluster's `active` flag — true when the pattern
+// is currently consulted, false when paused (typically during a
+// maintenance window). FollowIndexPattern is the cluster's template
+// for the follower-side index name; an empty string means the
+// cluster's default ("the leader's name") applies.
+//
+// CCR is Elasticsearch-only; the OpenSearch adapter returns
+// ErrUnsupported on AutoFollowPatterns so the matching doctor rule
+// auto-skips with a stable "not applicable on this dialect" reason.
+type AutoFollowPattern struct {
+	Name                string   `json:"name"                              yaml:"name"`
+	RemoteCluster       string   `json:"remote_cluster"                    yaml:"remote_cluster"`
+	LeaderIndexPatterns []string `json:"leader_index_patterns"             yaml:"leader_index_patterns"`
+	FollowIndexPattern  string   `json:"follow_index_pattern,omitempty"    yaml:"follow_index_pattern,omitempty"`
+	Active              bool     `json:"active"                            yaml:"active"`
+}
+
+// LicenseStatus is the neutral view of an Elasticsearch license,
+// returned by LicenseInspector.License. ES-only: OpenSearch has no
+// equivalent commercial-license surface, so the OS adapter returns
+// ErrUnsupported and the matching doctor rule is dialect-tagged
+// `[elasticsearch]`.
+//
+// Status is the cluster's reported license state: "active", "expired",
+// or "invalid". Type is the licence tier ("basic", "standard", "gold",
+// "platinum", "enterprise", "trial"). ExpiresAt is nil for licences
+// that never expire (the basic tier is the canonical case), populated
+// for time-bound licences. MaxNodes is the licence's node cap; zero
+// when the licence is not node-bound.
+type LicenseStatus struct {
+	Status    string     `json:"status"               yaml:"status"`
+	Type      string     `json:"type"                 yaml:"type"`
+	IssuedTo  string     `json:"issued_to,omitempty"  yaml:"issued_to,omitempty"`
+	Issuer    string     `json:"issuer,omitempty"     yaml:"issuer,omitempty"`
+	IssuedAt  time.Time  `json:"issued_at"            yaml:"issued_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
+	MaxNodes  int        `json:"max_nodes,omitempty"  yaml:"max_nodes,omitempty"`
+	UID       string     `json:"uid,omitempty"        yaml:"uid,omitempty"`
 }

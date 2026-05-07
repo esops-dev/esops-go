@@ -3669,6 +3669,170 @@ func realmsTable(w io.Writer, realms []types.Realm, wide bool) error {
 	return tw.Flush()
 }
 
+// RemoteSummary renders the remote-cluster surface in the requested
+// format. The neutral shape is three slices (CCS remotes, CCR
+// followers, CCR auto-follow patterns) plus a CCRStatus hint and an
+// optional AutoFollowError surfaced alongside the table — JSON/YAML
+// emit a wrapping object so scripts can keep the halves apart and
+// read the status hint without a separate stderr log line.
+func RemoteSummary(w io.Writer, remotes []types.RemoteCluster, followers []types.FollowerStats, autoFollows []types.AutoFollowPattern, ccrStatus, autoFollowError string, f Format) error {
+	wrap := struct {
+		Remotes         []types.RemoteCluster     `json:"remotes"                     yaml:"remotes"`
+		Followers       []types.FollowerStats     `json:"followers"                   yaml:"followers"`
+		AutoFollows     []types.AutoFollowPattern `json:"auto_follow_patterns"        yaml:"auto_follow_patterns"`
+		CCRStatus       string                    `json:"ccr_status"                  yaml:"ccr_status"`
+		AutoFollowError string                    `json:"auto_follow_error,omitempty" yaml:"auto_follow_error,omitempty"`
+	}{Remotes: remotes, Followers: followers, AutoFollows: autoFollows, CCRStatus: ccrStatus, AutoFollowError: autoFollowError}
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(wrap)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(wrap)
+	case FormatWide:
+		return remoteSummaryTable(w, remotes, followers, autoFollows, ccrStatus, autoFollowError, true)
+	case FormatTable, "":
+		return remoteSummaryTable(w, remotes, followers, autoFollows, ccrStatus, autoFollowError, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func remoteSummaryTable(w io.Writer, remotes []types.RemoteCluster, followers []types.FollowerStats, autoFollows []types.AutoFollowPattern, ccrStatus, autoFollowError string, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "NAME\tMODE\tCONNECTED\tNODES\tSKIP_UNAVAIL")
+	for _, r := range remotes {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%t\t%d\t%t\n",
+			dashIfEmpty(r.Name), dashIfEmpty(r.Mode), r.Connected, r.NumNodesConnected, r.SkipUnavailable)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if wide && len(remotes) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "SEEDS")
+		for _, r := range remotes {
+			_, _ = fmt.Fprintf(w, "  %s: %s\n", r.Name, joinOrDash(r.SeedHosts))
+		}
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintf(w, "FOLLOWERS (%s)\n", dashIfEmpty(ccrStatus))
+	if ccrStatus != "ok" || len(followers) == 0 {
+		// Mirror the FOLLOWERS header above — operators reading the
+		// table for "is replication healthy" want to see the empty-
+		// state reason explicitly. "ok" + empty followers is a real
+		// outcome (CCR licensed, no follower indices configured) and
+		// surfaces the same way as "unsupported"/"forbidden".
+		_, _ = fmt.Fprintln(w, "  (none)")
+	} else {
+		ftw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(ftw, "INDEX\tLEADER\tCLUSTER\tLAG_OPS\tPAUSED")
+		for _, fl := range followers {
+			_, _ = fmt.Fprintf(ftw, "%s\t%s\t%s\t%d\t%t\n",
+				dashIfEmpty(fl.Index), dashIfEmpty(fl.LeaderIndex), dashIfEmpty(fl.LeaderCluster), fl.FollowerLagOps, fl.Paused)
+		}
+		if err := ftw.Flush(); err != nil {
+			return err
+		}
+		if wide {
+			for _, fl := range followers {
+				if fl.LastReadFailure != "" {
+					_, _ = fmt.Fprintf(w, "  %s: last_read_failure=%q\n", fl.Index, fl.LastReadFailure)
+				}
+			}
+		}
+	}
+
+	// Auto-follow section. Heading mirrors the FOLLOWERS section so a
+	// reader scanning the bottom of the table finds both views in
+	// parallel form. Skip the section entirely on a non-CCR cluster
+	// (CCRStatus != "ok" already explained the absence above) — only
+	// surface the empty / error case when CCR is otherwise healthy.
+	if ccrStatus != "ok" {
+		return nil
+	}
+	_, _ = fmt.Fprintln(w)
+	if autoFollowError != "" {
+		_, _ = fmt.Fprintln(w, "AUTO_FOLLOW (error)")
+		_, _ = fmt.Fprintf(w, "  %s\n", autoFollowError)
+		return nil
+	}
+	_, _ = fmt.Fprintln(w, "AUTO_FOLLOW (ok)")
+	if len(autoFollows) == 0 {
+		_, _ = fmt.Fprintln(w, "  (none)")
+		return nil
+	}
+	atw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(atw, "NAME\tREMOTE\tLEADER_PATTERNS\tFOLLOW_PATTERN\tACTIVE")
+	for _, p := range autoFollows {
+		_, _ = fmt.Fprintf(atw, "%s\t%s\t%s\t%s\t%t\n",
+			dashIfEmpty(p.Name),
+			dashIfEmpty(p.RemoteCluster),
+			joinOrDash(p.LeaderIndexPatterns),
+			dashIfEmpty(p.FollowIndexPattern),
+			p.Active)
+	}
+	return atw.Flush()
+}
+
+// License renders a LicenseStatus in the requested format. Times are
+// surfaced as RFC3339 in JSON/YAML (the time.Time tag is the standard
+// stdlib marshaller — no override needed) and as either RFC3339 or
+// the "(no expiry)" sentinel in the table form so a basic licence is
+// readable at a glance.
+func License(w io.Writer, l types.LicenseStatus, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(l)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(l)
+	case FormatWide:
+		return licenseTable(w, l, true)
+	case FormatTable, "":
+		return licenseTable(w, l, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func licenseTable(w io.Writer, l types.LicenseStatus, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	expiry := "(no expiry)"
+	if l.ExpiresAt != nil {
+		expiry = l.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	issued := "-"
+	if !l.IssuedAt.IsZero() {
+		issued = l.IssuedAt.UTC().Format(time.RFC3339)
+	}
+	_, _ = fmt.Fprintln(tw, "STATUS\tTYPE\tISSUED_TO\tEXPIRES\tMAX_NODES")
+	maxNodes := "-"
+	if l.MaxNodes > 0 {
+		maxNodes = fmt.Sprintf("%d", l.MaxNodes)
+	}
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		dashIfEmpty(l.Status), dashIfEmpty(l.Type), dashIfEmpty(l.IssuedTo), expiry, maxNodes)
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if wide {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "ISSUER:    %s\n", dashIfEmpty(l.Issuer))
+		_, _ = fmt.Fprintf(w, "ISSUED_AT: %s\n", issued)
+		_, _ = fmt.Fprintf(w, "UID:       %s\n", dashIfEmpty(l.UID))
+	}
+	return nil
+}
+
 func indexCacheClearTable(w io.Writer, r types.IndexCacheClearResult, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ACTION\tCACHES\tDRY_RUN\tINDICES\tSHARDS_OK\tSHARDS_FAILED")

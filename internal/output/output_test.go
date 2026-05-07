@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -2698,5 +2699,251 @@ func TestAudit_tableShowsRealmsSectionWhenPresent(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("audit table missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func sampleRemotes() []types.RemoteCluster {
+	return []types.RemoteCluster{
+		{Name: "leader-eu", Mode: "sniff", Connected: true, NumNodesConnected: 3, SeedHosts: []string{"eu1:9300", "eu2:9300"}, SkipUnavailable: false},
+		{Name: "leader-us", Mode: "proxy", Connected: false, NumNodesConnected: 0, SkipUnavailable: true},
+	}
+}
+
+func sampleFollowers() []types.FollowerStats {
+	return []types.FollowerStats{
+		{Index: "logs-eu-follower", LeaderIndex: "logs-eu", LeaderCluster: "leader-eu", FollowerLagOps: 42, LastReadFailure: "boom"},
+	}
+}
+
+func sampleAutoFollows() []types.AutoFollowPattern {
+	return []types.AutoFollowPattern{
+		{Name: "eu-logs", RemoteCluster: "leader-eu", LeaderIndexPatterns: []string{"logs-*"}, FollowIndexPattern: "{{leader_index}}-follower", Active: true},
+	}
+}
+
+func TestRemoteSummary_tableHasHeadersAndStatusFooter(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), sampleAutoFollows(), "ok", "", output.FormatTable); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "MODE", "CONNECTED", "NODES", "SKIP_UNAVAIL", "leader-eu", "leader-us", "FOLLOWERS", "INDEX", "LEADER", "logs-eu-follower", "AUTO_FOLLOW", "eu-logs", "leader-eu", "logs-*"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRemoteSummary_tableShowsCCRStatusInsteadOfFollowersWhenUnsupported(t *testing.T) {
+	// On OpenSearch / basic-licence ES the CCR half is unsupported.
+	// The renderer must surface the reason so an operator scanning
+	// the table sees "(unsupported)" rather than wondering whether the
+	// cluster has zero followers configured. The auto-follow section
+	// is suppressed in this case — its absence is implicit in the
+	// FOLLOWERS header.
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), nil, nil, "unsupported", "", output.FormatTable); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "FOLLOWERS (unsupported)") {
+		t.Errorf("table missing 'FOLLOWERS (unsupported)' header:\n%s", out)
+	}
+	if !strings.Contains(out, "(none)") {
+		t.Errorf("table missing '(none)' empty marker:\n%s", out)
+	}
+	if strings.Contains(out, "AUTO_FOLLOW") {
+		t.Errorf("AUTO_FOLLOW section should be suppressed when CCR is unsupported:\n%s", out)
+	}
+}
+
+func TestRemoteSummary_tableShowsAutoFollowError(t *testing.T) {
+	// Divergent outcome: FollowerStats succeeded but AutoFollow
+	// failed (e.g. proxy strips the path). The renderer must surface
+	// the AutoFollow error inline rather than hiding it.
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), nil, "ok", "auto-follow proxy error", output.FormatTable); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "AUTO_FOLLOW (error)") {
+		t.Errorf("table missing 'AUTO_FOLLOW (error)' header:\n%s", out)
+	}
+	if !strings.Contains(out, "auto-follow proxy error") {
+		t.Errorf("table missing AutoFollow error message:\n%s", out)
+	}
+}
+
+func TestRemoteSummary_tableShowsAutoFollowEmptyOnHealthyCluster(t *testing.T) {
+	// CCR licensed, no auto-follow patterns configured. Section header
+	// is "(ok)" with a "(none)" body — operator can tell the difference
+	// from "unsupported" without reading a stderr log line.
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), nil, "ok", "", output.FormatTable); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "AUTO_FOLLOW (ok)") {
+		t.Errorf("table missing 'AUTO_FOLLOW (ok)' header:\n%s", out)
+	}
+}
+
+func TestRemoteSummary_jsonHasWrappingObject(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), sampleAutoFollows(), "ok", "", output.FormatJSON); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	var got struct {
+		Remotes     []types.RemoteCluster     `json:"remotes"`
+		Followers   []types.FollowerStats     `json:"followers"`
+		AutoFollows []types.AutoFollowPattern `json:"auto_follow_patterns"`
+		CCRStatus   string                    `json:"ccr_status"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if got.CCRStatus != "ok" || len(got.Remotes) != 2 || len(got.Followers) != 1 || len(got.AutoFollows) != 1 {
+		t.Errorf("unmarshalled = %+v, want 2 remotes / 1 follower / 1 auto-follow / ok", got)
+	}
+}
+
+func TestRemoteSummary_yamlRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), nil, "forbidden", "", output.FormatYAML); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if got["ccr_status"] != "forbidden" {
+		t.Errorf("ccr_status = %v, want forbidden", got["ccr_status"])
+	}
+}
+
+func TestRemoteSummary_jsonOmitsAutoFollowErrorWhenEmpty(t *testing.T) {
+	// Healthy run — the optional AutoFollowError must drop out of the
+	// JSON entirely. omitempty on the renderer's wrapper struct.
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), sampleAutoFollows(), "ok", "", output.FormatJSON); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	if strings.Contains(buf.String(), `"auto_follow_error"`) {
+		t.Errorf("expected auto_follow_error to be omitted; got:\n%s", buf.String())
+	}
+}
+
+func TestRemoteSummary_wideShowsSeedsAndLastReadFailure(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), sampleAutoFollows(), "ok", "", output.FormatWide); err != nil {
+		t.Fatalf("RemoteSummary: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"SEEDS", "eu1:9300", "last_read_failure", "boom"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRemoteSummary_rejectsUnknownFormat(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.RemoteSummary(&buf, sampleRemotes(), sampleFollowers(), nil, "ok", "", output.Format("ndjson")); err == nil {
+		t.Errorf("expected error on unsupported format, got nil")
+	}
+}
+
+func sampleLicensePaid() types.LicenseStatus {
+	expiry := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	return types.LicenseStatus{
+		Status:    "active",
+		Type:      "platinum",
+		IssuedTo:  "ACME Corp",
+		Issuer:    "elasticsearch",
+		IssuedAt:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		ExpiresAt: &expiry,
+		MaxNodes:  100,
+		UID:       "uid-1",
+	}
+}
+
+func sampleLicenseBasic() types.LicenseStatus {
+	return types.LicenseStatus{
+		Status:   "active",
+		Type:     "basic",
+		IssuedTo: "ACME Corp",
+		IssuedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		UID:      "uid-2",
+	}
+}
+
+func TestLicense_tableShowsCoreColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.License(&buf, sampleLicensePaid(), output.FormatTable); err != nil {
+		t.Fatalf("License: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"STATUS", "TYPE", "EXPIRES", "MAX_NODES", "active", "platinum", "100", "2025-01-01"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestLicense_tableShowsNoExpirySentinelForBasic(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.License(&buf, sampleLicenseBasic(), output.FormatTable); err != nil {
+		t.Fatalf("License: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "(no expiry)") {
+		t.Errorf("expected '(no expiry)' sentinel for basic licence:\n%s", out)
+	}
+	if strings.Contains(out, "1970") {
+		t.Errorf("table leaked the unix epoch (zero ExpiresAt was rendered):\n%s", out)
+	}
+}
+
+func TestLicense_wideAddsIssuerAndUID(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.License(&buf, sampleLicensePaid(), output.FormatWide); err != nil {
+		t.Fatalf("License: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ISSUER", "elasticsearch", "UID", "uid-1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestLicense_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.License(&buf, sampleLicensePaid(), output.FormatJSON); err != nil {
+		t.Fatalf("License: %v", err)
+	}
+	var got types.LicenseStatus
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if got.Type != "platinum" || got.MaxNodes != 100 || got.ExpiresAt == nil {
+		t.Errorf("got = %#v, want round-tripped paid licence", got)
+	}
+}
+
+func TestLicense_jsonOmitsExpiryForBasic(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.License(&buf, sampleLicenseBasic(), output.FormatJSON); err != nil {
+		t.Fatalf("License: %v", err)
+	}
+	if strings.Contains(buf.String(), `"expires_at"`) {
+		t.Errorf("basic licence should omit expires_at; got:\n%s", buf.String())
+	}
+}
+
+func TestLicense_rejectsUnknownFormat(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.License(&buf, sampleLicensePaid(), output.Format("ndjson")); err == nil {
+		t.Errorf("expected error on unsupported format, got nil")
 	}
 }

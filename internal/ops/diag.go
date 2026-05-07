@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/esops-dev/esops-go/internal/version"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
-	"github.com/esops-dev/esops-go/internal/version"
 )
 
 // defaultDiagConcurrency caps the number of in-flight collectors when
@@ -74,6 +74,23 @@ var baseCollectors = []diagCollector{
 	// asks for is what /_remote/info reports. 404s on standalone
 	// clusters with no remotes configured — recorded as such.
 	{Name: "remote_info", Path: "/_remote/info"},
+	// Configured cluster.remote.* settings, alongside /_remote/info's
+	// runtime view. Diverges only on edge cases (e.g. a remote whose
+	// settings the cluster accepted but never registered) and is
+	// shared across dialects. include_defaults=true forces the
+	// cluster to surface the static elasticsearch.yml side too.
+	{Name: "cluster_remote_settings", Path: "/_cluster/settings?include_defaults=true&filter_path=*.cluster.remote.*"},
+	// CCR replication health + auto-follow patterns. ES-only — both
+	// endpoints return 404 on a basic-licence cluster (the bundle
+	// records that). Sits next to remote_info because a CCR-related
+	// support ticket almost always wants the runtime view + the
+	// follower lag in the same bundle.
+	{Name: "ccr_stats", Path: "/_ccr/stats", Dialect: types.DialectElasticsearch},
+	{Name: "ccr_auto_follow", Path: "/_ccr/auto_follow", Dialect: types.DialectElasticsearch},
+	// Licence posture. ES-only — captures status/type/expiry so a
+	// pre-upgrade ticket has the answer to "what licence tier is
+	// this on" without an extra round trip.
+	{Name: "license", Path: "/_license", Dialect: types.DialectElasticsearch},
 	// Dialect-specific lifecycle endpoints. The "wrong" dialect 404s
 	// (ILM on OS, ISM on ES); we filter before calling so the manifest
 	// only lists entries the collector actually attempted.
@@ -95,9 +112,9 @@ var baseCollectors = []diagCollector{
 // symptom — parked threads in a contended lock look "idle" to the
 // default filter.
 var optionalCollectors = map[string]diagCollector{
-	"slowlog":       {Name: "index_slowlog_settings", Path: "/_all/_settings?filter_path=**.settings.index.search.slowlog.**,**.settings.index.indexing.slowlog.**,**.defaults.index.search.slowlog.**,**.defaults.index.indexing.slowlog.**&include_defaults=true&flat_settings=true"},
-	"mappings":      {Name: "index_mappings", Path: "/_all/_mapping"},
-	"idle_threads":  {Name: "nodes_hot_threads_with_idle", Path: "/_nodes/hot_threads?ignore_idle_threads=false", Ext: ".txt"},
+	"slowlog":      {Name: "index_slowlog_settings", Path: "/_all/_settings?filter_path=**.settings.index.search.slowlog.**,**.settings.index.indexing.slowlog.**,**.defaults.index.search.slowlog.**,**.defaults.index.indexing.slowlog.**&include_defaults=true&flat_settings=true"},
+	"mappings":     {Name: "index_mappings", Path: "/_all/_mapping"},
+	"idle_threads": {Name: "nodes_hot_threads_with_idle", Path: "/_nodes/hot_threads?ignore_idle_threads=false", Ext: ".txt"},
 }
 
 // invalidFilenameChars strips anything that would make a tarball member
@@ -157,9 +174,9 @@ func Diag(ctx context.Context, c *client.Client, req types.DiagRequest, out io.W
 	// regardless of completion order; tarball entry order is by
 	// completion, which the manifest documents.
 	type collected struct {
-		idx    int
-		art    types.DiagArtifact
-		body   []byte
+		idx  int
+		art  types.DiagArtifact
+		body []byte
 	}
 	results := make(chan collected, concurrency)
 
