@@ -926,6 +926,40 @@ type TransportTLSInspector interface {
 	TransportTLS(ctx context.Context) (types.TransportTLS, error)
 }
 
+// HTTPTLSInspector wraps the cluster-side view of HTTP-layer TLS
+// posture — the layer external clients (esops itself, dashboards,
+// application traffic) connect to. Sibling of TransportTLSInspector
+// rather than an extension because the two layers fail and pass
+// independently: a cluster can encrypt node-to-node while accepting
+// plaintext on 9200, or vice versa, so each gets its own rule and its
+// own capability.
+//
+// Sources differ per dialect — ES exposes
+// `xpack.security.http.ssl.*` on /_nodes/settings (with
+// `client_authentication`, `supported_protocols`,
+// `cipher_suites`); OS exposes
+// `plugins.security.ssl.http.*` (with `clientauth_mode`,
+// `enabled_protocols`, `enabled_ciphers`) — so the adapter is the
+// right place to normalise the difference. Both endpoints are
+// read-only; this is the strict /_nodes/settings GET, not a probe.
+//
+// Aggregation is all-or-nothing for Enabled and the homogeneous-or-
+// "mixed" rule for ClientAuth; Protocols and CipherSuites are the
+// union across nodes (the attacker picks the weakest accepted by any
+// node, so the rule evaluates the union, not the intersection). One
+// misconfigured node in a fleet of ten is the exact case the
+// http-tls rule has to flag, so neither aggregation hides
+// disagreement.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type HTTPTLSInspector interface {
+	HTTPTLS(ctx context.Context) (types.HTTPTLSPosture, error)
+}
+
 // ClusterSettingsPutter wraps PUT /_cluster/settings as a general
 // key/value writer — the destructive companion to
 // ClusterSettingsFullInspector. Distinct from ClusterSettingsManager
@@ -1029,5 +1063,6 @@ type Client struct {
 	ClusterSettingsPut  ClusterSettingsPutter
 	Allocation          AllocationInspector
 	TransportTLS        TransportTLSInspector
+	HTTPTLS             HTTPTLSInspector
 	IndexCacheClear     IndexCacheClearer
 }

@@ -724,6 +724,91 @@ func TestAudit_wideShowsBackendRolesAndDescription(t *testing.T) {
 	}
 }
 
+func TestAudit_tableShowsAnonymousSectionWhenPresent(t *testing.T) {
+	a := sampleAudit()
+	authzOff := false
+	a.Anonymous = &types.AnonymousAccessPosture{
+		Enabled:        true,
+		Username:       "_anonymous",
+		Roles:          []string{"anon-reader"},
+		AuthzException: &authzOff,
+		Source:         "persistent",
+	}
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, a, output.FormatTable); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ANONYMOUS", "_anonymous", "anon-reader", "persistent", "authz_exception: false"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAudit_tableOmitsAuthzExceptionWhenNotApplicable(t *testing.T) {
+	// OS leaves AuthzException nil because the dialect has no
+	// equivalent setting. The renderer must not emit a misleading
+	// "authz_exception: false" line in that case (the Go zero of bool
+	// would render that way without the pointer guard).
+	a := sampleAudit()
+	a.Anonymous = &types.AnonymousAccessPosture{Enabled: false, Source: "default"}
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, a, output.FormatTable); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if strings.Contains(buf.String(), "authz_exception") {
+		t.Errorf("table emitted authz_exception line for nil pointer:\n%s", buf.String())
+	}
+}
+
+func TestAudit_tableOmitsAnonymousSectionWhenNotProbed(t *testing.T) {
+	// nil on the audit means the adapter did not collect anonymous
+	// posture (security disabled, endpoint missing, permission note in
+	// Status.Notes). The renderer must not emit a phantom section.
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, sampleAudit(), output.FormatTable); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if strings.Contains(buf.String(), "ANONYMOUS") {
+		t.Errorf("table emitted ANONYMOUS section despite nil Anonymous:\n%s", buf.String())
+	}
+}
+
+func TestAudit_jsonIncludesAnonymousWhenPresent(t *testing.T) {
+	a := sampleAudit()
+	a.Anonymous = &types.AnonymousAccessPosture{Enabled: true, Source: "default"}
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, a, output.FormatJSON); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	anon, ok := m["anonymous"].(map[string]any)
+	if !ok {
+		t.Fatalf("anonymous missing or wrong shape:\n%s", buf.String())
+	}
+	if got, _ := anon["enabled"].(bool); !got {
+		t.Errorf("anonymous.enabled = %v, want true", anon["enabled"])
+	}
+}
+
+func TestAudit_jsonOmitsAnonymousWhenNotProbed(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Audit(&buf, sampleAudit(), output.FormatJSON); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	if _, ok := m["anonymous"]; ok {
+		t.Errorf("anonymous present in JSON despite nil pointer (omitempty broken):\n%s", buf.String())
+	}
+}
+
 func TestAudit_rejectsUnknownFormat(t *testing.T) {
 	err := output.Audit(&bytes.Buffer{}, sampleAudit(), output.Format("bogus"))
 	if err == nil {

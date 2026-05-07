@@ -1216,6 +1216,34 @@ func auditTable(w io.Writer, a types.SecurityAudit, wide bool) error {
 		return nil
 	}
 
+	// Section 2b: anonymous-access posture, when the adapter probed
+	// the cluster's settings. nil here means "not collected" (the
+	// adapter skipped the probe — security disabled, endpoint missing,
+	// or a permission note already in Status.Notes), which is distinct
+	// from "collected and disabled" and worth not faking in either
+	// direction.
+	if a.Anonymous != nil {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "ANONYMOUS")
+		_, _ = fmt.Fprintf(w, "  enabled:         %t\n", a.Anonymous.Enabled)
+		if a.Anonymous.Username != "" {
+			_, _ = fmt.Fprintf(w, "  username:        %s\n", a.Anonymous.Username)
+		}
+		if len(a.Anonymous.Roles) > 0 {
+			_, _ = fmt.Fprintf(w, "  roles:           %s\n", joinOrDash(a.Anonymous.Roles))
+		}
+		// AuthzException is ES-only and pointer-typed so OS leaves it
+		// nil. Only surface when set (the dialect has the concept) and
+		// when the value diverges from the default of true — the
+		// always-true line is noise that doesn't help an audit reader.
+		if a.Anonymous.AuthzException != nil && !*a.Anonymous.AuthzException {
+			_, _ = fmt.Fprintln(w, "  authz_exception: false")
+		}
+		if a.Anonymous.Source != "" {
+			_, _ = fmt.Fprintf(w, "  source:          %s\n", a.Anonymous.Source)
+		}
+	}
+
 	// Section 3: users table. Reserved flag rendered as "res" — short
 	// enough to keep the table narrow, obvious in meaning from context.
 	_, _ = fmt.Fprintln(w)

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elastic/elastic-transport-go/v8/elastictransport"
@@ -27,8 +28,21 @@ import (
 )
 
 // Client is an ES-backed implementation of the esops client capabilities.
+//
+// tlsSettings* memoise the single GET /_nodes/settings call that backs
+// both TransportTLS and HTTPTLS — without the cache, esops-doctor
+// running both rules pays the round trip twice per audit. The cache
+// is per-Client (one Client serves one config.Context) and short-
+// lived; tlsSettingsTTL defaults to 2 seconds when zero, which is
+// long enough for back-to-back rule calls to share a fetch and short
+// enough that an `ops audit` invocation always sees fresh data.
 type Client struct {
 	api *es.Client
+
+	tlsSettingsMu   sync.Mutex
+	tlsSettingsTime time.Time
+	tlsSettingsSnap nodesTLSSettingsWire
+	tlsSettingsTTL  time.Duration
 }
 
 // Options bundles the transport-shaping knobs the upstream ES client
@@ -1115,15 +1129,20 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.Status.Enabled = true
 	report.Users = users
 
-	// Step 2: roles + role_mappings + api_keys in parallel — they're
-	// independent reads of the same security backend. On a real cluster
-	// each is ~50–200ms; serial costs ~4× that on every audit.
+	// Step 2: roles + role_mappings + api_keys + anonymous-access in
+	// parallel — independent reads of the same security backend. On a
+	// real cluster each is ~50–200ms; serial costs ~5× that on every
+	// audit. Anonymous access is a cluster-settings probe rather than a
+	// /_security/* read, but it sits in this block for the same reason
+	// — the audit summary should report it without an extra round trip.
 	var (
-		roles    []types.SecurityRole
-		mappings []types.SecurityRoleMapping
-		keys     []types.SecurityAPIKey
-		mNote    string
-		kNote    string
+		roles     []types.SecurityRole
+		mappings  []types.SecurityRoleMapping
+		keys      []types.SecurityAPIKey
+		anonymous *types.AnonymousAccessPosture
+		mNote     string
+		kNote     string
+		aNote     string
 	)
 	err = clientutil.RunParallel(
 		func() error {
@@ -1141,6 +1160,11 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 			keys, kNote = k, n
 			return e
 		},
+		func() error {
+			p, n, e := c.fetchESAnonymousAccess(ctx)
+			anonymous, aNote = p, n
+			return e
+		},
 	)
 	if err != nil {
 		return report, err
@@ -1148,11 +1172,15 @@ func (c *Client) Audit(ctx context.Context) (types.SecurityReport, error) {
 	report.Roles = roles
 	report.RoleMappings = mappings
 	report.APIKeys = keys
+	report.Anonymous = anonymous
 	if mNote != "" {
 		report.Status.Notes = append(report.Status.Notes, mNote)
 	}
 	if kNote != "" {
 		report.Status.Notes = append(report.Status.Notes, kNote)
+	}
+	if aNote != "" {
+		report.Status.Notes = append(report.Status.Notes, aNote)
 	}
 	return report, nil
 }
@@ -1416,6 +1444,138 @@ func (c *Client) fetchESAPIKeys(ctx context.Context) ([]types.SecurityAPIKey, st
 		})
 	}
 	return out, "", nil
+}
+
+// anonymousSettingsWire mirrors a /_cluster/settings response narrowed
+// to the anonymous-auth keys via filter_path. include_defaults=true
+// makes the cluster also fill Defaults so we can see "the operator
+// never set this; here's what ES would do" without a second round trip.
+//
+// flat_settings is intentionally not set: keeping the nested shape lets
+// the field types decode straight (roles as []string instead of a
+// comma-joined string) and matches what include_defaults already
+// returns.
+type anonymousSettingsWire struct {
+	Persistent anonymousSettingsBlock `json:"persistent"`
+	Transient  anonymousSettingsBlock `json:"transient"`
+	Defaults   anonymousSettingsBlock `json:"defaults"`
+}
+
+type anonymousSettingsBlock struct {
+	Xpack struct {
+		Security struct {
+			Authc struct {
+				Anonymous struct {
+					Username       *string  `json:"username"`
+					Roles          []string `json:"roles"`
+					AuthzException *string  `json:"authz_exception"`
+				} `json:"anonymous"`
+			} `json:"authc"`
+		} `json:"security"`
+	} `json:"xpack"`
+}
+
+// fetchESAnonymousAccess reads /_cluster/settings narrowed to the
+// xpack.security.authc.anonymous.* keys, then resolves the effective
+// values across transient → persistent → defaults precedence. The
+// returned posture mirrors what a request hitting the cluster
+// unauthenticated would see.
+//
+// Failure modes are partial-failure friendly, the same as the other
+// audit fetchers: 401/403 returns a status note instead of an error so
+// the rest of the audit completes; transport / decode errors bubble up.
+//
+// Enabled is true when the effective Roles list is non-empty —
+// matching ES semantics, where anonymous access without a role grant
+// is a no-op even if username/authz_exception are set.
+func (c *Client) fetchESAnonymousAccess(ctx context.Context) (*types.AnonymousAccessPosture, string, error) {
+	body, status, err := c.doRawGET(ctx, "/_cluster/settings?include_defaults=true&filter_path=*.xpack.security.authc.anonymous.*")
+	if err != nil {
+		return nil, "", err
+	}
+	switch status {
+	case http.StatusForbidden:
+		return nil, "anonymous: forbidden — needs monitor cluster privilege to read /_cluster/settings", nil
+	case http.StatusUnauthorized:
+		return nil, "", esopsclient.ErrAuth
+	}
+	if status >= 400 {
+		return nil, fmt.Sprintf("anonymous: HTTP %d (%s)", status, snippet(body)), nil
+	}
+
+	var wire anonymousSettingsWire
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, "", errors.Join(errors.New("decoding cluster settings (anonymous) response"), err)
+	}
+
+	posture := &types.AnonymousAccessPosture{Source: "default"}
+
+	// Username precedence: transient > persistent > default. nil pointer
+	// means "this scope did not set the key" — distinct from an empty
+	// string, which a malformed config could legitimately store.
+	switch {
+	case wire.Transient.Xpack.Security.Authc.Anonymous.Username != nil:
+		posture.Username = *wire.Transient.Xpack.Security.Authc.Anonymous.Username
+	case wire.Persistent.Xpack.Security.Authc.Anonymous.Username != nil:
+		posture.Username = *wire.Persistent.Xpack.Security.Authc.Anonymous.Username
+	case wire.Defaults.Xpack.Security.Authc.Anonymous.Username != nil:
+		posture.Username = *wire.Defaults.Xpack.Security.Authc.Anonymous.Username
+	}
+
+	// Roles precedence: same order, and the load-bearing setting for
+	// Source. ES treats an empty roles list as "anonymous access is
+	// off" regardless of the other fields, so we anchor Source to
+	// whichever scope supplied the effective roles list.
+	switch {
+	case len(wire.Transient.Xpack.Security.Authc.Anonymous.Roles) > 0:
+		posture.Roles = wire.Transient.Xpack.Security.Authc.Anonymous.Roles
+		posture.Source = "transient"
+	case len(wire.Persistent.Xpack.Security.Authc.Anonymous.Roles) > 0:
+		posture.Roles = wire.Persistent.Xpack.Security.Authc.Anonymous.Roles
+		posture.Source = "persistent"
+	case len(wire.Defaults.Xpack.Security.Authc.Anonymous.Roles) > 0:
+		posture.Roles = wire.Defaults.Xpack.Security.Authc.Anonymous.Roles
+		// Defaults supplying roles is exotic but legitimate on
+		// distributions that ship pre-set defaults; keep Source
+		// honest about where the value came from.
+		posture.Source = "default"
+	}
+	posture.Enabled = len(posture.Roles) > 0
+
+	// AuthzException is reported as a string by /_cluster/settings
+	// ("true"/"false") rather than a bool. ES default is true, so an
+	// unset value across every scope still surfaces as *true rather
+	// than nil — the field is meaningful on this dialect, the
+	// operator just hasn't overridden it. Pointer-typed so OS can
+	// leave it nil ("not applicable on this dialect").
+	authzDefault := true
+	resolved := authzDefault
+	switch {
+	case wire.Transient.Xpack.Security.Authc.Anonymous.AuthzException != nil:
+		resolved = parseBoolish(*wire.Transient.Xpack.Security.Authc.Anonymous.AuthzException, authzDefault)
+	case wire.Persistent.Xpack.Security.Authc.Anonymous.AuthzException != nil:
+		resolved = parseBoolish(*wire.Persistent.Xpack.Security.Authc.Anonymous.AuthzException, authzDefault)
+	case wire.Defaults.Xpack.Security.Authc.Anonymous.AuthzException != nil:
+		resolved = parseBoolish(*wire.Defaults.Xpack.Security.Authc.Anonymous.AuthzException, authzDefault)
+	}
+	posture.AuthzException = &resolved
+
+	return posture, "", nil
+}
+
+// parseBoolish accepts the "true"/"false" string form ES returns from
+// /_cluster/settings as well as the unquoted bool form some scopes use,
+// falling back to def when neither parses cleanly. Cluster settings
+// have flipped between the two shapes across versions; tolerating both
+// keeps the audit stable across the supported ES range.
+func parseBoolish(s string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	return def
 }
 
 // doRawGET performs a plain GET via the underlying ES transport — same

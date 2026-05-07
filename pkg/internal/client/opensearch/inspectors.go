@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
@@ -175,18 +176,70 @@ func (c *Client) AllocationByNode(ctx context.Context) ([]types.NodeAllocation, 
 	return out, nil
 }
 
-// nodesInfoTransportTLSWire mirrors the slice of /_nodes/settings we
-// inspect for transport-layer TLS posture. flat_settings=true makes
-// the keys arrive as dotted paths; we look at the OpenSearch security
-// plugin's `plugins.security.ssl.transport.*` keys (and the legacy
-// `opendistro_security.ssl.transport.*` aliases the plugin still
-// honours on rolling upgrades) so the answer covers both pre- and
-// post-rebrand clusters.
-type nodesInfoTransportTLSWire struct {
+// nodesTLSSettingsWire mirrors the slice of /_nodes/settings we
+// inspect for transport- and HTTP-layer TLS posture. flat_settings=true
+// makes the keys arrive as dotted paths; the inspectors read both
+// `plugins.security.ssl.{transport,http}.*` keys and the legacy
+// `opendistro_security.ssl.{transport,http}.*` aliases (the plugin
+// still honours both on rolling upgrades) so the answer covers pre-
+// and post-rebrand clusters.
+type nodesTLSSettingsWire struct {
 	Nodes map[string]struct {
 		Name     string         `json:"name"`
 		Settings map[string]any `json:"settings"`
 	} `json:"nodes"`
+}
+
+// tlsSettingsPath is the single read that backs both TransportTLS and
+// HTTPTLS. filter_path narrows the response to the security plugin's
+// SSL keys, sparing the inspectors a parse over every static node
+// setting on a busy cluster.
+//
+// /_nodes/settings does not accept ?include_defaults — that parameter
+// is /_cluster/settings only, and the security plugin's SSL settings
+// don't surface through cluster settings either. The view here is
+// operator-only by design; rules that need to flag a weak default
+// have to know the dialect's defaults out-of-band.
+//
+// filter_path stops at `nodes.*.settings` rather than drilling deeper
+// into `plugins.security.ssl.*`. With flat_settings=true the keys are
+// literal dotted strings (not JSON-path segments), so a filter_path
+// matching them as paths returns nothing — see the matching ES
+// adapter comment.
+const tlsSettingsPath = "/_nodes/settings?flat_settings=true&filter_path=" +
+	"nodes.*.name,nodes.*.settings"
+
+const tlsSettingsTTLDefault = 2 * time.Second
+
+// cachedNodesTLSSettings issues at most one /_nodes/settings GET per
+// TTL window per Client. TransportTLS and HTTPTLS both call through
+// here, so a doctor running both rules in sequence pays one round
+// trip rather than two. Errors are not cached: a transient transport
+// failure should not mask a recovered cluster on the next call.
+func (c *Client) cachedNodesTLSSettings(ctx context.Context) (nodesTLSSettingsWire, error) {
+	c.tlsSettingsMu.Lock()
+	defer c.tlsSettingsMu.Unlock()
+	ttl := c.tlsSettingsTTL
+	if ttl <= 0 {
+		ttl = tlsSettingsTTLDefault
+	}
+	if !c.tlsSettingsTime.IsZero() && time.Since(c.tlsSettingsTime) < ttl {
+		return c.tlsSettingsSnap, nil
+	}
+	body, status, err := c.doSecurityGET(ctx, tlsSettingsPath)
+	if err != nil {
+		return nodesTLSSettingsWire{}, err
+	}
+	if status >= 400 {
+		return nodesTLSSettingsWire{}, clientutil.ClassifyStatus("nodes settings (tls)", status, body)
+	}
+	var wire nodesTLSSettingsWire
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nodesTLSSettingsWire{}, errors.Join(errors.New("decoding nodes settings (tls) response"), err)
+	}
+	c.tlsSettingsSnap = wire
+	c.tlsSettingsTime = time.Now()
+	return wire, nil
 }
 
 // TransportTLS implements client.TransportTLSInspector for OpenSearch.
@@ -202,18 +255,14 @@ type nodesInfoTransportTLSWire struct {
 // active transport-TLS config, with the keystore/pemcert keys as the
 // strongest signal — operators who set those have transport TLS on
 // by construction.
+//
+// Reads from the same /_nodes/settings snapshot HTTPTLS uses
+// (cachedNodesTLSSettings); a doctor running both rules pays one
+// round trip rather than two.
 func (c *Client) TransportTLS(ctx context.Context) (types.TransportTLS, error) {
-	body, status, err := c.doSecurityGET(ctx, "/_nodes/settings?flat_settings=true")
+	wire, err := c.cachedNodesTLSSettings(ctx)
 	if err != nil {
 		return types.TransportTLS{}, err
-	}
-	if status >= 400 {
-		return types.TransportTLS{}, clientutil.ClassifyStatus("nodes settings (transport tls)", status, body)
-	}
-
-	var wire nodesInfoTransportTLSWire
-	if err := json.Unmarshal(body, &wire); err != nil {
-		return types.TransportTLS{}, errors.Join(errors.New("decoding nodes settings (transport tls) response"), err)
 	}
 	if len(wire.Nodes) == 0 {
 		return types.TransportTLS{}, nil
@@ -268,6 +317,234 @@ func osTransportTLSEnabled(m map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// HTTPTLS implements client.HTTPTLSInspector for OpenSearch. Sibling
+// of TransportTLS — the transport layer is node-to-node, the HTTP
+// layer is what an external client (esops itself, Dashboards,
+// application traffic) connects to, so the two endpoints answer
+// independent questions and each gets its own inspector. Reads
+// /_nodes/settings?flat_settings=true and aggregates the OS security
+// plugin's `plugins.security.ssl.http.*` keys (with the legacy
+// `opendistro_security.ssl.http.*` aliases the plugin still honours
+// on rolling upgrades) across every reachable node.
+//
+// Aggregation:
+//   - Enabled is true only when every node reports HTTP TLS as on.
+//   - ClientAuth is the homogeneous value when nodes agree; "mixed"
+//     when they disagree.
+//   - Protocols and CipherSuites are the sorted, deduplicated union
+//     across nodes (the attacker picks the weakest accepted by any
+//     node, so the rule evaluates the union, not the intersection).
+//
+// PerNode is populated only when nodes disagree on Enabled or
+// ClientAuth, or on their Protocols/CipherSuites lists.
+//
+// Unlike the transport layer (which OS treats as "on whenever the
+// plugin is configured"), the HTTP layer has a real `enabled` toggle
+// — `plugins.security.ssl.http.enabled` — and its default is false,
+// so a missing or false value means an unauthenticated 9200 listener.
+// We honour that toggle directly rather than inferring from keystore
+// presence; the rule needs to flag exactly the case where the plugin
+// is configured for transport but the operator forgot to enable the
+// HTTP layer.
+//
+// Reads from the same /_nodes/settings snapshot TransportTLS uses
+// (cachedNodesTLSSettings).
+func (c *Client) HTTPTLS(ctx context.Context) (types.HTTPTLSPosture, error) {
+	wire, err := c.cachedNodesTLSSettings(ctx)
+	if err != nil {
+		return types.HTTPTLSPosture{}, err
+	}
+	if len(wire.Nodes) == 0 {
+		return types.HTTPTLSPosture{}, nil
+	}
+
+	per := make([]types.NodeTLSPosture, 0, len(wire.Nodes))
+	for _, n := range wire.Nodes {
+		per = append(per, types.NodeTLSPosture{
+			Name:         n.Name,
+			Enabled:      osHTTPTLSEnabled(n.Settings),
+			ClientAuth:   osHTTPClientAuth(n.Settings),
+			Protocols:    osReadSliceSetting(n.Settings, "plugins.security.ssl.http.enabled_protocols", "opendistro_security.ssl.http.enabled_protocols"),
+			CipherSuites: osReadSliceSetting(n.Settings, "plugins.security.ssl.http.enabled_ciphers", "opendistro_security.ssl.http.enabled_ciphers"),
+		})
+	}
+	return aggregateOSHTTPTLS(per), nil
+}
+
+// osHTTPTLSEnabled reads `plugins.security.ssl.http.enabled` (and the
+// legacy alias). The plugin's default is false — the operator must
+// explicitly turn HTTP TLS on, even when transport TLS is configured
+// — so a missing key is "off", which is the exact case the rule has
+// to flag.
+func osHTTPTLSEnabled(m map[string]any) bool {
+	if m == nil {
+		return false
+	}
+	for _, k := range []string{
+		"plugins.security.ssl.http.enabled",
+		"opendistro_security.ssl.http.enabled",
+	} {
+		raw, ok := m[k]
+		if !ok {
+			continue
+		}
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			b, err := strconv.ParseBool(v)
+			if err == nil {
+				return b
+			}
+		}
+	}
+	return false
+}
+
+// osHTTPClientAuth reads `plugins.security.ssl.http.clientauth_mode`
+// (and the legacy alias) and normalises the cluster's value to the
+// shared "required" / "optional" / "none" vocabulary. The plugin
+// emits "REQUIRE" / "OPTIONAL" / "NONE"; we lowercase and map
+// "require" → "required" so a CEL rule comparing the ES and OS sides
+// uses one set of strings. Empty when the operator did not set the
+// key.
+func osHTTPClientAuth(m map[string]any) string {
+	if m == nil {
+		return ""
+	}
+	var raw string
+	for _, k := range []string{
+		"plugins.security.ssl.http.clientauth_mode",
+		"opendistro_security.ssl.http.clientauth_mode",
+	} {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		if s, ok := v.(string); ok {
+			raw = s
+			break
+		}
+	}
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	switch mode {
+	case "require":
+		return "required"
+	case "optional", "none", "required":
+		return mode
+	default:
+		return mode
+	}
+}
+
+// osReadSliceSetting pulls the first present flat-key list value from
+// the candidate keys. With flat_settings=true the cluster keeps list
+// values as JSON arrays under the dotted path; non-string elements are
+// skipped so a malformed setting can't crash the audit. Returned
+// slices are sorted so callers can compare per-node lists by equality
+// without taking on the cluster's emission order.
+func osReadSliceSetting(m map[string]any, keys ...string) []string {
+	if m == nil {
+		return nil
+	}
+	for _, k := range keys {
+		raw, ok := m[k]
+		if !ok {
+			continue
+		}
+		arr, ok := raw.([]any)
+		if !ok {
+			continue
+		}
+		out := make([]string, 0, len(arr))
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				out = append(out, s)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	return nil
+}
+
+// aggregateOSHTTPTLS collapses the per-node slice into the aggregate
+// HTTPTLSPosture. Mirrors the ES adapter's aggregator — kept here as
+// a private duplicate to avoid an adapter-to-adapter import. The
+// shape is dialect-independent; the only thing each adapter owns is
+// the per-node mapping that produced the input slice.
+func aggregateOSHTTPTLS(per []types.NodeTLSPosture) types.HTTPTLSPosture {
+	if len(per) == 0 {
+		return types.HTTPTLSPosture{}
+	}
+	sort.Slice(per, func(i, j int) bool { return per[i].Name < per[j].Name })
+
+	allEnabled := true
+	clientAuth := per[0].ClientAuth
+	clientAuthMixed := false
+	protoSet := map[string]struct{}{}
+	cipherSet := map[string]struct{}{}
+	disagree := false
+	for i, n := range per {
+		if !n.Enabled {
+			allEnabled = false
+		}
+		if n.ClientAuth != clientAuth {
+			clientAuthMixed = true
+		}
+		for _, p := range n.Protocols {
+			protoSet[p] = struct{}{}
+		}
+		for _, c := range n.CipherSuites {
+			cipherSet[c] = struct{}{}
+		}
+		if i > 0 {
+			prev := per[i-1]
+			if prev.Enabled != n.Enabled || prev.ClientAuth != n.ClientAuth ||
+				!osStringSliceEqual(prev.Protocols, n.Protocols) ||
+				!osStringSliceEqual(prev.CipherSuites, n.CipherSuites) {
+				disagree = true
+			}
+		}
+	}
+	out := types.HTTPTLSPosture{Enabled: allEnabled}
+	if clientAuthMixed {
+		out.ClientAuth = "mixed"
+	} else {
+		out.ClientAuth = clientAuth
+	}
+	out.Protocols = osSortedKeys(protoSet)
+	out.CipherSuites = osSortedKeys(cipherSet)
+	if disagree {
+		out.PerNode = per
+	}
+	return out
+}
+
+func osStringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func osSortedKeys(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // osHostnameVerification reads

@@ -692,28 +692,32 @@ type AllocationDecider struct {
 }
 
 // SecurityReport is what the cluster tells us about its identity model
-// — users, roles, role-mappings, and dialect-specific extras (ES API
-// keys, OS tenants) — plus a per-cluster status block. This is the
-// adapter's half of an `ops audit`; the TLS posture is added by the
-// business layer because it comes from the config.Context, not from
-// the cluster.
+// — users, roles, role-mappings, anonymous-access posture, and
+// dialect-specific extras (ES API keys, OS tenants) — plus a per-
+// cluster status block. This is the adapter's half of an `ops audit`;
+// the TLS posture is added by the business layer because it comes
+// from the config.Context, not from the cluster.
 //
 // When Status.Enabled is false (security disabled on ES, or plugin
-// absent on OS), every collection is empty: the cluster has nothing
-// to report, not "we didn't look".
+// absent on OS), every collection is empty and Anonymous is nil: the
+// cluster has nothing to report, and the adapter skipped the
+// anonymous probe rather than fabricate a posture.
 //
 // Per-collection partial failures: if the auth user has rights to read
 // users but not API keys, the API-keys block is left empty and the
 // reason lands in Status.Notes rather than aborting the whole audit.
-// "I'm not allowed to see API keys" is signal an operator wants
-// surfaced, not the failure mode.
+// Anonymous follows the same pattern — a forbidden /_cluster/settings
+// read leaves Anonymous nil and records a note. "I'm not allowed to
+// see API keys" is signal an operator wants surfaced, not the failure
+// mode.
 type SecurityReport struct {
-	Status       SecurityStatus        `json:"status"                  yaml:"status"`
-	Users        []SecurityUser        `json:"users,omitempty"         yaml:"users,omitempty"`
-	Roles        []SecurityRole        `json:"roles,omitempty"         yaml:"roles,omitempty"`
-	RoleMappings []SecurityRoleMapping `json:"role_mappings,omitempty" yaml:"role_mappings,omitempty"`
-	APIKeys      []SecurityAPIKey      `json:"api_keys,omitempty"      yaml:"api_keys,omitempty"`
-	Tenants      []SecurityTenant      `json:"tenants,omitempty"       yaml:"tenants,omitempty"`
+	Status       SecurityStatus          `json:"status"                  yaml:"status"`
+	Anonymous    *AnonymousAccessPosture `json:"anonymous,omitempty"     yaml:"anonymous,omitempty"`
+	Users        []SecurityUser          `json:"users,omitempty"         yaml:"users,omitempty"`
+	Roles        []SecurityRole          `json:"roles,omitempty"         yaml:"roles,omitempty"`
+	RoleMappings []SecurityRoleMapping   `json:"role_mappings,omitempty" yaml:"role_mappings,omitempty"`
+	APIKeys      []SecurityAPIKey        `json:"api_keys,omitempty"      yaml:"api_keys,omitempty"`
+	Tenants      []SecurityTenant        `json:"tenants,omitempty"       yaml:"tenants,omitempty"`
 }
 
 // SecurityStatus captures whether the cluster exposes a security model
@@ -829,18 +833,80 @@ type SecurityTenant struct {
 	Description string `json:"description,omitempty"  yaml:"description,omitempty"`
 }
 
+// AnonymousAccessPosture describes how the cluster treats unauthenticated
+// requests. A non-nil value on a SecurityReport / SecurityAudit means
+// the adapter probed the cluster's anonymous-access settings; a nil
+// value means it did not (security disabled, endpoint unavailable, or
+// the caller lacks permission — the reason lands in
+// SecurityStatus.Notes). Distinguishing "not collected" from
+// "collected and disabled" matters to downstream consumers (notably
+// esops-doctor's anonymous-access rule) which would otherwise treat
+// silence as a green light.
+//
+// Source carries the cluster-settings scope that supplied the effective
+// value: "transient" overrides "persistent" overrides "default", which
+// is the precedence order both ES and OS evaluate. When every scope is
+// silent (default off, never overridden) the field is "default".
+//
+// Dialect-specific fields (Username, AuthzException) are ES-only; OS
+// has no equivalent at the cluster-settings layer. Roles is shared in
+// shape but populated differently — see the field comment.
+type AnonymousAccessPosture struct {
+	// Enabled is the effective answer: true when the cluster will let
+	// an unauthenticated request through. ES infers this from the
+	// presence of `xpack.security.authc.anonymous.roles` (no roles =
+	// no implicit identity); OS reads
+	// `plugins.security.authcz.anonymous_auth_enabled` directly.
+	Enabled bool `json:"enabled"                          yaml:"enabled"`
+
+	// Username is the identity ES grants to unauthenticated requests
+	// when anonymous access is enabled (default `_anonymous`). Empty
+	// on OS — the security plugin has no equivalent setting.
+	Username string `json:"username,omitempty"           yaml:"username,omitempty"`
+
+	// Roles are the roles the anonymous identity inherits.
+	//   - ES: product roles from `xpack.security.authc.anonymous.roles`.
+	//   - OS: backend roles from the security plugin's anonymous
+	//     config when accessible; empty when only the cluster-settings
+	//     bit was readable (the richer plugin endpoint requires admin
+	//     and may not have been probed).
+	Roles []string `json:"roles,omitempty"             yaml:"roles,omitempty"`
+
+	// AuthzException mirrors `xpack.security.authc.anonymous.authz_exception`
+	// (ES-only, default true): when true, an anonymous request that
+	// fails authorization gets a 403; when false, the cluster falls
+	// through and challenges with a 401 instead. Audit-relevant
+	// because the false setting changes how clients perceive the
+	// cluster's auth posture.
+	//
+	// Pointer-typed so a nil value means "not applicable on this
+	// dialect" (OS has no equivalent setting), distinct from a
+	// non-nil *false ("operator explicitly turned it off"). Without
+	// the pointer, OS would render an always-false bool that looks
+	// like an operator decision.
+	AuthzException *bool `json:"authz_exception,omitempty"    yaml:"authz_exception,omitempty"`
+
+	// Source names the cluster-settings scope that supplied the
+	// effective value: "transient", "persistent", or "default".
+	// Operators reading "anonymous is on" want to know whether to
+	// chase a transient override (gone after a master restart) or a
+	// persisted one.
+	Source string `json:"source,omitempty"               yaml:"source,omitempty"`
+}
+
 // SecurityAudit is the full `ops audit` output: the cluster-side report
 // plus the TLS posture we can report from the context config without
 // asking the cluster anything. Keeping these together lets scripts read
 // one JSON blob rather than stitching two calls.
 type SecurityAudit struct {
-	TLS          TLSPosture            `json:"tls"                       yaml:"tls"`
-	Status       SecurityStatus        `json:"status"                    yaml:"status"`
-	Users        []SecurityUser        `json:"users,omitempty"           yaml:"users,omitempty"`
-	Roles        []SecurityRole        `json:"roles,omitempty"           yaml:"roles,omitempty"`
-	RoleMappings []SecurityRoleMapping `json:"role_mappings,omitempty"   yaml:"role_mappings,omitempty"`
-	APIKeys      []SecurityAPIKey      `json:"api_keys,omitempty"        yaml:"api_keys,omitempty"`
-	Tenants      []SecurityTenant      `json:"tenants,omitempty"         yaml:"tenants,omitempty"`
+	TLS          TLSPosture              `json:"tls"                       yaml:"tls"`
+	Status       SecurityStatus          `json:"status"                    yaml:"status"`
+	Anonymous    *AnonymousAccessPosture `json:"anonymous,omitempty"       yaml:"anonymous,omitempty"`
+	Users        []SecurityUser          `json:"users,omitempty"           yaml:"users,omitempty"`
+	Roles        []SecurityRole          `json:"roles,omitempty"           yaml:"roles,omitempty"`
+	RoleMappings []SecurityRoleMapping   `json:"role_mappings,omitempty"   yaml:"role_mappings,omitempty"`
+	APIKeys      []SecurityAPIKey        `json:"api_keys,omitempty"        yaml:"api_keys,omitempty"`
+	Tenants      []SecurityTenant        `json:"tenants,omitempty"         yaml:"tenants,omitempty"`
 }
 
 // TLSPosture is what the context's connection looks like from the
@@ -883,6 +949,55 @@ type TLSPosture struct {
 type TransportTLS struct {
 	Enabled  bool `json:"transport_tls_enabled"            yaml:"transport_tls_enabled"`
 	Verified bool `json:"transport_tls_verified,omitempty" yaml:"transport_tls_verified,omitempty"`
+}
+
+// HTTPTLSPosture is the cluster-side view of HTTP-layer TLS posture,
+// returned by HTTPTLSInspector. Sibling of TransportTLS — the transport
+// layer is node-to-node, the HTTP layer is what an external client
+// (esops itself, dashboards, application traffic) connects to, so the
+// two deserve separate capabilities. Whether the HTTP layer accepts
+// plaintext is a different question from whether nodes encrypt to each
+// other; conflating them would mask half the posture.
+//
+// Enabled / ClientAuth / Protocols / CipherSuites are aggregated across
+// the reachable node set:
+//   - Enabled is true only when every node reports HTTP TLS as on.
+//     One misconfigured node is exactly what the rule has to flag, so
+//     a majority vote would defeat the rule's purpose.
+//   - ClientAuth is the homogeneous value when every node agrees;
+//     "mixed" when nodes disagree. The disagreement itself is the
+//     finding — operators reading the posture want to see it.
+//   - Protocols and CipherSuites are the union across nodes — the
+//     attacker picks the weakest accepted by any node, so the rule
+//     evaluates the weakest member, not a hypothetical intersection.
+//
+// PerNode carries the per-node breakdown so a CEL rule can flag the
+// specific outliers when the aggregate says "mixed" or one node is
+// off. Empty when every node agrees and the rule only needs the
+// aggregate.
+type HTTPTLSPosture struct {
+	Enabled      bool             `json:"enabled"                   yaml:"enabled"`
+	ClientAuth   string           `json:"client_auth,omitempty"     yaml:"client_auth,omitempty"`
+	Protocols    []string         `json:"protocols,omitempty"       yaml:"protocols,omitempty"`
+	CipherSuites []string         `json:"cipher_suites,omitempty"   yaml:"cipher_suites,omitempty"`
+	PerNode      []NodeTLSPosture `json:"per_node,omitempty"        yaml:"per_node,omitempty"`
+}
+
+// NodeTLSPosture is a single node's HTTP-layer TLS posture as the
+// cluster reports it. Surfaced inside HTTPTLSPosture.PerNode so a CEL
+// rule can flag specific outliers when nodes disagree; the field set
+// matches the aggregate so rules can compose the two with the same
+// idioms.
+//
+// ClientAuth is the cluster's literal string ("required", "optional",
+// "none" on ES; the OS plugin's analogue mapped to the same vocabulary)
+// rather than a bool so the three-way distinction survives marshalling.
+type NodeTLSPosture struct {
+	Name         string   `json:"name"                       yaml:"name"`
+	Enabled      bool     `json:"enabled"                    yaml:"enabled"`
+	ClientAuth   string   `json:"client_auth,omitempty"      yaml:"client_auth,omitempty"`
+	Protocols    []string `json:"protocols,omitempty"        yaml:"protocols,omitempty"`
+	CipherSuites []string `json:"cipher_suites,omitempty"    yaml:"cipher_suites,omitempty"`
 }
 
 // HotThreadsRequest narrows a HotThreadsInspector.HotThreads call. A
