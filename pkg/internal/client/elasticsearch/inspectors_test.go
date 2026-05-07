@@ -123,6 +123,59 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 				"transport_tls_verified": json.RawMessage(`true`),
 			},
 		},
+		{
+			name: "IndexCacheClearResult",
+			in: types.IndexCacheClearResult{
+				Action:     "cache-clear",
+				DryRun:     false,
+				Indices:    []string{"logs-*"},
+				Caches:     []string{"fielddata"},
+				Fields:     []string{"title"},
+				Total:      4,
+				Successful: 3,
+				Failed:     1,
+			},
+			want: map[string]json.RawMessage{
+				"action":            json.RawMessage(`"cache-clear"`),
+				"dry_run":           json.RawMessage(`false`),
+				"indices":           json.RawMessage(`["logs-*"]`),
+				"caches":            json.RawMessage(`["fielddata"]`),
+				"fields":            json.RawMessage(`["title"]`),
+				"shards_total":      json.RawMessage(`4`),
+				"shards_successful": json.RawMessage(`3`),
+				"shards_failed":     json.RawMessage(`1`),
+			},
+		},
+		{
+			name: "IndexUnblockResult",
+			in: types.IndexUnblockResult{
+				Action:       "unblock",
+				DryRun:       false,
+				Indices:      []string{"logs-2024"},
+				Block:        "read_only_allow_delete",
+				Acknowledged: true,
+			},
+			want: map[string]json.RawMessage{
+				"action":       json.RawMessage(`"unblock"`),
+				"dry_run":      json.RawMessage(`false`),
+				"indices":      json.RawMessage(`["logs-2024"]`),
+				"block":        json.RawMessage(`"read_only_allow_delete"`),
+				"acknowledged": json.RawMessage(`true`),
+			},
+		},
+		{
+			name: "ClusterSettingsPutResult",
+			in: types.ClusterSettingsPutResult{
+				Acknowledged: true,
+				Persistent:   map[string]any{"cluster.foo": "bar"},
+				Transient:    map[string]any{},
+			},
+			want: map[string]json.RawMessage{
+				"acknowledged": json.RawMessage(`true`),
+				"persistent":   json.RawMessage(`{"cluster.foo":"bar"}`),
+				"transient":    json.RawMessage(`{}`),
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

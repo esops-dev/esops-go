@@ -2921,3 +2921,143 @@ type NodeAllocation struct {
 	Host             string `json:"host,omitempty"                yaml:"host,omitempty"`
 	IP               string `json:"ip,omitempty"                  yaml:"ip,omitempty"`
 }
+
+// ClusterSettingsPutRequest is the input to a generic PUT
+// /_cluster/settings call. Persistent and Transient carry the keys
+// the operator wants written into each scope; the cluster honours
+// either map being absent (no scope key in the body), or being
+// present but empty (no-op write to that scope). The adapter sends
+// flat_settings=true so dotted keys are accepted as-is — no nested
+// {"cluster":{"routing":{"allocation":{"exclude":{"_name":...}}}}}
+// dance from the consumer's side.
+//
+// Values are forwarded verbatim. The cluster validates known keys and
+// returns a typed 400 with its own reason when a key is unknown,
+// immutable, or a value is rejected — surfaced verbatim.
+//
+// Distinct from ClusterAllocationExcludeUpdate, which is the narrow
+// allocation-exclude path bound to drain/uncordon. This is the general
+// "set whatever cluster-level key the operator typed" path behind
+// `ops settings set`.
+type ClusterSettingsPutRequest struct {
+	Persistent map[string]any
+	Transient  map[string]any
+}
+
+// ClusterSettingsPutResult is the cluster's `acknowledged` flag plus
+// the post-update persistent/transient maps the cluster echoed back.
+// The cluster always returns the resulting state on a 200, so the
+// renderer can show "before / after" without a separate GET.
+type ClusterSettingsPutResult struct {
+	Acknowledged bool           `json:"acknowledged"        yaml:"acknowledged"`
+	Persistent   map[string]any `json:"persistent"          yaml:"persistent"`
+	Transient    map[string]any `json:"transient"           yaml:"transient"`
+}
+
+// ClusterSettingsScopedView is the result of `ops settings get`,
+// surfaced through the renderer. The cluster reports persistent and
+// transient as flat-key maps when flat_settings=true; we forward both
+// alongside Defaults (only populated when --include-defaults was set).
+//
+// IncludeDefaults is recorded so a captured JSON record stays
+// interpretable on its own — the consumer reading the saved blob
+// doesn't have to remember which CLI flags were passed.
+type ClusterSettingsScopedView struct {
+	Persistent      map[string]any `json:"persistent"          yaml:"persistent"`
+	Transient       map[string]any `json:"transient"           yaml:"transient"`
+	Defaults        map[string]any `json:"defaults,omitempty"  yaml:"defaults,omitempty"`
+	IncludeDefaults bool           `json:"include_defaults"    yaml:"include_defaults"`
+}
+
+// ClusterSettingsDiff is the result of `ops settings diff`: the keys
+// where persistent and transient disagree (including keys set in only
+// one scope). A row whose persistent and transient values are equal is
+// omitted on purpose — the diff is for finding drift, and "set the
+// same in both scopes" is not drift.
+type ClusterSettingsDiff struct {
+	Rows []ClusterSettingsDiffRow `json:"rows" yaml:"rows"`
+}
+
+// ClusterSettingsDiffRow is one entry in a ClusterSettingsDiff: the
+// flat key plus the value from each scope. A nil value means "this
+// scope did not have the key set".
+type ClusterSettingsDiffRow struct {
+	Key        string `json:"key"                  yaml:"key"`
+	Persistent any    `json:"persistent,omitempty" yaml:"persistent,omitempty"`
+	Transient  any    `json:"transient,omitempty"  yaml:"transient,omitempty"`
+}
+
+// IndexUnblockRequest narrows the input to ops.UnblockIndices to the
+// shape `ops unblock` actually needs: a comma-separated index pattern
+// and the optional knobs the cluster's _settings endpoint accepts.
+//
+// Block targets the named cluster index block. Empty string means
+// "the canonical disk-watermark block": index.blocks.read_only_allow_delete
+// — the one disk-pressure auto-applies and does not auto-clear when
+// pressure subsides. Other blocks (read_only, write, metadata, read)
+// are accepted so the same command can clear an operator-applied
+// freeze without forcing them to remember the underlying _settings
+// shape.
+type IndexUnblockRequest struct {
+	Indices           []string
+	Block             string
+	IgnoreUnavailable bool
+	DryRun            bool
+}
+
+// IndexUnblockResult is the normalised view of the PUT
+// /<indices>/_settings call that ops.UnblockIndices issues. Mirrors
+// IndexSettingsUpdateResult deliberately — `unblock` is a narrow
+// preset on top of the same settings endpoint, and the captured JSON
+// shape stays interpretable next to other settings-mutation records.
+type IndexUnblockResult struct {
+	Action       string   `json:"action"        yaml:"action"`
+	DryRun       bool     `json:"dry_run"       yaml:"dry_run"`
+	Indices      []string `json:"indices"       yaml:"indices"`
+	Block        string   `json:"block"         yaml:"block"`
+	Acknowledged bool     `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// IndexCacheClearRequest is the input to the POST /<indices>/_cache/clear
+// endpoint. Indices is the comma-separated pattern the cluster receives
+// as the path segment (empty means cluster-wide — the business layer
+// refuses that shape so a wildcard "clear everything" is never the
+// implicit outcome).
+//
+// Fielddata, Query, and Request map to the cluster's per-cache flags.
+// When all three are false, the cluster's default behaviour is to
+// clear every cache. The business layer surfaces this as a flat
+// "clear everything" mode when the operator passes none of the
+// per-cache flags, so the operator gets the cluster's default without
+// having to type --fielddata --query --request.
+//
+// Fields narrows fielddata clearing to specific field names — only
+// honoured when Fielddata is true (the cluster ignores it otherwise).
+type IndexCacheClearRequest struct {
+	Indices           []string
+	Fielddata         bool
+	Query             bool
+	Request           bool
+	Fields            []string
+	IgnoreUnavailable bool
+}
+
+// IndexCacheClearResult is the normalised view of POST /<indices>/_cache/clear.
+// Both ES and OS report the {_shards: {total, successful, failed,
+// failures: []}} envelope; we surface those four numbers so a
+// non-zero failed count is grep-able from the table view.
+//
+// Caches lists the labels of every cache the operator asked to clear
+// (or {"all"} when none of the per-cache flags were set), so a
+// captured JSON record stays interpretable on its own without having
+// to know what the CLI default expanded to.
+type IndexCacheClearResult struct {
+	Action     string   `json:"action"               yaml:"action"`
+	DryRun     bool     `json:"dry_run"              yaml:"dry_run"`
+	Indices    []string `json:"indices"              yaml:"indices"`
+	Caches     []string `json:"caches"               yaml:"caches"`
+	Fields     []string `json:"fields,omitempty"     yaml:"fields,omitempty"`
+	Total      int      `json:"shards_total"         yaml:"shards_total"`
+	Successful int      `json:"shards_successful"    yaml:"shards_successful"`
+	Failed     int      `json:"shards_failed"        yaml:"shards_failed"`
+}
