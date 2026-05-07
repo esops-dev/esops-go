@@ -2412,3 +2412,148 @@ func TestDeprecations_rejectsUnknownFormat(t *testing.T) {
 		t.Fatal("expected error for unknown format")
 	}
 }
+
+func sampleClusterSettingsView() types.ClusterSettingsScopedView {
+	return types.ClusterSettingsScopedView{
+		Persistent: map[string]any{
+			"cluster.routing.allocation.enable": "all",
+		},
+		Transient: map[string]any{
+			"cluster.routing.allocation.disk.watermark.high": "85%",
+		},
+	}
+}
+
+func TestClusterSettings_tableLabelsScope(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ClusterSettings(&buf, sampleClusterSettingsView(), output.FormatTable); err != nil {
+		t.Fatalf("ClusterSettings: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"SCOPE", "KEY", "VALUE", "persistent", "transient", "cluster.routing.allocation.enable", "85%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestClusterSettings_jsonRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ClusterSettings(&buf, sampleClusterSettingsView(), output.FormatJSON); err != nil {
+		t.Fatalf("ClusterSettings: %v", err)
+	}
+	var got types.ClusterSettingsScopedView
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Persistent["cluster.routing.allocation.enable"] != "all" {
+		t.Errorf("round-trip lost persistent key: %+v", got)
+	}
+}
+
+func TestClusterSettingsDiff_emptyPrintsNoDriftMessage(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.ClusterSettingsDiff(&buf, types.ClusterSettingsDiff{}, output.FormatTable); err != nil {
+		t.Fatalf("ClusterSettingsDiff: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no persistent/transient drift") {
+		t.Errorf("expected friendly empty-diff message, got:\n%s", buf.String())
+	}
+}
+
+func TestClusterSettingsDiff_tableShowsBothScopes(t *testing.T) {
+	d := types.ClusterSettingsDiff{
+		Rows: []types.ClusterSettingsDiffRow{
+			{Key: "x", Persistent: "1", Transient: "2"},
+			{Key: "y", Persistent: nil, Transient: "only-t"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := output.ClusterSettingsDiff(&buf, d, output.FormatTable); err != nil {
+		t.Fatalf("ClusterSettingsDiff: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"KEY", "PERSISTENT", "TRANSIENT", "x", "1", "2", "y", "only-t"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestClusterSettingsPut_tableCarriesScopeAndAck(t *testing.T) {
+	r := types.ClusterSettingsPutResult{
+		Acknowledged: true,
+		Persistent: map[string]any{
+			"cluster.routing.allocation.enable": "all",
+		},
+	}
+	var buf bytes.Buffer
+	if err := output.ClusterSettingsPut(&buf, r, "persistent", false, output.FormatTable); err != nil {
+		t.Fatalf("ClusterSettingsPut: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"settings-set", "persistent", "PERSISTENT", "cluster.routing.allocation.enable", "all"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexUnblock_tableCarriesBlockAndIndices(t *testing.T) {
+	r := types.IndexUnblockResult{
+		Action:       "unblock",
+		Block:        "read_only_allow_delete",
+		Indices:      []string{"logs-2024", "logs-2023"},
+		Acknowledged: true,
+	}
+	var buf bytes.Buffer
+	if err := output.IndexUnblock(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("IndexUnblock: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"unblock", "read_only_allow_delete", "INDICES", "logs-2024", "logs-2023"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexCacheClear_tableShowsShardSplit(t *testing.T) {
+	r := types.IndexCacheClearResult{
+		Action:     "cache-clear",
+		Indices:    []string{"logs-*"},
+		Caches:     []string{"fielddata"},
+		Total:      4,
+		Successful: 3,
+		Failed:     1,
+	}
+	var buf bytes.Buffer
+	if err := output.IndexCacheClear(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("IndexCacheClear: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"cache-clear", "fielddata", "logs-*", "3/4", "SHARDS_FAILED"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIndexCacheClear_wideListsFields(t *testing.T) {
+	r := types.IndexCacheClearResult{
+		Action:  "cache-clear",
+		Indices: []string{"logs-*"},
+		Caches:  []string{"fielddata"},
+		Fields:  []string{"title", "body"},
+	}
+	var buf bytes.Buffer
+	if err := output.IndexCacheClear(&buf, r, output.FormatWide); err != nil {
+		t.Fatalf("IndexCacheClear: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"FIELDS", "title", "body"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}

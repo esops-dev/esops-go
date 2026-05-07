@@ -2,7 +2,7 @@
 
 `esops ops` provides `kubectl`-style commands for quick Elasticsearch / OpenSearch inspection and light maintenance.
 
-All commands are read-only and safe to run anytime **except** `rebalance`, `drain`, `uncordon`, and `tasks cancel`, which modify cluster state and require `--i-know-this-is-prod` on protected environments.
+All commands are read-only and safe to run anytime **except** `rebalance`, `drain`, `uncordon`, `tasks cancel`, `settings set`, `unblock`, and `cache-clear`, which modify cluster state and require `--i-know-this-is-prod` on protected environments.
 
 See [config.md](./config.md) for context resolution, authentication, and protection settings.
 
@@ -23,6 +23,11 @@ See [config.md](./config.md) for context resolution, authentication, and protect
 | `tasks cancel`         | Cancel task(s) by ID or filter               |
 | `pending-tasks`        | Master’s pending cluster-state queue         |
 | `deprecations`         | Pre-upgrade deprecation warnings (ES only)   |
+| `settings get`         | Cluster settings (persistent + transient)    |
+| `settings set`         | Update cluster settings by key/value or body |
+| `settings diff`        | Drift between persistent and transient scope |
+| `unblock`              | Clear an index block (e.g. disk-watermark)   |
+| `cache-clear`          | Clear fielddata / query / request caches    |
 
 ---
 
@@ -321,6 +326,140 @@ critical  cluster_settings  -          setting cluster.foo will be removed in 9.
 
 **Common use cases**
 - Pre-upgrade check: `esops ops deprecations -o json | jq '[.[] | select(.level=="critical")]'`
+
+---
+
+## esops ops settings get
+
+Reads `/_cluster/settings` (with `flat_settings=true`) and prints the persistent and transient scopes side by side.
+
+```sh
+$ esops ops settings get
+SCOPE       KEY                                             VALUE
+persistent  cluster.routing.allocation.enable               primaries
+transient   cluster.routing.allocation.disk.watermark.high  85%
+```
+
+**Flags**
+- `--name` — repeatable; restrict output to keys whose dotted path begins with the given prefix (e.g. `cluster.routing.allocation`).
+- `--include-defaults` — also include the cluster's built-in default values (`?include_defaults=true`).
+
+**Common use cases**
+- Drift check after an incident
+- Pre-upgrade snapshot of operator-set keys: `esops ops settings get -o json > before.json`
+
+Read-only. Works on both dialects.
+
+---
+
+## esops ops settings set
+
+Updates `/_cluster/settings` in either the persistent or transient scope. The default scope is **transient** — values clear on master restart, the safer default for an emergency override.
+
+```sh
+# transient by default
+esops ops settings set --set cluster.routing.allocation.enable=primaries
+
+# persist a value across restarts
+esops ops settings set --persistent --set cluster.routing.allocation.enable=primaries
+
+# remove a key (cluster honours JSON null as 'remove')
+esops ops settings set --persistent --body '{"cluster.routing.allocation.enable":null}'
+```
+
+**Body shapes** (mutually exclusive)
+- `--set key=value` — repeatable; bare keys are forwarded as-is (no `index.` auto-prefix — cluster-settings keys span multiple top-level prefixes: `cluster.`, `action.`, `indices.`, `logger.`).
+- `--body JSON` — bare key/value object. The surrounding `"persistent"`/`"transient"` wrapper is **rejected** here; pick scope with `--persistent`.
+- `--from-file PATH` — read the JSON object from a file.
+
+**Other flags**
+- `--persistent` — operate on the persistent scope.
+- `--dry-run` — client-side validate + report; the cluster has no native dry-run for `/_cluster/settings`.
+
+**Common use cases**
+- Quiesce shard movement before maintenance: `--set cluster.routing.allocation.enable=primaries`
+- Roll back a stuck setting: `--body '{"cluster.foo":null}'`
+- CI-driven config change with a JSON file rendered upstream
+
+Mutates cluster state. Production contexts require `--i-know-this-is-prod`.
+
+---
+
+## esops ops settings diff
+
+Reports keys whose **persistent** and **transient** values disagree (including keys set in only one scope). A key set the same in both scopes is omitted: the diff is for finding drift.
+
+```sh
+$ esops ops settings diff
+KEY                                PERSISTENT  TRANSIENT
+cluster.routing.allocation.enable  -           primaries
+```
+
+When persistent and transient match exactly the renderer prints `no persistent/transient drift`.
+
+**Common use cases**
+- Confirm an operator forgot to re-flip a transient kill-switch back to persistent
+- Pre-upgrade hygiene before a master restart that will drop transient values
+
+Read-only.
+
+---
+
+## esops ops unblock
+
+Clears a cluster-side index block by writing JSON null to the matching `index.blocks.<name>` setting. Default block is **`read_only_allow_delete`** — the disk-watermark block the cluster auto-applies under disk pressure and does *not* auto-clear when the disk returns under threshold.
+
+```sh
+# typical: clear the disk-watermark block on this week's logs
+esops ops unblock --index 'logs-2026.05.*'
+
+# or any other named cluster block
+esops ops unblock --index archive-2023 --block read_only
+```
+
+**Flags**
+- `--index NAME[,NAME...]` (required; `*` / `_all` refused — name a pattern).
+- `--block NAME` — one of `read_only_allow_delete` (default), `read_only`, `write`, `metadata`, `read`. Other names are rejected at validation time.
+- `--ignore-unavailable` — treat missing indices as a no-op instead of a 404.
+- `--dry-run` — client-side echo; cluster has no native dry-run for `/_settings`.
+
+**Common use cases**
+- Recovery after the disk-watermark trip ("indices went read-only at 90% disk and stayed there")
+- End-of-incident sweep across affected indices
+
+Mutates cluster state. Production contexts require `--i-know-this-is-prod`.
+
+---
+
+## esops ops cache-clear
+
+Clears caches via `POST /<indices>/_cache/clear`. Without any of `--fielddata` / `--query` / `--request` the cluster's default applies (clear every cache on the named indices).
+
+```sh
+# clear every cache for matching indices
+esops ops cache-clear --index 'logs-2026.05.*'
+
+# only the query and request caches
+esops ops cache-clear --index 'logs-*' --query --request
+
+# fielddata flush for specific fields
+esops ops cache-clear --index 'logs-*' --fielddata --fields user.id,trace.id
+```
+
+**Flags**
+- `--index NAME[,NAME...]` (required; `*` / `_all` refused).
+- `--fielddata` / `--query` / `--request` — per-cache toggles.
+- `--fields NAME[,NAME...]` — narrow fielddata clearing; requires `--fielddata`.
+- `--ignore-unavailable` — treat missing indices as a no-op instead of a 404.
+- `--dry-run` — client-side echo; cluster has no native dry-run for `_cache/clear`.
+
+The output table reports `SHARDS_OK / SHARDS_TOTAL` and a `SHARDS_FAILED` count so a partial failure is grep-able.
+
+**Common use cases**
+- After a mapping change, free fielddata heap pinned to the old shape
+- Reclaim heap on a hot data tier before rolling restart
+
+Mutates cluster state (heap and disk-cache state, not data). Production contexts require `--i-know-this-is-prod`. Use carefully on busy clusters: a fielddata flush evicts heap in one go.
 
 ---
 

@@ -3371,3 +3371,232 @@ func deprecationsTable(w io.Writer, issues []types.DeprecationIssue, wide bool) 
 	}
 	return tw.Flush()
 }
+
+// ClusterSettings renders the read-side output of `ops settings get`.
+// Table output is one row per (scope, key, value) triple — the scope
+// label keeps the renderer interpretable when an operator pipes both
+// scopes into one stream. JSON/YAML emit the neutral
+// ClusterSettingsScopedView shape directly so a saved capture can be
+// diffed across runs.
+func ClusterSettings(w io.Writer, v types.ClusterSettingsScopedView, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(v)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(v)
+	case FormatWide:
+		return clusterSettingsTable(w, v, true)
+	case FormatTable, "":
+		return clusterSettingsTable(w, v, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func clusterSettingsTable(w io.Writer, v types.ClusterSettingsScopedView, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "SCOPE\tKEY\tVALUE")
+	writeScope := func(scope string, m map[string]any) {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			leaves := flattenSettings(map[string]any{k: m[k]})
+			leafKeys := make([]string, 0, len(leaves))
+			for lk := range leaves {
+				leafKeys = append(leafKeys, lk)
+			}
+			sort.Strings(leafKeys)
+			for _, lk := range leafKeys {
+				_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", scope, lk, settingValueString(leaves[lk]))
+			}
+		}
+	}
+	writeScope("persistent", v.Persistent)
+	writeScope("transient", v.Transient)
+	if v.IncludeDefaults && wide {
+		writeScope("default", v.Defaults)
+	}
+	return tw.Flush()
+}
+
+// ClusterSettingsDiff renders the output of `ops settings diff`. Table
+// is one row per drifted key with both scope values side-by-side; an
+// empty diff prints a friendly "no drift" line so the operator sees
+// "the command ran" instead of a blank stdout.
+func ClusterSettingsDiff(w io.Writer, d types.ClusterSettingsDiff, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(d)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(d)
+	case FormatWide, FormatTable, "":
+		if len(d.Rows) == 0 {
+			_, _ = fmt.Fprintln(w, "no persistent/transient drift")
+			return nil
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "KEY\tPERSISTENT\tTRANSIENT")
+		for _, r := range d.Rows {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
+				r.Key,
+				settingValueString(r.Persistent),
+				settingValueString(r.Transient),
+			)
+		}
+		return tw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// ClusterSettingsPut renders the post-update view of `ops settings
+// set`. Mirrors IndexSettingsUpdate's shape — a one-line header
+// (scope, ack, dry-run) followed by the resolved key list.
+func ClusterSettingsPut(w io.Writer, r types.ClusterSettingsPutResult, scope string, dryRun bool, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tSCOPE\tDRY_RUN\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "settings-set\t%s\t%t\t%t\n", scope, dryRun, r.Acknowledged)
+		if err := hw.Flush(); err != nil {
+			return err
+		}
+		writeScopeKeys(w, "PERSISTENT", r.Persistent)
+		writeScopeKeys(w, "TRANSIENT", r.Transient)
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func writeScopeKeys(w io.Writer, header string, m map[string]any) {
+	if len(m) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, header)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	leaves := flattenSettings(m)
+	keys := make([]string, 0, len(leaves))
+	for k := range leaves {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\n", k, settingValueString(leaves[k]))
+	}
+	_ = tw.Flush()
+}
+
+// IndexUnblock renders the outcome of `ops unblock`. Mirrors
+// IndexSettingsUpdate's shape: a one-line header (action, dry-run,
+// ack, indices) followed by the resolved index list.
+func IndexUnblock(w io.Writer, r types.IndexUnblockResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tBLOCK\tDRY_RUN\tACKNOWLEDGED\tINDICES")
+		_, _ = fmt.Fprintf(hw, "%s\t%s\t%t\t%t\t%d\n",
+			dashIfEmpty(r.Action), dashIfEmpty(r.Block),
+			r.DryRun, r.Acknowledged, len(r.Indices),
+		)
+		if err := hw.Flush(); err != nil {
+			return err
+		}
+		if len(r.Indices) > 0 {
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, "INDICES")
+			for _, name := range r.Indices {
+				_, _ = fmt.Fprintf(w, "  %s\n", name)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// IndexCacheClear renders the outcome of `ops cache-clear`. The shard
+// totals from the cluster's _shards envelope are surfaced so a non-zero
+// failed count is grep-able from the table view.
+func IndexCacheClear(w io.Writer, r types.IndexCacheClearResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return indexCacheClearTable(w, r, true)
+	case FormatTable, "":
+		return indexCacheClearTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func indexCacheClearTable(w io.Writer, r types.IndexCacheClearResult, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "ACTION\tCACHES\tDRY_RUN\tINDICES\tSHARDS_OK\tSHARDS_FAILED")
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%t\t%d\t%d/%d\t%d\n",
+		dashIfEmpty(r.Action),
+		joinOrDash(r.Caches),
+		r.DryRun,
+		len(r.Indices),
+		r.Successful, r.Total,
+		r.Failed,
+	)
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if len(r.Indices) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "INDICES")
+		for _, name := range r.Indices {
+			_, _ = fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+	if wide && len(r.Fields) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "FIELDS")
+		for _, f := range r.Fields {
+			_, _ = fmt.Fprintf(w, "  %s\n", f)
+		}
+	}
+	return nil
+}

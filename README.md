@@ -23,6 +23,15 @@ The older the ES/OS cluster gets, the more often you will find yourself typing c
 * One-command diagnostics: `esops ops diag` bundles health, shards, hot threads, tasks, ILM/ISM, snapshots, etc. into a credential-free tarball: perfect for support tickets.
 * Single static binary, `CGO_ENABLED=0`. No JVM, no Python runtime, no Docker. Drops into Alpine or scratch images without dragging a runtime along.
 
+```bash
+$ esops ops health -o wide
+NAME               STATUS  DIALECT        VERSION  NODES  DATA_NODES  SHARDS  PRIMARIES  RELOC  INIT  UNASSIGNED  PENDING  ACTIVE%
+esops-dev-es-mtls  green   elasticsearch  9.3.3    1      1           3       3          0      0     0           0        100.0
+$ esops index list --health yellow --context local-os -o wide
+NAME                  HEALTH  STATUS  PRI  REP  DOCS  DELETED  STORE  PRI_STORE  UUID                    CREATED
+esops-stuck-replicas  yellow  open    1    3    1     0        4.2kb  4.2kb      PFHUKha7RXmCOlj4kegBVQ  2026-05-07T08:20:57Z
+```
+
 ----
 
 ## Features
@@ -91,6 +100,7 @@ esops migrate cutover --alias idx --from idx-v1 --to idx-v2
 ```
 ops         health · nodes · shards · allocation-explain · hot-threads
             audit · rebalance · drain · uncordon · tasks · diag
+            settings · unblock · cache-clear
 migrate     plan · check · reindex · verify · cutover
 index       list · optimize · rollover · shrink · open · close
             aliases · settings · template · ilm (ES) · ism (OS)

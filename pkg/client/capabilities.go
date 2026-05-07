@@ -926,6 +926,56 @@ type TransportTLSInspector interface {
 	TransportTLS(ctx context.Context) (types.TransportTLS, error)
 }
 
+// ClusterSettingsPutter wraps PUT /_cluster/settings as a general
+// key/value writer — the destructive companion to
+// ClusterSettingsFullInspector. Distinct from ClusterSettingsManager
+// (which is bound to the narrow allocation-exclude path drain/uncordon
+// uses) so a downstream tool that only wants to read every cluster
+// setting doesn't transitively pull in a write surface; symmetrically,
+// `ops settings set` doesn't have to embed the read view it doesn't
+// need to operate. Adapter implementations send flat_settings=true so
+// dotted keys arrive on the wire as the operator typed them.
+//
+// The cluster has no native dry-run; --dry-run is implemented client-
+// side as "validate + report what would be sent". Implementations only
+// execute live calls.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a 400 from the cluster when the setting
+//     name is unknown or the value is rejected — surfaced verbatim so
+//     the operator sees the cluster's own reason)
+type ClusterSettingsPutter interface {
+	PutClusterSettings(ctx context.Context, req types.ClusterSettingsPutRequest) (types.ClusterSettingsPutResult, error)
+}
+
+// IndexCacheClearer wraps POST /<indices>/_cache/clear — the per-index
+// cache flush the cluster exposes for fielddata, query, and request
+// caches. Both ES and OS expose the same path and the same response
+// envelope ({_shards:{total,successful,failed,failures:[…]}}) so one
+// capability covers both dialects.
+//
+// Implementations forward request.Indices as the path's <index>
+// segment (comma-joined). When none of Fielddata/Query/Request is
+// true, the cluster's default is to clear every cache; the adapter
+// passes the request through unchanged so the cluster's own default
+// is what the operator gets. Fielddata-only narrowing via Fields
+// requires Fielddata=true on the wire — the adapter forwards Fields
+// only in that mode so a future cluster version that tightens the
+// validation doesn't break the call.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx/5xx with the cluster's body in the
+//     message (typical case: a 404 when a literal index name doesn't
+//     exist and IgnoreUnavailable is false)
+type IndexCacheClearer interface {
+	ClearCache(ctx context.Context, req types.IndexCacheClearRequest) (types.IndexCacheClearResult, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -976,6 +1026,8 @@ type Client struct {
 	Reindex             Reindexer
 	NodeBootstrap       NodeBootstrapInspector
 	ClusterSettingsAll  ClusterSettingsFullInspector
+	ClusterSettingsPut  ClusterSettingsPutter
 	Allocation          AllocationInspector
 	TransportTLS        TransportTLSInspector
+	IndexCacheClear     IndexCacheClearer
 }

@@ -26,6 +26,9 @@ func Command() *cli.Command {
 			tasksCommand(),
 			pendingTasksCommand(),
 			deprecationsCommand(),
+			settingsCommand(),
+			unblockCommand(),
+			cacheClearCommand(),
 		},
 	}
 }
