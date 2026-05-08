@@ -2993,12 +2993,43 @@ type MigrationCutoverResult struct {
 // strings the cluster surfaces (when it does — newer ES tucks them
 // behind /_migration/deprecations rather than /_nodes); empty when
 // the cluster reports a clean bootstrap or omits the field.
+//
+// GCCollectors and JVMInputArguments come from the same
+// /_nodes/process,jvm body — `jvm.gc_collectors[]` (e.g. ["G1 Young
+// Generation","G1 Old Generation"]) and `jvm.input_arguments[]` (the
+// raw JVM CLI flags as the running process sees them). Doctor's
+// jvm_gc_ergonomics rule reads both: the collector list to flag CMS
+// (deprecated since JDK 9, removed in 14) and the argument list to
+// flag manual overrides of the cluster's own G1 heuristics
+// (-XX:MaxGCPauseMillis, -XX:G1HeapRegionSize, …). Empty when the
+// cluster did not surface the field — never inferred from defaults.
 type NodeBootstrap struct {
 	Name               string   `json:"name"                            yaml:"name"`
 	MlockallEnabled    bool     `json:"mlockall_enabled"                yaml:"mlockall_enabled"`
 	MaxFileDescriptors int64    `json:"max_file_descriptors,omitempty"  yaml:"max_file_descriptors,omitempty"`
 	MaxMapCount        int64    `json:"max_map_count,omitempty"         yaml:"max_map_count,omitempty"`
 	BootstrapWarnings  []string `json:"bootstrap_warnings,omitempty"    yaml:"bootstrap_warnings,omitempty"`
+	GCCollectors       []string `json:"gc_collectors,omitempty"         yaml:"gc_collectors,omitempty"`
+	JVMInputArguments  []string `json:"jvm_input_arguments,omitempty"   yaml:"jvm_input_arguments,omitempty"`
+}
+
+// NodeSettings is the per-node static-settings view from
+// /_nodes/settings — the operator-set keys the cluster doesn't surface
+// through /_cluster/settings (network.host, node.store.allow_mmap,
+// discovery.seed_hosts, path.data, action.auto_create_index, …).
+//
+// Settings is the flat-key map of dotted-path keys → cluster-reported
+// value, exactly as the cluster returned it with flat_settings=true;
+// consumers reach in directly without walking nested objects. Keys
+// the operator did not set are absent (no cluster defaults are
+// merged in).
+//
+// Name is echoed so a captured slice is interpretable on its own —
+// rules iterate per node and need to attribute the value back to the
+// reporting node when the fleet disagrees.
+type NodeSettings struct {
+	Name     string         `json:"name"     yaml:"name"`
+	Settings map[string]any `json:"settings" yaml:"settings"`
 }
 
 // ClusterSettingsFull is the un-narrowed view of /_cluster/settings —

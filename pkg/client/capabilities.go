@@ -841,9 +841,16 @@ type RemoteReindexInspector interface {
 //
 // Used by esops-doctor's bootstrap_memory_lock and bootstrap-check
 // parity rules (file descriptors, mlockall, max_map_count). Adapters
-// fan across /_nodes/jvm and /_nodes/process in parallel and merge by
-// node ID — both endpoints share the same envelope shape on ES and
-// OS, so one capability covers both dialects.
+// hit /_nodes/process,jvm in one round trip and merge by node ID —
+// both endpoints share the same envelope shape on ES and OS, so one
+// capability covers both dialects.
+//
+// The same /_nodes/process,jvm body also carries `jvm.gc_collectors[]`
+// and `jvm.input_arguments[]`, which the doctor catalog's
+// jvm_gc_ergonomics rule consumes. Surfacing them on
+// types.NodeBootstrap rather than introducing a second inspector keeps
+// the on-the-wire cost identical (the data is in the response body
+// already) and keeps the capability footprint small.
 //
 // Errors:
 //   - ErrUnreachable on transport failure
@@ -852,6 +859,40 @@ type RemoteReindexInspector interface {
 //     message
 type NodeBootstrapInspector interface {
 	NodeBootstrap(ctx context.Context) ([]types.NodeBootstrap, error)
+}
+
+// NodeSettingsInspector wraps GET /_nodes/settings?flat_settings=true
+// — the static, operator-set node-level settings that don't surface
+// through /_cluster/settings. Sibling of NodeBootstrapInspector
+// (which only reads process and JVM blocks); this one carries the
+// whole `nodes.*.settings` map so consumers can reach for any
+// statically-configured key (network.host, node.store.allow_mmap,
+// discovery.*, path.data, action.auto_create_index, …).
+//
+// flat_settings=true is always on so the returned maps are keyed by
+// dotted-path names ("network.host") rather than the nested-object
+// form. include_defaults is deliberately omitted — the cluster's
+// default tree is large and per-key default lookups are not what
+// rules need; if a future caller wants defaults, add a second method
+// rather than overloading this one.
+//
+// Returns one NodeSettings per cluster node. ES and OS expose the
+// same envelope shape; a single capability covers both dialects.
+//
+// Used by esops-doctor's network_host_wildcard,
+// node_store_allow_mmap, and suspect_discovery_settings rules — each
+// reaches into the per-node Settings map for a different dotted-path
+// key. Sharing the underlying /_nodes/settings fetch with the TLS
+// inspectors keeps the round-trip cost flat regardless of how many
+// rules consume it.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message
+type NodeSettingsInspector interface {
+	NodeSettings(ctx context.Context) ([]types.NodeSettings, error)
 }
 
 // ClusterSettingsFullInspector wraps GET /_cluster/settings without the
@@ -1374,6 +1415,7 @@ type Client struct {
 	DocCount            DocCounter
 	Reindex             Reindexer
 	NodeBootstrap       NodeBootstrapInspector
+	NodeSettings        NodeSettingsInspector
 	ClusterSettingsAll  ClusterSettingsFullInspector
 	ClusterSettingsPut  ClusterSettingsPutter
 	Allocation          AllocationInspector

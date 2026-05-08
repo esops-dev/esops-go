@@ -29,20 +29,21 @@ import (
 
 // Client is an ES-backed implementation of the esops client capabilities.
 //
-// tlsSettings* memoise the single GET /_nodes/settings call that backs
-// both TransportTLS and HTTPTLS — without the cache, esops-doctor
-// running both rules pays the round trip twice per audit. The cache
-// is per-Client (one Client serves one config.Context) and short-
-// lived; tlsSettingsTTL defaults to 2 seconds when zero, which is
-// long enough for back-to-back rule calls to share a fetch and short
+// nodesSettings* memoise the single GET /_nodes/settings call that
+// backs TransportTLS, HTTPTLS, and NodeSettings — without the cache,
+// esops-doctor running TLS + the NodeSettings-backed rules in one
+// audit pays the round trip three or more times. The cache is
+// per-Client (one Client serves one config.Context) and short-lived;
+// nodesSettingsTTL defaults to 2 seconds when zero, which is long
+// enough for back-to-back rule calls to share a fetch and short
 // enough that an `ops audit` invocation always sees fresh data.
 type Client struct {
 	api *es.Client
 
-	tlsSettingsMu   sync.Mutex
-	tlsSettingsTime time.Time
-	tlsSettingsSnap nodesTLSSettingsWire
-	tlsSettingsTTL  time.Duration
+	nodesSettingsMu   sync.Mutex
+	nodesSettingsTime time.Time
+	nodesSettingsSnap nodesSettingsWire
+	nodesSettingsTTL  time.Duration
 
 	// version is the cluster's reported version captured at construct
 	// time (the GET / probe number from the factory). Used by the
