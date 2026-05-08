@@ -16,13 +16,15 @@ import (
 )
 
 // nodesInfoBootstrapWire mirrors the slice of /_nodes (info) we read for
-// bootstrap-check posture. /_nodes/process carries `mlockall` and
-// `max_file_descriptors`; /_nodes/jvm carries `mem.using_memory_lock`.
-// Both fields arrive in one response when we ask for the
-// `process,jvm` metric pair. The OpenSearch typed NodesInfoResp does
-// not model max_file_descriptors on Process, so we parse the wire
-// shape ourselves rather than mix typed + raw decode for a single
-// missing field.
+// bootstrap-check posture and JVM ergonomics. /_nodes/process carries
+// `mlockall` and `max_file_descriptors`; /_nodes/jvm carries
+// `mem.using_memory_lock` plus `gc_collectors[]` and
+// `input_arguments[]` for the jvm_gc_ergonomics rule. Every metric
+// arrives in one response when we ask for the `process,jvm` metric
+// pair. The OpenSearch typed NodesInfoResp does not model
+// max_file_descriptors on Process, so we parse the wire shape
+// ourselves rather than mix typed + raw decode for a single missing
+// field.
 type nodesInfoBootstrapWire struct {
 	Nodes map[string]struct {
 		Name    string `json:"name"`
@@ -34,6 +36,8 @@ type nodesInfoBootstrapWire struct {
 			Mem struct {
 				UsingMemoryLock bool `json:"using_memory_lock"`
 			} `json:"mem"`
+			GCCollectors   []string `json:"gc_collectors"`
+			InputArguments []string `json:"input_arguments"`
 		} `json:"jvm"`
 	} `json:"nodes"`
 }
@@ -52,6 +56,11 @@ type nodesInfoBootstrapWire struct {
 // strings are in cluster startup logs, not /_nodes — for that signal
 // the doctor catalog points at /_migration/deprecations on ES, and
 // OpenSearch doesn't expose anything analogous.
+//
+// GCCollectors and JVMInputArguments come from the same response body
+// — `jvm.gc_collectors[]` and `jvm.input_arguments[]`. OS 2.x defaults
+// to G1GC; the rule that consumes these fields flags CMS (deprecated
+// upstream) and manual G1 overrides regardless of dialect.
 func (c *Client) NodeBootstrap(ctx context.Context) ([]types.NodeBootstrap, error) {
 	body, status, err := c.doSecurityGET(ctx, "/_nodes/process,jvm")
 	if err != nil {
@@ -73,6 +82,8 @@ func (c *Client) NodeBootstrap(ctx context.Context) ([]types.NodeBootstrap, erro
 			Name:               n.Name,
 			MlockallEnabled:    mlock,
 			MaxFileDescriptors: n.Process.MaxFileDescriptors,
+			GCCollectors:       n.JVM.GCCollectors,
+			JVMInputArguments:  n.JVM.InputArguments,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -176,24 +187,28 @@ func (c *Client) AllocationByNode(ctx context.Context) ([]types.NodeAllocation, 
 	return out, nil
 }
 
-// nodesTLSSettingsWire mirrors the slice of /_nodes/settings we
-// inspect for transport- and HTTP-layer TLS posture. flat_settings=true
-// makes the keys arrive as dotted paths; the inspectors read both
+// nodesSettingsWire mirrors the slice of /_nodes/settings consumed by
+// every per-node static-settings inspector — TransportTLS, HTTPTLS,
+// and NodeSettings. flat_settings=true makes the keys arrive as
+// dotted paths; the TLS inspectors read both
 // `plugins.security.ssl.{transport,http}.*` keys and the legacy
 // `opendistro_security.ssl.{transport,http}.*` aliases (the plugin
-// still honours both on rolling upgrades) so the answer covers pre-
-// and post-rebrand clusters.
-type nodesTLSSettingsWire struct {
+// still honours both on rolling upgrades), while NodeSettings hands
+// the full per-node map through unchanged for downstream rules to
+// inspect any dotted-path key (network.host, node.store.allow_mmap,
+// discovery.*).
+type nodesSettingsWire struct {
 	Nodes map[string]struct {
 		Name     string         `json:"name"`
 		Settings map[string]any `json:"settings"`
 	} `json:"nodes"`
 }
 
-// tlsSettingsPath is the single read that backs both TransportTLS and
-// HTTPTLS. filter_path narrows the response to the security plugin's
-// SSL keys, sparing the inspectors a parse over every static node
-// setting on a busy cluster.
+// nodesSettingsPath is the single read that backs TransportTLS,
+// HTTPTLS, and NodeSettings. filter_path keeps the body to
+// `nodes.*.name,nodes.*.settings` — small enough that one fetch
+// covers every consumer of static node-level settings without paying
+// for /_cluster/settings-style include_defaults bloat.
 //
 // /_nodes/settings does not accept ?include_defaults — that parameter
 // is /_cluster/settings only, and the security plugin's SSL settings
@@ -202,44 +217,71 @@ type nodesTLSSettingsWire struct {
 // have to know the dialect's defaults out-of-band.
 //
 // filter_path stops at `nodes.*.settings` rather than drilling deeper
-// into `plugins.security.ssl.*`. With flat_settings=true the keys are
+// into specific keypaths. With flat_settings=true the keys are
 // literal dotted strings (not JSON-path segments), so a filter_path
 // matching them as paths returns nothing — see the matching ES
 // adapter comment.
-const tlsSettingsPath = "/_nodes/settings?flat_settings=true&filter_path=" +
+const nodesSettingsPath = "/_nodes/settings?flat_settings=true&filter_path=" +
 	"nodes.*.name,nodes.*.settings"
 
-const tlsSettingsTTLDefault = 2 * time.Second
+const nodesSettingsTTLDefault = 2 * time.Second
 
-// cachedNodesTLSSettings issues at most one /_nodes/settings GET per
-// TTL window per Client. TransportTLS and HTTPTLS both call through
-// here, so a doctor running both rules in sequence pays one round
-// trip rather than two. Errors are not cached: a transient transport
-// failure should not mask a recovered cluster on the next call.
-func (c *Client) cachedNodesTLSSettings(ctx context.Context) (nodesTLSSettingsWire, error) {
-	c.tlsSettingsMu.Lock()
-	defer c.tlsSettingsMu.Unlock()
-	ttl := c.tlsSettingsTTL
+// cachedNodesSettings issues at most one /_nodes/settings GET per TTL
+// window per Client. TransportTLS, HTTPTLS, and NodeSettings all call
+// through here, so a doctor running every static-settings rule in
+// sequence pays one round trip rather than three. Errors are not
+// cached: a transient transport failure should not mask a recovered
+// cluster on the next call.
+func (c *Client) cachedNodesSettings(ctx context.Context) (nodesSettingsWire, error) {
+	c.nodesSettingsMu.Lock()
+	defer c.nodesSettingsMu.Unlock()
+	ttl := c.nodesSettingsTTL
 	if ttl <= 0 {
-		ttl = tlsSettingsTTLDefault
+		ttl = nodesSettingsTTLDefault
 	}
-	if !c.tlsSettingsTime.IsZero() && time.Since(c.tlsSettingsTime) < ttl {
-		return c.tlsSettingsSnap, nil
+	if !c.nodesSettingsTime.IsZero() && time.Since(c.nodesSettingsTime) < ttl {
+		return c.nodesSettingsSnap, nil
 	}
-	body, status, err := c.doSecurityGET(ctx, tlsSettingsPath)
+	body, status, err := c.doSecurityGET(ctx, nodesSettingsPath)
 	if err != nil {
-		return nodesTLSSettingsWire{}, err
+		return nodesSettingsWire{}, err
 	}
 	if status >= 400 {
-		return nodesTLSSettingsWire{}, clientutil.ClassifyStatus("nodes settings (tls)", status, body)
+		return nodesSettingsWire{}, clientutil.ClassifyStatus("nodes settings", status, body)
 	}
-	var wire nodesTLSSettingsWire
+	var wire nodesSettingsWire
 	if err := json.Unmarshal(body, &wire); err != nil {
-		return nodesTLSSettingsWire{}, errors.Join(errors.New("decoding nodes settings (tls) response"), err)
+		return nodesSettingsWire{}, errors.Join(errors.New("decoding nodes settings response"), err)
 	}
-	c.tlsSettingsSnap = wire
-	c.tlsSettingsTime = time.Now()
+	c.nodesSettingsSnap = wire
+	c.nodesSettingsTime = time.Now()
 	return wire, nil
+}
+
+// NodeSettings implements client.NodeSettingsInspector for OS. Hands
+// the cached /_nodes/settings snapshot through as a stable
+// []NodeSettings slice keyed alphabetically by node name. Settings
+// are returned verbatim from the cluster (flat_settings=true) so
+// downstream rules read dotted-path keys directly without walking
+// nested objects.
+//
+// Empty cluster (no reachable nodes) returns nil, mirroring the ES
+// adapter — rules treat absence as "no signal", not "the cluster
+// reported zero nodes".
+func (c *Client) NodeSettings(ctx context.Context) ([]types.NodeSettings, error) {
+	wire, err := c.cachedNodesSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(wire.Nodes) == 0 {
+		return nil, nil
+	}
+	out := make([]types.NodeSettings, 0, len(wire.Nodes))
+	for _, n := range wire.Nodes {
+		out = append(out, types.NodeSettings{Name: n.Name, Settings: n.Settings})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // TransportTLS implements client.TransportTLSInspector for OpenSearch.
@@ -257,10 +299,10 @@ func (c *Client) cachedNodesTLSSettings(ctx context.Context) (nodesTLSSettingsWi
 // by construction.
 //
 // Reads from the same /_nodes/settings snapshot HTTPTLS uses
-// (cachedNodesTLSSettings); a doctor running both rules pays one
+// (cachedNodesSettings); a doctor running both rules pays one
 // round trip rather than two.
 func (c *Client) TransportTLS(ctx context.Context) (types.TransportTLS, error) {
-	wire, err := c.cachedNodesTLSSettings(ctx)
+	wire, err := c.cachedNodesSettings(ctx)
 	if err != nil {
 		return types.TransportTLS{}, err
 	}
@@ -350,9 +392,9 @@ func osTransportTLSEnabled(m map[string]any) bool {
 // HTTP layer.
 //
 // Reads from the same /_nodes/settings snapshot TransportTLS uses
-// (cachedNodesTLSSettings).
+// (cachedNodesSettings).
 func (c *Client) HTTPTLS(ctx context.Context) (types.HTTPTLSPosture, error) {
-	wire, err := c.cachedNodesTLSSettings(ctx)
+	wire, err := c.cachedNodesSettings(ctx)
 	if err != nil {
 		return types.HTTPTLSPosture{}, err
 	}

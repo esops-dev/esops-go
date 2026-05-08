@@ -82,6 +82,8 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 				MaxFileDescriptors: 65535,
 				MaxMapCount:        262144,
 				BootstrapWarnings:  []string{"max_map_count"},
+				GCCollectors:       []string{"G1 Young Generation", "G1 Old Generation"},
+				JVMInputArguments:  []string{"-XX:+UseG1GC", "-Xms2g"},
 			},
 			want: map[string]json.RawMessage{
 				"name":                 json.RawMessage(`"es01"`),
@@ -89,6 +91,29 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 				"max_file_descriptors": json.RawMessage(`65535`),
 				"max_map_count":        json.RawMessage(`262144`),
 				"bootstrap_warnings":   json.RawMessage(`["max_map_count"]`),
+				"gc_collectors":        json.RawMessage(`["G1 Young Generation","G1 Old Generation"]`),
+				"jvm_input_arguments":  json.RawMessage(`["-XX:+UseG1GC","-Xms2g"]`),
+			},
+		},
+		{
+			name: "NodeSettings",
+			in: types.NodeSettings{
+				Name: "es01",
+				Settings: map[string]any{
+					"network.host":             "0.0.0.0",
+					"node.store.allow_mmap":    "false",
+					"discovery.seed_hosts":     []any{"es02:9300", "es03:9300"},
+					"action.auto_create_index": "true",
+				},
+			},
+			want: map[string]json.RawMessage{
+				"name": json.RawMessage(`"es01"`),
+				"settings": json.RawMessage(`{` +
+					`"action.auto_create_index":"true",` +
+					`"discovery.seed_hosts":["es02:9300","es03:9300"],` +
+					`"network.host":"0.0.0.0",` +
+					`"node.store.allow_mmap":"false"` +
+					`}`),
 			},
 		},
 		{

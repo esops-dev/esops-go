@@ -30,17 +30,18 @@ import (
 
 // Client is an OS-backed implementation of the esops client capabilities.
 //
-// tlsSettings* memoise the single GET /_nodes/settings call that
-// backs both TransportTLS and HTTPTLS. See the matching
+// nodesSettings* memoise the single GET /_nodes/settings call that
+// backs TransportTLS, HTTPTLS, and NodeSettings. See the matching
 // elasticsearch.Client doc for the rationale; the OS adapter mirrors
-// the cache so a doctor running both rules pays one round trip.
+// the cache so a doctor running every static-settings rule in
+// sequence pays one round trip.
 type Client struct {
 	api *osapi.Client
 
-	tlsSettingsMu   sync.Mutex
-	tlsSettingsTime time.Time
-	tlsSettingsSnap nodesTLSSettingsWire
-	tlsSettingsTTL  time.Duration
+	nodesSettingsMu   sync.Mutex
+	nodesSettingsTime time.Time
+	nodesSettingsSnap nodesSettingsWire
+	nodesSettingsTTL  time.Duration
 
 	// version is the cluster's reported version captured at construct
 	// time (the GET / probe number from the factory). Used by the

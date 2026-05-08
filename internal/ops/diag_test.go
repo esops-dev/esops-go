@@ -415,6 +415,61 @@ func TestDiag_includesClusterRemoteSettingsOnBothDialects(t *testing.T) {
 	}
 }
 
+// TestDiag_includesNodesSettingsAndProcessJVMOnBothDialects pins the
+// two collectors that surface the data NodeSettingsInspector and the
+// JVM-ergonomics extension on NodeBootstrapInspector consume. The
+// support-ticket signal here — "what static node settings did the
+// operator set?" and "what GC is each node running with which flags?"
+// — is the load-bearing reason these are first-class collectors
+// rather than buried in /_nodes; the test guards that nothing demotes
+// them back to dialect-conditional captures.
+func TestDiag_includesNodesSettingsAndProcessJVMOnBothDialects(t *testing.T) {
+	for name, factory := range map[string]func(client.ClusterDiagnoser) *client.Client{
+		"es": esClient,
+		"os": osClient,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeDiagnoser{responses: map[string]fakeResp{
+				"/_nodes/settings?flat_settings=true": {
+					body:   []byte(`{"nodes":{"n1":{"name":"x","settings":{"network.host":"0.0.0.0"}}}}`),
+					status: 200,
+				},
+				"/_nodes/process,jvm": {
+					body:   []byte(`{"nodes":{"n1":{"name":"x","jvm":{"gc_collectors":["G1 Young Generation"],"input_arguments":["-XX:+UseG1GC"]}}}}`),
+					status: 200,
+				},
+			}}
+			var buf bytes.Buffer
+			_, err := ops.Diag(context.Background(), factory(fake), types.DiagRequest{}, &buf)
+			if err != nil {
+				t.Fatalf("Diag: %v", err)
+			}
+			calls := fake.callsSnapshot()
+			for _, want := range []string{
+				"/_nodes/settings?flat_settings=true",
+				"/_nodes/process,jvm",
+			} {
+				var hit bool
+				for _, p := range calls {
+					if p == want {
+						hit = true
+						break
+					}
+				}
+				if !hit {
+					t.Errorf("collector did not call %q (calls: %v)", want, calls)
+				}
+			}
+			files := readBundle(t, &buf)
+			for _, want := range []string{"nodes_settings_flat.json", "nodes_process_jvm.json"} {
+				if _, ok := files[want]; !ok {
+					t.Errorf("bundle missing %q (files: %v)", want, keys(files))
+				}
+			}
+		})
+	}
+}
+
 func TestBundleFilename_scrubsClusterName(t *testing.T) {
 	ts := time.Date(2026, 4, 24, 12, 34, 56, 0, time.UTC)
 	tests := []struct {

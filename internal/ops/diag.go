@@ -54,6 +54,21 @@ var baseCollectors = []diagCollector{
 	{Name: "cluster_allocation_explain", Path: "/_cluster/allocation/explain"},
 	{Name: "nodes_info", Path: "/_nodes"},
 	{Name: "nodes_stats", Path: "/_nodes/stats"},
+	// Flat-keyed static settings per node — the operator-set keys
+	// (network.host, node.store.allow_mmap, discovery.*, path.data, …)
+	// that don't surface through /_cluster/settings. /_nodes already
+	// captures the same data nested deeply; the flat-settings variant
+	// is small, grep-friendly, and matches the shape downstream rules
+	// (NodeSettingsInspector consumers) read off the wire. Cross-dialect.
+	{Name: "nodes_settings_flat", Path: "/_nodes/settings?flat_settings=true"},
+	// JVM ergonomics + bootstrap-check posture — `jvm.gc_collectors[]`
+	// (G1 vs CMS), `jvm.input_arguments[]` (manual GC overrides),
+	// `jvm.mem.using_memory_lock`, `process.mlockall`, and
+	// `process.max_file_descriptors`. /_nodes captures the same data
+	// alongside everything else; the focused subset gives a triager
+	// the JVM tuning view without scrolling through plugins/modules.
+	// Cross-dialect.
+	{Name: "nodes_process_jvm", Path: "/_nodes/process,jvm"},
 	{Name: "nodes_hot_threads", Path: "/_nodes/hot_threads", Ext: ".txt"},
 	{Name: "tasks", Path: "/_tasks?detailed=true"},
 	{Name: "cat_allocation", Path: "/_cat/allocation?format=json&bytes=b"},
