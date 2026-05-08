@@ -108,6 +108,12 @@ type esCCRStatShWire struct {
 		Reason string `json:"reason"`
 	} `json:"read_exceptions"`
 	FailedReadRequests int64 `json:"failed_read_requests"`
+	// RetentionLeaseAgeMillis is per-shard; the FollowerStats() loop
+	// aggregates max across shards into the neutral type's
+	// RetentionLeaseAgeMillis field. Zero when the cluster did not
+	// surface a value — older ES, or a freshly-created follower whose
+	// shards have not yet acquired a lease.
+	RetentionLeaseAgeMillis int64 `json:"retention_lease_age_in_millis"`
 }
 
 // esAutoFollowWire mirrors the slice of GET /_ccr/auto_follow we read.
@@ -234,6 +240,12 @@ func (c *Client) FollowerStats(ctx context.Context) ([]types.FollowerStats, erro
 				row.LastReadFailure = sh.LastReadException.Reason
 			} else if row.LastReadFailure == "" && sh.FailedReadRequests > 0 && sh.LastReadException.Type != "" {
 				row.LastReadFailure = sh.LastReadException.Type
+			}
+			// Track the max retention-lease age across the index's shards.
+			// One expired-lease shard makes the whole follower
+			// unrecoverable, so the max is the operator-facing summary.
+			if sh.RetentionLeaseAgeMillis > row.RetentionLeaseAgeMillis {
+				row.RetentionLeaseAgeMillis = sh.RetentionLeaseAgeMillis
 			}
 		}
 		out = append(out, row)

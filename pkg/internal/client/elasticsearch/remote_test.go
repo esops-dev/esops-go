@@ -245,6 +245,35 @@ func TestFollowerStats_anyShardPausedMarksIndexPaused(t *testing.T) {
 	}
 }
 
+func TestFollowerStats_aggregatesMaxRetentionLeaseAgeAcrossShards(t *testing.T) {
+	// One expired-lease shard makes the whole follower index
+	// unrecoverable, so the capability surfaces the maximum
+	// retention_lease_age_in_millis across shards into the neutral
+	// type's RetentionLeaseAgeMillis. The doctor rule reads that field
+	// to detect the "lease about to expire" failure mode.
+	tr := &remoteTransport{ccrBody: `{
+		"follow_stats": {
+			"indices": [
+				{"index":"follower-orders","shards":[
+					{"remote_cluster":"leader-eu","leader_index":"orders","follower_index":"follower-orders","operations_written_lag":0,"paused":false,"retention_lease_age_in_millis":60000},
+					{"remote_cluster":"leader-eu","leader_index":"orders","follower_index":"follower-orders","operations_written_lag":0,"paused":false,"retention_lease_age_in_millis":25200000}
+				]}
+			]
+		}
+	}`}
+	c := newProbedClient(t, tr, false)
+	got, err := c.FollowerStats(context.Background())
+	if err != nil {
+		t.Fatalf("FollowerStats: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].RetentionLeaseAgeMillis != 25200000 {
+		t.Errorf("RetentionLeaseAgeMillis = %d, want 25200000 (max across shards)", got[0].RetentionLeaseAgeMillis)
+	}
+}
+
 func TestFollowerStats_404IsErrUnsupported(t *testing.T) {
 	// /_ccr/stats 404s on basic-licence clusters (CCR requires
 	// platinum/enterprise). Translate to ErrUnsupported so a downstream

@@ -21,12 +21,11 @@ import (
 // against the local dev compose stack (`make dev-up`) — the same
 // three contexts the http-tls integration test already covers.
 //
-// Per CLAUDE.md §11 the integration tier is what catches wire-format
-// regressions a contract test against an httptest.Server cannot —
-// `_field_caps`, `cardinality` aggregations, and the task-history
-// shape have all evolved across cluster versions and we want a
-// future re-shaped key to fail loudly here, not silently in
-// production.
+// The integration tier is what catches wire-format regressions a
+// contract test against an httptest.Server cannot — `_field_caps`,
+// `cardinality` aggregations, and the task-history shape have all
+// evolved across cluster versions and we want a future re-shaped key
+// to fail loudly here, not silently in production.
 //
 // The test skips with a clear "make dev-up" hint when a cluster is
 // unreachable rather than failing.
