@@ -140,10 +140,6 @@ See [docs/](docs/) for per-command reference.
 - [docs/completion.md](docs/completion.md) — shell completion
 - [docs/auth.md](docs/auth.md) — Authentication
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing against the local ES/OS dev clusters, and PR conventions.
-
 ## Security
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md). Please do not open public issues for security reports.
@@ -154,6 +150,9 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md). Please do not open public
 * No OpenTelemetry tooling/metrics will be enabled in this tool. This is a standalone tool and is not connected to anything else;
 * No usage of `--force` or anything else that could destroy the cluster or its data.
 
+## Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing against the local ES/OS dev clusters, and PR conventions.
+
 ## License
 
-[Apache License 2.0](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

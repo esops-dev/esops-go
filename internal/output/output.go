@@ -3743,6 +3743,16 @@ func remoteSummaryTable(w io.Writer, remotes []types.RemoteCluster, followers []
 				if fl.LastReadFailure != "" {
 					_, _ = fmt.Fprintf(w, "  %s: last_read_failure=%q\n", fl.Index, fl.LastReadFailure)
 				}
+				// Surface the retention-lease age when the cluster
+				// reported one. Default lease retention is 12h; once
+				// it expires the follower is unrecoverable, so an
+				// operator scanning the wide view wants the duration
+				// at a glance. Suppress when zero — older ES versions
+				// or freshly-created followers do not surface a value.
+				if fl.RetentionLeaseAgeMillis > 0 {
+					_, _ = fmt.Fprintf(w, "  %s: lease_age=%s\n",
+						fl.Index, (time.Duration(fl.RetentionLeaseAgeMillis) * time.Millisecond).Round(time.Second))
+				}
 			}
 		}
 	}

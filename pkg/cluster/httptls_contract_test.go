@@ -20,8 +20,7 @@ import (
 // would produce it; the same NodeTLSPosture-aggregating contract is
 // asserted against both implementations.
 //
-// CLAUDE.md §11 calls for contract tests in pkg/internal/client/. The
-// test lives in pkg/cluster (where both adapters are already wired)
+// The test lives in pkg/cluster (where both adapters are already wired)
 // because the dialect probe + factory is the public construction path
 // downstream tools take, and a contract test that bypasses it would
 // not catch a wiring regression.

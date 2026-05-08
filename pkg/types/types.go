@@ -3554,13 +3554,26 @@ type RemoteCluster struct {
 // is the cluster's last-read-error string when present, empty when the
 // follower is healthy. Paused is true when the operator has paused
 // replication via /_ccr/follow/_pause.
+//
+// RetentionLeaseAgeMillis is the cluster's reported max
+// `retention_lease_age_in_millis` across the follower's shards.
+// Retention leases keep the leader cluster's operations available for
+// the follower to consume; once a lease expires (default lease
+// retention period: 12 hours, configured via
+// `index.soft_deletes.retention_lease.period`), the leader is free to
+// discard the unconsumed ops and the follower falls irrecoverably
+// behind. Aggregated as max-across-shards because one expired-lease
+// shard makes the whole follower index unrecoverable. Zero when the
+// cluster did not report a value (older ES versions, or a brand-new
+// follower whose shards have not yet acquired a lease).
 type FollowerStats struct {
-	Index           string `json:"index"                       yaml:"index"`
-	LeaderIndex     string `json:"leader_index"                yaml:"leader_index"`
-	LeaderCluster   string `json:"leader_cluster"              yaml:"leader_cluster"`
-	FollowerLagOps  int64  `json:"follower_lag_ops"            yaml:"follower_lag_ops"`
-	LastReadFailure string `json:"last_read_failure,omitempty" yaml:"last_read_failure,omitempty"`
-	Paused          bool   `json:"paused,omitempty"            yaml:"paused,omitempty"`
+	Index                   string `json:"index"                                yaml:"index"`
+	LeaderIndex             string `json:"leader_index"                         yaml:"leader_index"`
+	LeaderCluster           string `json:"leader_cluster"                       yaml:"leader_cluster"`
+	FollowerLagOps          int64  `json:"follower_lag_ops"                     yaml:"follower_lag_ops"`
+	LastReadFailure         string `json:"last_read_failure,omitempty"          yaml:"last_read_failure,omitempty"`
+	Paused                  bool   `json:"paused,omitempty"                     yaml:"paused,omitempty"`
+	RetentionLeaseAgeMillis int64  `json:"retention_lease_age_millis,omitempty" yaml:"retention_lease_age_millis,omitempty"`
 }
 
 // AutoFollowPattern is the neutral view of one Elasticsearch CCR

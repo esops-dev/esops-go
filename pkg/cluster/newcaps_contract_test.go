@@ -25,8 +25,7 @@ import (
 // heterogeneous fields) is duplicated between adapters and a future
 // drift would land here, not in production.
 //
-// CLAUDE.md §11 calls for contract tests in pkg/internal/client/. This
-// test lives in pkg/cluster (where both adapters are wired through
+// The test lives in pkg/cluster (where both adapters are wired through
 // the factory) so a dialect-probe + factory regression is also caught
 // at the same time — the path downstream consumers actually take.
 func TestFieldCaps_dialectContract(t *testing.T) {

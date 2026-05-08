@@ -21,9 +21,9 @@ import (
 // local-es (plaintext), local-os (plaintext, security plugin), and
 // local-es-mtls (HTTPS + mTLS).
 //
-// Per CLAUDE.md §11 the integration tier is what catches wire-format
-// regressions a contract test against an httptest.Server cannot — a
-// real cluster build that adds, renames, or restructures keys under
+// The integration tier is what catches wire-format regressions a
+// contract test against an httptest.Server cannot — a real cluster
+// build that adds, renames, or restructures keys under
 // /_nodes/settings is the regression we want to fail loudly here.
 //
 // The test skips with a clear "make dev-up" hint when a cluster is

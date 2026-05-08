@@ -2711,7 +2711,7 @@ func sampleRemotes() []types.RemoteCluster {
 
 func sampleFollowers() []types.FollowerStats {
 	return []types.FollowerStats{
-		{Index: "logs-eu-follower", LeaderIndex: "logs-eu", LeaderCluster: "leader-eu", FollowerLagOps: 42, LastReadFailure: "boom"},
+		{Index: "logs-eu-follower", LeaderIndex: "logs-eu", LeaderCluster: "leader-eu", FollowerLagOps: 42, LastReadFailure: "boom", RetentionLeaseAgeMillis: 25200000},
 	}
 }
 
@@ -2839,7 +2839,10 @@ func TestRemoteSummary_wideShowsSeedsAndLastReadFailure(t *testing.T) {
 		t.Fatalf("RemoteSummary: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"SEEDS", "eu1:9300", "last_read_failure", "boom"} {
+	// lease_age=7h0m0s is the rendered form of 25_200_000 ms — operators
+	// reading the wide view need this duration to spot followers
+	// approaching the 12h default lease-retention deadline.
+	for _, want := range []string{"SEEDS", "eu1:9300", "last_read_failure", "boom", "lease_age=7h0m0s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("wide table missing %q:\n%s", want, out)
 		}
