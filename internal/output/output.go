@@ -3843,6 +3843,143 @@ func licenseTable(w io.Writer, l types.LicenseStatus, wide bool) error {
 	return nil
 }
 
+// Recovery renders a RecoveryReport for `esops index recovery`. Table
+// output is one row per (index, shard) recovering, with the columns an
+// operator watching a restore reaches for first (stage, type, primary
+// vs replica, recovered percent). Wide adds the source snapshot tuple
+// and the raw bytes/files totals so an operator scripting against the
+// numbers can avoid re-parsing the percent string. JSON/YAML emit the
+// neutral RecoveryReport directly.
+func Recovery(w io.Writer, r types.RecoveryReport, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return recoveryTable(w, r, true)
+	case FormatTable, "":
+		return recoveryTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func recoveryTable(w io.Writer, r types.RecoveryReport, wide bool) error {
+	if len(r.Indices) == 0 {
+		_, _ = fmt.Fprintln(w, "No active recoveries.")
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tTYPE\tSTAGE\tBYTES%\tFILES%\tBYTES_REC\tBYTES_TOTAL\tFILES_REC\tFILES_TOTAL\tSOURCE")
+	} else {
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARD\tROLE\tTYPE\tSTAGE\tBYTES%\tFILES%\tRECOVERED")
+	}
+	for _, ix := range r.Indices {
+		for _, sh := range ix.Shards {
+			role := "r"
+			if sh.Primary {
+				role = "p"
+			}
+			bp := dashIfEmpty(sh.BytesPercent)
+			fp := dashIfEmpty(sh.FilesPercent)
+			if wide {
+				_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\n",
+					ix.Index, sh.ID, role, dashIfEmpty(sh.Type), dashIfEmpty(sh.Stage),
+					bp, fp,
+					sh.BytesRecovered, sh.BytesTotal,
+					sh.FilesRecovered, sh.FilesTotal,
+					dashIfEmpty(sh.Source),
+				)
+			} else {
+				_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					ix.Index, sh.ID, role, dashIfEmpty(sh.Type), dashIfEmpty(sh.Stage),
+					bp, fp,
+					humanBytes(sh.BytesRecovered),
+				)
+			}
+		}
+	}
+	return tw.Flush()
+}
+
+// Segments renders a SegmentsReport for `esops index segments`. Table
+// output is one row per index with the columns that drive a force-merge
+// decision (segment count, deleted-doc ratio, on-disk size, and the
+// highest per-shard segment count — the number that matters for
+// --max-num-segments planning). Wide adds the cluster's
+// num_committed_segments / num_search_segments rollups so an operator
+// debugging a translog issue can see the committed-vs-search split.
+// JSON/YAML emit the neutral SegmentsReport directly.
+func Segments(w io.Writer, r types.SegmentsReport, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return segmentsTable(w, r, true)
+	case FormatTable, "":
+		return segmentsTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func segmentsTable(w io.Writer, r types.SegmentsReport, wide bool) error {
+	if len(r.Indices) == 0 {
+		_, _ = fmt.Fprintln(w, "No matching indices.")
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARDS\tSEGMENTS\tTOTAL_SEGMENTS\tMAX_SHARD\tDOCS\tDELETED\tDELETED%\tSIZE\tCOMMITTED\tSEARCHABLE")
+	} else {
+		_, _ = fmt.Fprintln(tw, "INDEX\tSHARDS\tSEGMENTS\tMAX_SHARD\tDOCS\tDELETED%\tSIZE")
+	}
+	for _, ix := range r.Indices {
+		ratio := segmentsDeletedRatioCell(ix)
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%d\n",
+				ix.Index, ix.Shards,
+				ix.SegmentsPrimary, ix.SegmentsTotal, ix.MaxSegmentsShard,
+				ix.DocsTotal, ix.DocsDeleted, ratio, humanBytes(ix.Bytes),
+				ix.Committed, ix.Searchable,
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
+				ix.Index, ix.Shards,
+				ix.SegmentsPrimary, ix.MaxSegmentsShard,
+				ix.DocsTotal, ratio, humanBytes(ix.Bytes),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// segmentsDeletedRatioCell formats the deleted-doc fraction as a one-
+// decimal percent. Zero-doc indices render as "-" since the ratio is
+// undefined; mirrors the behaviour of internal/index.FormatDeletedRatio
+// without coupling the renderer to that package.
+func segmentsDeletedRatioCell(ix types.IndexSegments) string {
+	total := ix.DocsTotal + ix.DocsDeleted
+	if total == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f%%", float64(ix.DocsDeleted)/float64(total)*100)
+}
+
 func indexCacheClearTable(w io.Writer, r types.IndexCacheClearResult, wide bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ACTION\tCACHES\tDRY_RUN\tINDICES\tSHARDS_OK\tSHARDS_FAILED")

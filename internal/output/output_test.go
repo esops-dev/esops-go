@@ -2950,3 +2950,204 @@ func TestLicense_rejectsUnknownFormat(t *testing.T) {
 		t.Errorf("expected error on unsupported format, got nil")
 	}
 }
+
+func sampleRecovery() types.RecoveryReport {
+	return types.RecoveryReport{
+		Indices: []types.IndexRecovery{
+			{Index: "logs-1", Shards: []types.ShardRecovery{
+				{ID: 0, Type: "PEER", Stage: "INDEX", Primary: true, BytesPercent: "12.3%", FilesPercent: "30.0%", BytesRecovered: 1024, BytesTotal: 8192, FilesRecovered: 3, FilesTotal: 10},
+				{ID: 0, Type: "PEER", Stage: "INDEX", Primary: false, BytesPercent: "5.0%", FilesPercent: "10.0%", BytesRecovered: 256, BytesTotal: 8192, FilesRecovered: 1, FilesTotal: 10},
+			}},
+			{Index: "users", Shards: []types.ShardRecovery{
+				{ID: 0, Type: "SNAPSHOT", Stage: "DONE", Primary: true, BytesPercent: "100.0%", FilesPercent: "100.0%", Source: "local-fs/seed-all-1/users"},
+			}},
+		},
+	}
+}
+
+func TestRecovery_tableShowsCoreColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Recovery(&buf, sampleRecovery(), output.FormatTable); err != nil {
+		t.Fatalf("Recovery: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"INDEX", "SHARD", "ROLE", "STAGE", "logs-1", "users", "INDEX", "DONE", "12.3%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRecovery_wideShowsSourceAndRawTotals(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Recovery(&buf, sampleRecovery(), output.FormatWide); err != nil {
+		t.Fatalf("Recovery: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"SOURCE", "BYTES_TOTAL", "FILES_TOTAL", "local-fs/seed-all-1/users"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRecovery_tableEmptyShowsSentinel(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Recovery(&buf, types.RecoveryReport{AllDone: true}, output.FormatTable); err != nil {
+		t.Fatalf("Recovery: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No active recoveries") {
+		t.Errorf("expected sentinel on empty report, got:\n%s", buf.String())
+	}
+}
+
+func TestRecovery_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Recovery(&buf, sampleRecovery(), output.FormatJSON); err != nil {
+		t.Fatalf("Recovery: %v", err)
+	}
+	var got types.RecoveryReport
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if len(got.Indices) != 2 || got.Indices[0].Index != "logs-1" {
+		t.Errorf("round-trip lost data: %+v", got)
+	}
+}
+
+func TestRecovery_yamlRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Recovery(&buf, sampleRecovery(), output.FormatYAML); err != nil {
+		t.Fatalf("Recovery: %v", err)
+	}
+	var got types.RecoveryReport
+	if err := yaml.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if len(got.Indices) != 2 {
+		t.Errorf("round-trip lost data: %+v", got)
+	}
+}
+
+func TestRecovery_rejectsUnknownFormat(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Recovery(&buf, sampleRecovery(), output.Format("ndjson")); err == nil {
+		t.Errorf("expected error on unsupported format, got nil")
+	}
+}
+
+func sampleSegmentsReport() types.SegmentsReport {
+	return types.SegmentsReport{
+		Indices: []types.IndexSegments{
+			{Index: "logs", Shards: 3, SegmentsPrimary: 30, SegmentsTotal: 60, MaxSegmentsShard: 12, DocsTotal: 5000, DocsDeleted: 1000, Bytes: 10 * 1024 * 1024, Committed: 28, Searchable: 30},
+			{Index: "users", Shards: 1, SegmentsPrimary: 2, SegmentsTotal: 3, MaxSegmentsShard: 2, DocsTotal: 100, DocsDeleted: 0, Bytes: 4096, Committed: 2, Searchable: 2},
+		},
+	}
+}
+
+func TestSegments_tableShowsCoreColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, sampleSegmentsReport(), output.FormatTable); err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"INDEX", "SEGMENTS", "MAX_SHARD", "DELETED%", "logs", "users", "16.7%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSegments_wideAddsCommittedAndSearchable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, sampleSegmentsReport(), output.FormatWide); err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"COMMITTED", "SEARCHABLE", "TOTAL_SEGMENTS"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSegments_tableEmptyShowsSentinel(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, types.SegmentsReport{}, output.FormatTable); err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No matching indices") {
+		t.Errorf("expected sentinel on empty report, got:\n%s", buf.String())
+	}
+}
+
+func TestSegments_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, sampleSegmentsReport(), output.FormatJSON); err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	var got types.SegmentsReport
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if len(got.Indices) != 2 || got.Indices[0].Index != "logs" {
+		t.Errorf("round-trip lost data: %+v", got)
+	}
+}
+
+func TestSegments_yamlRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, sampleSegmentsReport(), output.FormatYAML); err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	var got types.SegmentsReport
+	if err := yaml.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v\nraw=%s", err, buf.String())
+	}
+	if len(got.Indices) != 2 {
+		t.Errorf("round-trip lost data: %+v", got)
+	}
+}
+
+func TestSegments_zeroDocsRendersDash(t *testing.T) {
+	r := types.SegmentsReport{Indices: []types.IndexSegments{
+		{Index: "empty", Shards: 1, SegmentsPrimary: 0, MaxSegmentsShard: 0, DocsTotal: 0, DocsDeleted: 0, Bytes: 0},
+	}}
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	out := buf.String()
+	// Walk the data row token-by-token instead of grepping for "
+	// -  " — tabwriter padding is layout-dependent and a column
+	// width change would silently trip the substring match. Locating
+	// the row by its index name and inspecting its DELETED% column
+	// keeps the assertion meaningful.
+	var dataRow string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "empty") {
+			dataRow = line
+			break
+		}
+	}
+	if dataRow == "" {
+		t.Fatalf("data row not found in:\n%s", out)
+	}
+	fields := strings.Fields(dataRow)
+	// Default columns: INDEX SHARDS SEGMENTS MAX_SHARD DOCS DELETED% SIZE.
+	// The 6th column (index 5) is DELETED% — the one we expect to
+	// render as "-" for an undefined ratio.
+	if len(fields) < 7 {
+		t.Fatalf("data row has %d fields, want >= 7: %q", len(fields), dataRow)
+	}
+	if fields[5] != "-" {
+		t.Errorf("DELETED%% = %q, want \"-\" for zero-doc index", fields[5])
+	}
+}
+
+func TestSegments_rejectsUnknownFormat(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.Segments(&buf, sampleSegmentsReport(), output.Format("ndjson")); err == nil {
+		t.Errorf("expected error on unsupported format, got nil")
+	}
+}

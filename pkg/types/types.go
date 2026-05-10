@@ -3621,3 +3621,43 @@ type LicenseStatus struct {
 	MaxNodes  int        `json:"max_nodes,omitempty"  yaml:"max_nodes,omitempty"`
 	UID       string     `json:"uid,omitempty"        yaml:"uid,omitempty"`
 }
+
+// SegmentsRequest narrows a SegmentsInspector.Segments call. Indices is
+// a comma-separated list (or empty for cluster-wide). Both ES and OS
+// share the same `GET /<indices>/_segments` endpoint and response
+// shape so one request type covers both dialects.
+type SegmentsRequest struct {
+	Indices string
+}
+
+// SegmentsReport is the neutral view of GET /<indices>/_segments
+// aggregated to the index level — what an operator triaging segment
+// counts and deleted-doc ratios actually wants. The cluster's response
+// nests segments under `indices.<name>.shards.<shardN>[].segments`;
+// SegmentsReport rolls those up so a 200-segment, 30-shard index
+// renders as a single row (with primary/replica counts kept distinct
+// for the wide view).
+type SegmentsReport struct {
+	Indices []IndexSegments `json:"indices" yaml:"indices"`
+}
+
+// IndexSegments is the per-index aggregate. SegmentsTotal counts every
+// segment record the cluster echoed (across both primary and replica
+// copies), which is what /_segments natively reports. SegmentsPrimary
+// drops replica copies — closer to "logical" segment count and the
+// number that matters for force-merge planning. DeletedDocs is the
+// sum of per-segment `deleted_docs` across primaries (matches what
+// /_cat/indices reports under `docs.deleted`). Bytes is the on-disk
+// size summed across primaries.
+type IndexSegments struct {
+	Index             string `json:"index"               yaml:"index"`
+	Shards            int    `json:"shards"              yaml:"shards"`
+	SegmentsTotal     int    `json:"segments_total"      yaml:"segments_total"`
+	SegmentsPrimary   int    `json:"segments_primary"    yaml:"segments_primary"`
+	DocsTotal         int64  `json:"docs_total"          yaml:"docs_total"`
+	DocsDeleted       int64  `json:"docs_deleted"        yaml:"docs_deleted"`
+	Bytes             int64  `json:"bytes"               yaml:"bytes"`
+	MaxSegmentsShard  int    `json:"max_segments_shard"  yaml:"max_segments_shard"`
+	Committed         int    `json:"committed,omitempty" yaml:"committed,omitempty"`
+	Searchable        int    `json:"searchable,omitempty" yaml:"searchable,omitempty"`
+}

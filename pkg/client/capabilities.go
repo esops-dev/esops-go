@@ -476,6 +476,30 @@ type RecoveryInspector interface {
 	Recovery(ctx context.Context, req types.RecoveryRequest) (types.RecoveryReport, error)
 }
 
+// SegmentsInspector wraps GET /<indices>/_segments — the per-shard
+// segment census the cluster maintains for force-merge planning and
+// deleted-doc accounting. Both ES and OS expose the same envelope
+// (`indices.<name>.shards.<shardN>[].segments.<id>`) and the per-segment
+// fields (`size_in_bytes`, `num_docs`, `deleted_docs`, `committed`,
+// `search`) line up; one capability covers both dialects.
+//
+// The capability returns an aggregated, per-index view rather than the
+// raw three-level nesting: an operator deciding whether to force-merge
+// `logs-2024-12` reaches for "how many segments does it have, and what
+// fraction of its docs are deleted" — both of which are sums over the
+// per-segment records. Adapters keep responsibility for parsing the
+// cluster's nested envelope, business code stays out of it.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - generic wrapped error on 4xx with the cluster's body in the
+//     message (typical case: a missing index when the operator
+//     narrowed to a literal name that no longer exists)
+type SegmentsInspector interface {
+	Segments(ctx context.Context, req types.SegmentsRequest) (types.SegmentsReport, error)
+}
+
 // SnapshotRepositoryManager wraps PUT/DELETE /_snapshot/<repo> — the
 // register/deregister surface for snapshot repositories. The body shape
 // (`type`, `settings`, `verify`) is identical on both dialects, so one
@@ -1402,6 +1426,7 @@ type Client struct {
 	SnapshotPrune       SnapshotPruner
 	SnapshotRepoMgr     SnapshotRepositoryManager
 	Recovery            RecoveryInspector
+	Segments            SegmentsInspector
 	ClusterSettings     ClusterSettingsManager
 	ClusterSettingsRead ClusterSettingsInspector
 	VotingExclusion     VotingExclusionManager
