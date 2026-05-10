@@ -1,8 +1,8 @@
 # index — inspect and manage indices
 
-`esops index` provides `kubectl`-style commands for day-to-day index operations: listing, opening/closing, force-merging, shrinking, rolling over aliases, managing aliases/settings/templates, and lifecycle policies (ILM on Elasticsearch, ISM on OpenSearch).
+`esops index` provides `kubectl`-style commands for day-to-day index operations: listing, inspecting recovery and segments, opening/closing, force-merging, shrinking, rolling over aliases, managing aliases/settings/templates, and lifecycle policies (ILM on Elasticsearch, ISM on OpenSearch).
 
-**Read-only commands** (`list`, `aliases list`, `settings get`, `template list/get`, `ilm`/`ism` commands) are safe on production at any time.  
+**Read-only commands** (`list`, `recovery`, `segments`, `aliases list`, `settings get`, `template list/get`, `ilm`/`ism` commands) are safe on production at any time.  
 **Mutating commands** require `--dry-run` for preview and `--i-know-this-is-prod` on protected contexts.
 
 `ilm` works only on Elasticsearch; `ism` only on OpenSearch (wrong dialect → exit code 6 with hint).
@@ -43,6 +43,74 @@ Hidden (dot-prefixed) indices excluded by default. Use `--hidden` to include the
 - `esops index list --status close --hidden`
 - `esops index list --sort size -o json | jq '.[0:10]'`
 - `esops index list -o json | jq '[.[].store_bytes] | add'`
+
+---
+
+## esops index recovery
+
+In-flight shard recoveries with progress (`GET /<indices>/_recovery`).
+
+```sh
+$ esops index recovery --index 'logs-*'
+INDEX   SHARD  ROLE  TYPE      STAGE   BYTES%  FILES%  RECOVERED
+logs-1  0      p     SNAPSHOT  INDEX   12.3%   30.0%   1.0kb
+logs-1  0      r     PEER      INDEX   5.0%    10.0%   256b
+```
+
+Use this during snapshot restores, after `index shrink`, or when watching replicas re-assign after a node returns. By default `--active-only` filters out shards that already reported `DONE` so the table shows only the work still in progress; pass `--active-only=false` to also see the cluster's recent recovery history.
+
+**Flags**
+| Flag             | Purpose                                                      |
+|------------------|--------------------------------------------------------------|
+| `--index`        | Comma-separated names or patterns (default: all indices)     |
+| `--active-only`  | Only show shards still recovering (default `true`)           |
+
+**Output formats**
+- `-o table` (default), `-o wide` (adds source snapshot tuple and raw byte/file totals)
+- `-o json` / `-o yaml`
+
+**Common use cases**
+- Watch a snapshot restore: `esops snapshot restore --wait` calls `_recovery` internally; the same data is available as a one-shot via `esops index recovery -o json`.
+- Spot a stuck shrink: `esops index recovery --index 'shrunk-*' -o wide` reveals which shards never left INIT/INDEX.
+- Pipe-friendly progress: `esops index recovery -o json | jq '.indices[].shards[] | select(.stage != "DONE")'`.
+
+Read-only and safe on production at any time.
+
+---
+
+## esops index segments
+
+Per-index segment counts and deleted-doc ratio (`GET /<indices>/_segments`).
+
+```sh
+$ esops index segments --index 'logs-*' --sort count
+INDEX            SHARDS  SEGMENTS  MAX_SHARD  DOCS    DELETED%  SIZE
+logs-2024-12-08  3       42        18         52000   3.1%      48.2mb
+logs-2024-12-07  3       30        12         51000   1.0%      46.8mb
+```
+
+Aggregates the cluster's per-shard segment census to the index level: primary segment count, deleted-doc ratio, on-disk size, and `MAX_SHARD` — the highest per-shard segment count, which is the number that matters for `optimize --max-num-segments` planning.
+
+**Flags**
+| Flag             | Purpose                                                       |
+|------------------|---------------------------------------------------------------|
+| `--index`        | Comma-separated names or patterns (default: all indices)      |
+| `--min-segments` | Hide indices with fewer than N primary segments               |
+| `--hidden`       | Include dot-prefixed system indices                           |
+| `--sort`         | `name` (default), `count`, `deleted`, `bytes`                 |
+
+**Output formats**
+- `-o table` (default), `-o wide` (adds total segment count incl. replicas, committed/searchable counts)
+- `-o json` / `-o yaml`
+
+**Common use cases**
+- Plan a force-merge: `esops index segments --min-segments 5 --sort count` surfaces fragmented indices first.
+- Spot delete-heavy indices: `esops index segments --sort deleted` ranks by deleted-doc ratio so an `--only-expunge-deletes` merge has clear targets.
+- Capacity check before a merge: `esops index segments --index logs-2024-12-08 --sort bytes -o json | jq '.indices[0].bytes'`.
+
+Read-only and safe on production at any time.
+
+**Performance note** — `_segments` returns one record per segment per shard copy, so the response grows with `indices × shards × replicas × segments`. On a busy cluster with thousands of indices and hundreds of segments per shard the response can run into tens of megabytes; pass `--index <pattern>` to narrow when you don't need a cluster-wide view. The 128 MiB response cap will fail clean rather than blow up the operator's heap if the response runs away.
 
 ---
 
