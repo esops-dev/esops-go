@@ -216,6 +216,34 @@ for i in $(seq 1 20); do
 done
 bulk "/esops-users/_bulk?refresh=wait_for" "$body"
 
+# Register a small ingest-pipeline catalogue so `pipeline list` /
+# `pipeline get` have something to render. Both Elasticsearch and
+# OpenSearch share the path and wire shape, so the same bodies work
+# against either dialect. PUT semantics are upsert — safe to re-run.
+echo ">>> registering ingest pipelines"
+http PUT /_ingest/pipeline/esops-logs-enrich '{
+  "description": "esops dev seed: normalise log level + tag the host with a datacenter id",
+  "version": 1,
+  "_meta": {"managed-by": "esops-seed"},
+  "processors": [
+    {"lowercase": {"field": "level"}},
+    {"set": {"field": "datacenter", "value": "dev-local"}},
+    {"remove": {"field": "duration_ms", "ignore_missing": true, "if": "ctx.duration_ms == null"}}
+  ],
+  "on_failure": [
+    {"set": {"field": "_ingest_error", "value": "{{ _ingest.on_failure_message }}"}}
+  ]
+}'
+
+http PUT /_ingest/pipeline/esops-products-rename '{
+  "description": "esops dev seed: rename legacy product fields to the current schema",
+  "version": 2,
+  "processors": [
+    {"rename": {"field": "title", "target_field": "name", "ignore_missing": true}},
+    {"rename": {"field": "cost",  "target_field": "price", "ignore_missing": true}}
+  ]
+}'
+
 if (( WITH_UNASSIGNED )); then
   # Over-replicate on purpose: 3 replicas + 1 primary = 4 copies needed.
   # ES dev (2 data nodes) places 2 copies, leaves 2 unassigned.

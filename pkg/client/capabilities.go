@@ -1447,6 +1447,34 @@ type LicenseInspector interface {
 	License(ctx context.Context) (types.LicenseStatus, error)
 }
 
+// IngestPipelineInspector exposes the read-only ingest-pipeline surface
+// — GET /_ingest/pipeline[/<id>]. Both Elasticsearch and OpenSearch
+// share the endpoint path and the response envelope
+// (`{"<id>": {"description":..., "processors":[...], ...}}`), so one
+// capability covers both dialects with the same adapter shape.
+//
+// ListPipelines returns every configured pipeline (sorted by name in
+// the business layer for stable output). Names is a comma-joined
+// filter forwarded to the cluster at the path segment — both dialects
+// honour it. An empty list returns every pipeline; a 404 from the
+// cluster (no pipelines configured at all) is normalised to an empty
+// slice rather than a not-found error.
+//
+// GetPipeline returns one pipeline by literal id, or a wrapped
+// ErrNotFound the caller can match on. Patterns are rejected in the
+// business layer — same convention as policy get.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrNotFound (wrapped) from GetPipeline on a 404
+//   - generic wrapped error on other 4xx/5xx with the cluster's body in
+//     the message
+type IngestPipelineInspector interface {
+	ListPipelines(ctx context.Context, names []string) ([]types.IngestPipeline, error)
+	GetPipeline(ctx context.Context, name string) (types.IngestPipeline, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -1515,4 +1543,5 @@ type Client struct {
 	RestoreHistory      SnapshotRestoreHistoryInspector
 	RemoteClusters      RemoteClusterInspector
 	License             LicenseInspector
+	IngestPipeline      IngestPipelineInspector
 }

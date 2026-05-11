@@ -4238,3 +4238,156 @@ func indexCacheClearTable(w io.Writer, r types.IndexCacheClearResult, wide bool)
 	}
 	return nil
 }
+
+// IngestPipelines renders `esops pipeline list`. Table mode prints
+// name + processor count + description; wide adds version and the
+// comma-joined list of processor types so operators can spot e.g. a
+// rogue `set` processor without dropping into --output json. JSON,
+// NDJSON and YAML emit the neutral IngestPipeline slice directly.
+func IngestPipelines(w io.Writer, rows []types.IngestPipeline, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return ingestPipelinesTable(w, rows, true)
+	case FormatTable, "":
+		return ingestPipelinesTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ingestPipelinesTable(w io.Writer, rows []types.IngestPipeline, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tVERSION\tPROCESSORS\tON_FAILURE\tTYPES\tDESCRIPTION")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tPROCESSORS\tDESCRIPTION")
+	}
+	for _, r := range rows {
+		version := "-"
+		if r.Version > 0 {
+			version = fmt.Sprintf("%d", r.Version)
+		}
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\n",
+				r.Name,
+				version,
+				len(r.Processors),
+				len(r.OnFailure),
+				dashIfEmpty(strings.Join(processorTypes(r.Processors), ",")),
+				dashIfEmpty(truncate(r.Description, 80)),
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n",
+				r.Name,
+				len(r.Processors),
+				dashIfEmpty(truncate(r.Description, 80)),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// IngestPipeline renders a single ingest pipeline — `esops pipeline
+// get`. Table mode is a header line followed by an indented JSON
+// dump of the processor chain (and on_failure handlers, when set);
+// wide adds the _meta block. JSON/YAML emit the neutral
+// IngestPipeline shape directly.
+func IngestPipeline(w io.Writer, p types.IngestPipeline, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(p)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(p)
+	case FormatWide:
+		return ingestPipelineDetail(w, p, true)
+	case FormatTable, "":
+		return ingestPipelineDetail(w, p, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func ingestPipelineDetail(w io.Writer, p types.IngestPipeline, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "NAME\tVERSION\tPROCESSORS\tON_FAILURE\tDESCRIPTION")
+	version := "-"
+	if p.Version > 0 {
+		version = fmt.Sprintf("%d", p.Version)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%s\t%d\t%d\t%s\n",
+		p.Name,
+		version,
+		len(p.Processors),
+		len(p.OnFailure),
+		dashIfEmpty(p.Description),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if len(p.Processors) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "PROCESSORS")
+		buf, err := json.MarshalIndent(p.Processors, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	if len(p.OnFailure) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "ON_FAILURE")
+		buf, err := json.MarshalIndent(p.OnFailure, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	if wide && len(p.Meta) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "META")
+		buf, err := json.MarshalIndent(p.Meta, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	return nil
+}
+
+// processorTypes walks an []map[string]any processor chain and pulls
+// the per-processor top-level key (the processor type — "set",
+// "grok", "remove", …). Order is preserved so an operator scanning a
+// wide-mode row sees the pipeline's actual order, not an alphabetical
+// summary that hides "set runs after grok".
+func processorTypes(procs []map[string]any) []string {
+	out := make([]string, 0, len(procs))
+	for _, p := range procs {
+		for k := range p {
+			out = append(out, k)
+			break // each processor wraps exactly one type key
+		}
+	}
+	return out
+}

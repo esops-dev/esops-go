@@ -3760,3 +3760,30 @@ type IndexSegments struct {
 	Committed         int    `json:"committed,omitempty" yaml:"committed,omitempty"`
 	Searchable        int    `json:"searchable,omitempty" yaml:"searchable,omitempty"`
 }
+
+// IngestPipeline is the neutral view of an ingest pipeline as reported
+// by GET /_ingest/pipeline[/<id>]. Both Elasticsearch and OpenSearch
+// share the same envelope ({"<id>": {"description":..., "processors":
+// [...], "version":..., "_meta":..., "on_failure":[...]}}), so one
+// shape covers both dialects.
+//
+// Processors and OnFailure are preserved as map[string]any slices: the
+// processor set differs across products and versions (ES has
+// `enrich`, OS has `text_embedding`, both add new ones in minor
+// versions), so freezing a typed schema for them would force a lossy
+// translation. The renderer pretty-prints the slice; structured
+// consumers (--output json/yaml) get the same shape the cluster
+// returned.
+type IngestPipeline struct {
+	Name string `json:"name" yaml:"name"`
+
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+
+	Version int64 `json:"version,omitempty" yaml:"version,omitempty"`
+
+	Meta map[string]any `json:"meta,omitempty" yaml:"meta,omitempty"`
+
+	Processors []map[string]any `json:"processors,omitempty" yaml:"processors,omitempty"`
+
+	OnFailure []map[string]any `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`
+}

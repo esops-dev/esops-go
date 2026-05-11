@@ -3297,3 +3297,141 @@ func TestSnapshotPolicyExecute_emptySnapshotRendersDash(t *testing.T) {
 		t.Errorf("expected '-' for empty SnapshotName:\n%s", buf.String())
 	}
 }
+
+func sampleIngestPipelines() []types.IngestPipeline {
+	return []types.IngestPipeline{
+		{
+			Name:        "esops-logs-enrich",
+			Description: "normalise log level",
+			Version:     1,
+			Processors: []map[string]any{
+				{"lowercase": map[string]any{"field": "level"}},
+				{"set": map[string]any{"field": "datacenter", "value": "dev-local"}},
+			},
+			OnFailure: []map[string]any{
+				{"set": map[string]any{"field": "_ingest_error", "value": "boom"}},
+			},
+			Meta: map[string]any{"owner": "platform"},
+		},
+		{
+			Name:        "audit-tagger",
+			Description: "tag audit events",
+			Processors: []map[string]any{
+				{"set": map[string]any{"field": "audit", "value": true}},
+			},
+		},
+	}
+}
+
+func TestIngestPipelines_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IngestPipelines(&buf, sampleIngestPipelines(), output.FormatTable); err != nil {
+		t.Fatalf("IngestPipelines: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "PROCESSORS", "DESCRIPTION", "esops-logs-enrich", "audit-tagger"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIngestPipelines_wideIncludesProcessorTypes(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IngestPipelines(&buf, sampleIngestPipelines(), output.FormatWide); err != nil {
+		t.Fatalf("IngestPipelines wide: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"VERSION", "TYPES", "lowercase,set", "ON_FAILURE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIngestPipelines_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IngestPipelines(&buf, sampleIngestPipelines(), output.FormatNDJSON); err != nil {
+		t.Fatalf("IngestPipelines ndjson: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), buf.String())
+	}
+	for i, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Errorf("line %d not JSON: %v\n%s", i, err, line)
+		}
+	}
+}
+
+func TestIngestPipelines_jsonIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.IngestPipelines(&buf, sampleIngestPipelines(), output.FormatJSON); err != nil {
+		t.Fatalf("IngestPipelines json: %v", err)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0]["name"] != "esops-logs-enrich" {
+		t.Errorf("got[0].name = %v, want esops-logs-enrich", got[0]["name"])
+	}
+}
+
+func TestIngestPipeline_detailIncludesProcessorBlock(t *testing.T) {
+	p := sampleIngestPipelines()[0]
+	var buf bytes.Buffer
+	if err := output.IngestPipeline(&buf, p, output.FormatTable); err != nil {
+		t.Fatalf("IngestPipeline: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", p.Name, "PROCESSORS", "lowercase", "ON_FAILURE", "_ingest_error"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("detail missing %q:\n%s", want, out)
+		}
+	}
+	// _meta is wide-only by design — should not appear in default
+	// table mode.
+	if strings.Contains(out, "META") {
+		t.Errorf("META block leaked into default table; should be wide-only:\n%s", out)
+	}
+}
+
+func TestIngestPipeline_wideIncludesMeta(t *testing.T) {
+	p := sampleIngestPipelines()[0]
+	var buf bytes.Buffer
+	if err := output.IngestPipeline(&buf, p, output.FormatWide); err != nil {
+		t.Fatalf("IngestPipeline wide: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "META") || !strings.Contains(out, "platform") {
+		t.Errorf("wide detail missing META block / owner=platform:\n%s", out)
+	}
+}
+
+func TestIngestPipeline_yamlIsValid(t *testing.T) {
+	p := sampleIngestPipelines()[0]
+	var buf bytes.Buffer
+	if err := output.IngestPipeline(&buf, p, output.FormatYAML); err != nil {
+		t.Fatalf("IngestPipeline yaml: %v", err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid YAML: %v\n%s", err, buf.String())
+	}
+	if m["name"] != "esops-logs-enrich" {
+		t.Errorf("name = %v, want esops-logs-enrich", m["name"])
+	}
+}
+
+func TestIngestPipelines_rejectsUnknownFormat(t *testing.T) {
+	err := output.IngestPipelines(&bytes.Buffer{}, sampleIngestPipelines(), output.Format("bogus"))
+	if err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}
