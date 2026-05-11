@@ -2827,6 +2827,234 @@ func SnapshotDeregister(w io.Writer, r types.SnapshotRepositoryDeregisterResult,
 	}
 }
 
+// SnapshotPolicies renders the cluster's snapshot policy list for
+// `esops snapshot policy list`. Default table shows name, repository,
+// schedule and the operator-scannable last-success age; wide adds
+// modified date and next-execution time. JSON/YAML emit the neutral
+// []SnapshotPolicy shape directly. NDJSON streams one record per line.
+func SnapshotPolicies(w io.Writer, rows []types.SnapshotPolicy, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return snapshotPoliciesTable(w, rows, true)
+	case FormatTable, "":
+		return snapshotPoliciesTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotPoliciesTable(w io.Writer, rows []types.SnapshotPolicy, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tREPOSITORY\tSCHEDULE\tENABLED\tVERSION\tMODIFIED\tLAST_SUCCESS\tNEXT_RUN")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tREPOSITORY\tSCHEDULE\tENABLED\tLAST_SUCCESS")
+	}
+	for _, r := range rows {
+		version := "-"
+		if r.Version > 0 {
+			version = fmt.Sprintf("%d", r.Version)
+		}
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\t%s\n",
+				r.Name,
+				dashIfEmpty(r.Repository),
+				dashIfEmpty(r.Schedule),
+				r.Enabled,
+				version,
+				formatCreation(r.ModifiedDateMillis),
+				dashIfEmpty(snapshotPolicyAge(r.LastSuccessMillis)),
+				formatCreation(r.NextExecutionMillis),
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\n",
+				r.Name,
+				dashIfEmpty(r.Repository),
+				dashIfEmpty(r.Schedule),
+				r.Enabled,
+				dashIfEmpty(snapshotPolicyAge(r.LastSuccessMillis)),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// SnapshotPolicy renders a single snapshot policy — `esops snapshot
+// policy get`. Table format is a header line; wide appends the full
+// policy body as indented JSON so an operator scanning a policy
+// definition doesn't have to reach for `--output json`. JSON/YAML
+// emit the neutral SnapshotPolicy shape directly.
+func SnapshotPolicy(w io.Writer, p types.SnapshotPolicy, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(p)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(p)
+	case FormatWide:
+		return snapshotPolicyDetail(w, p, true)
+	case FormatTable, "":
+		return snapshotPolicyDetail(w, p, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func snapshotPolicyDetail(w io.Writer, p types.SnapshotPolicy, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "NAME\tREPOSITORY\tSCHEDULE\tENABLED\tVERSION\tMODIFIED\tLAST_SUCCESS\tNEXT_RUN")
+	version := "-"
+	if p.Version > 0 {
+		version = fmt.Sprintf("%d", p.Version)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\t%s\n",
+		p.Name,
+		dashIfEmpty(p.Repository),
+		dashIfEmpty(p.Schedule),
+		p.Enabled,
+		version,
+		formatCreation(p.ModifiedDateMillis),
+		dashIfEmpty(snapshotPolicyAge(p.LastSuccessMillis)),
+		formatCreation(p.NextExecutionMillis),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if !wide {
+		return nil
+	}
+	if len(p.Definition) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "POLICY")
+		buf, err := json.MarshalIndent(p.Definition, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", string(buf))
+	}
+	return nil
+}
+
+// SnapshotPolicyPut renders the outcome of `esops snapshot policy put`.
+// One-line header; JSON/YAML emit the neutral
+// SnapshotPolicyPutResult shape directly.
+func SnapshotPolicyPut(w io.Writer, r types.SnapshotPolicyPutResult, f Format) error {
+	return snapshotPolicyAckResult(w, r.Action, r.DryRun, r.Name, r.Acknowledged, f)
+}
+
+// SnapshotPolicyDelete mirrors SnapshotPolicyPut for the delete path.
+func SnapshotPolicyDelete(w io.Writer, r types.SnapshotPolicyDeleteResult, f Format) error {
+	return snapshotPolicyAckResult(w, r.Action, r.DryRun, r.Name, r.Acknowledged, f)
+}
+
+// SnapshotPolicyExecute renders `snapshot policy execute`. The table
+// adds a SNAPSHOT column for the synthesised snapshot name ES SLM
+// returns; OS SM leaves it empty (the snapshot lands on the next cron
+// tick). JSON/YAML emit the neutral SnapshotPolicyExecuteResult.
+func SnapshotPolicyExecute(w io.Writer, r types.SnapshotPolicyExecuteResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tNAME\tSNAPSHOT\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%s\t%t\n",
+			r.Action, r.DryRun, dashIfEmpty(r.Name),
+			dashIfEmpty(r.SnapshotName), r.Acknowledged,
+		)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// snapshotPolicyAckResult is the shared one-row renderer for the put/
+// delete result shapes. Both share the same five fields and table
+// columns; consolidating saves two near-identical renderers and the
+// drift their per-fix duplication invites.
+func snapshotPolicyAckResult(w io.Writer, action string, dryRun bool, name string, ack bool, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]any{
+			"action": action, "dry_run": dryRun, "name": name, "acknowledged": ack,
+		})
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(map[string]any{
+			"action": action, "dry_run": dryRun, "name": name, "acknowledged": ack,
+		})
+	case FormatWide, FormatTable, "":
+		hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(hw, "ACTION\tDRY_RUN\tNAME\tACKNOWLEDGED")
+		_, _ = fmt.Fprintf(hw, "%s\t%t\t%s\t%t\n",
+			action, dryRun, dashIfEmpty(name), ack)
+		return hw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// snapshotPolicyAge renders an epoch-millis "last success" timestamp
+// as a compact age — same idea as ageSince in the ES adapter, kept
+// local so the renderer doesn't reach across the public API line.
+// Zero/negative ms returns "" so the caller's dashIfEmpty helper
+// renders "-".
+func snapshotPolicyAge(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	d := time.Since(time.UnixMilli(ms))
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d >= 24*time.Hour:
+		days := int(d / (24 * time.Hour))
+		hours := int((d % (24 * time.Hour)) / time.Hour)
+		return fmt.Sprintf("%dd%dh", days, hours)
+	case d >= time.Hour:
+		hours := int(d / time.Hour)
+		minutes := int((d % time.Hour) / time.Minute)
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	default:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+}
+
 // SnapshotAnalyze renders the cluster's repository _analyze report. Default
 // table shows the operator-facing counts (blob count, concurrency, read
 // nodes); wide adds the coordinating node. JSON/YAML emit the neutral

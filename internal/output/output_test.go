@@ -3151,3 +3151,149 @@ func TestSegments_rejectsUnknownFormat(t *testing.T) {
 		t.Errorf("expected error on unsupported format, got nil")
 	}
 }
+
+func sampleSnapshotPolicies() []types.SnapshotPolicy {
+	// Two policies covering the table columns: enabled+schedule on
+	// one, no-schedule fallback on the other. Use a fresh timestamp
+	// for LastSuccessMillis on the first so the age renderer produces
+	// a non-empty cell.
+	now := time.Now().UnixMilli()
+	return []types.SnapshotPolicy{
+		{
+			Name:                "nightly-s3",
+			Repository:          "s3-prod",
+			Schedule:            "0 30 1 * * ?",
+			Enabled:             true,
+			Version:             3,
+			ModifiedDateMillis:  now - 86_400_000,
+			LastSuccessMillis:   now - 60_000,
+			NextExecutionMillis: now + 3_600_000,
+		},
+		{Name: "hourly-fs", Repository: "local-fs", Enabled: false},
+	}
+}
+
+func TestSnapshotPolicies_tableHasExpectedColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicies(&buf, sampleSnapshotPolicies(), output.FormatTable); err != nil {
+		t.Fatalf("SnapshotPolicies: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "REPOSITORY", "SCHEDULE", "ENABLED", "LAST_SUCCESS", "nightly-s3", "hourly-fs"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotPolicies_wideAddsExtraColumns(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicies(&buf, sampleSnapshotPolicies(), output.FormatWide); err != nil {
+		t.Fatalf("SnapshotPolicies: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"VERSION", "MODIFIED", "NEXT_RUN"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wide table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotPolicies_jsonRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicies(&buf, sampleSnapshotPolicies(), output.FormatJSON); err != nil {
+		t.Fatalf("SnapshotPolicies: %v", err)
+	}
+	var got []types.SnapshotPolicy
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "nightly-s3" {
+		t.Errorf("round-trip: %+v", got)
+	}
+}
+
+func TestSnapshotPolicies_ndjsonOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicies(&buf, sampleSnapshotPolicies(), output.FormatNDJSON); err != nil {
+		t.Fatalf("SnapshotPolicies: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 lines, got %d:\n%s", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		var p types.SnapshotPolicy
+		if err := json.Unmarshal([]byte(line), &p); err != nil {
+			t.Errorf("line not valid JSON: %v -- %q", err, line)
+		}
+	}
+}
+
+func TestSnapshotPolicy_wideEmbedsPolicyBody(t *testing.T) {
+	p := types.SnapshotPolicy{
+		Name:       "nightly-s3",
+		Repository: "s3-prod",
+		Schedule:   "0 30 1 * * ?",
+		Enabled:    true,
+		Definition: map[string]any{
+			"schedule":   "0 30 1 * * ?",
+			"repository": "s3-prod",
+			"config":     map[string]any{"indices": []string{"esops-*"}},
+		},
+	}
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicy(&buf, p, output.FormatWide); err != nil {
+		t.Fatalf("SnapshotPolicy: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "POLICY") || !strings.Contains(out, "schedule") {
+		t.Errorf("wide should embed policy body:\n%s", out)
+	}
+}
+
+func TestSnapshotPolicyPut_yamlIsValid(t *testing.T) {
+	r := types.SnapshotPolicyPutResult{Action: "policy-put", Name: "nightly", Acknowledged: true}
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicyPut(&buf, r, output.FormatYAML); err != nil {
+		t.Fatalf("SnapshotPolicyPut: %v", err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("not YAML: %v", err)
+	}
+	if got["name"] != "nightly" || got["acknowledged"] != true {
+		t.Errorf("round-trip: %+v", got)
+	}
+}
+
+func TestSnapshotPolicyExecute_tableHasSnapshotColumn(t *testing.T) {
+	r := types.SnapshotPolicyExecuteResult{
+		Action: "policy-execute", Name: "nightly",
+		SnapshotName: "nightly-2026.05.10-abc", Acknowledged: true,
+	}
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicyExecute(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("SnapshotPolicyExecute: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"SNAPSHOT", "nightly-2026.05.10-abc", "nightly"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotPolicyExecute_emptySnapshotRendersDash(t *testing.T) {
+	// OS SM leaves SnapshotName empty (the next cron tick produces the
+	// snapshot); the table must render "-" rather than a blank cell so
+	// captured output stays grep-friendly.
+	r := types.SnapshotPolicyExecuteResult{Action: "policy-execute", Name: "nightly", Acknowledged: true}
+	var buf bytes.Buffer
+	if err := output.SnapshotPolicyExecute(&buf, r, output.FormatTable); err != nil {
+		t.Fatalf("SnapshotPolicyExecute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "-") {
+		t.Errorf("expected '-' for empty SnapshotName:\n%s", buf.String())
+	}
+}
