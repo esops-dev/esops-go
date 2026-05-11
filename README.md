@@ -40,6 +40,7 @@ esops-stuck-replicas  yellow  open    1    3    1     0        4.2kb  4.2kb     
 * **Migrating databases** - Pre-flight Check, Mapping Plan One with Incompatibility Diffs, Task based Reindex With Resume + Auto Throttle, Doc Count And Sampled Checksum Verify, Atomic Alias-swap Cutover
 * **Manage your Indexes** - List, Optimise, Rollover, Shrink, Open/Close, Aliases, Settings and Template ILM (ES) and ISM (OS) Policies 
 * **Manage your Snapshots**  - List, Create, Verify, Restore, Retention Prune 
+* **Inspect Ingest Pipelines** - List, Get (Elasticsearch and OpenSearch)
 * **Multiple Settings** - Named contexts like kubectl's with per-context protection levels; Explicit acknowledgement is needed for destructive operations against prod context.
 * **Authentication** - Basic, API key, bearer, mTLS, AWS SigV4 
 
@@ -135,6 +136,7 @@ See [docs/](docs/) for per-command reference.
 - [docs/index.md](docs/index.md) — index management
 - [docs/ops.md](docs/ops.md) — cluster operations
 - [docs/snapshot.md](docs/snapshot.md) — snapshot and repository inspection
+- [docs/pipeline.md](docs/pipeline.md) — ingest pipeline inspection
 - [docs/migrate.md](docs/migrate.md) — cross-cluster reindex pre-flight and planning
 - [docs/config.md](docs/config.md) — config schema, contexts, secrets
 - [docs/completion.md](docs/completion.md) — shell completion

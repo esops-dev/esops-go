@@ -8,12 +8,89 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
-	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
-func registerCommand() *cli.Command {
+// repositoryCommand is the parent for `esops snapshot repository
+// <list|register|remove>`. All repository management lives here so
+// the top-level `esops snapshot` tree stays focused on *snapshots*
+// and repository churn doesn't crowd it.
+//
+// `register` and `remove` mutate cluster state (PUT/DELETE
+// /_snapshot/<repo>); `list` is read-only.
+func repositoryCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "repository",
+		Usage: "Register, remove, or list snapshot repositories",
+		Commands: []*cli.Command{
+			repositoryListCommand(),
+			repositoryRegisterCommand(),
+			repositoryRemoveCommand(),
+		},
+	}
+}
+
+// repositoryListCommand is `esops snapshot repository list`. Mirrors
+// the no-flag form of `snapshot list` — the latter dispatches to
+// repository listing by historical accident, this is the spec-aligned
+// home of the verb. By default redacts known-secret keys
+// (access_key, secret_key, etc.) from the settings cell — a captured
+// table from a CI run is safe to paste into a ticket without leaking
+// repository credentials.
+func repositoryListCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "list",
+		Usage: "List registered snapshot repositories",
+		Description: `List the cluster's registered snapshot repositories via
+GET /_snapshot. The default table shows name and type; -o wide adds a
+flat key=value preview of each repository's settings.
+
+By default redacts known-secret keys (access_key, secret_key,
+client_secret, …) from the settings cell. Pass --show-secrets to
+print the raw values; useful for reproducing a config and dangerous
+to feed into shell history or shared captures.
+
+Read-only and safe to run against a prod-protected context at any
+time.`,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "repository",
+				Usage: "Limit to specific repository name(s), comma-separated",
+			},
+			&cli.BoolFlag{
+				Name:  "show-secrets",
+				Usage: "Print repository settings verbatim including credential keys (default: redacted)",
+			},
+		},
+		Action: runRepositoryList,
+	}
+}
+
+func runRepositoryList(ctx context.Context, cmd *cli.Command) error {
+	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+		SupportedFormats: cmdsetup.FormatsStreaming,
+	})
+	if err != nil {
+		return err
+	}
+
+	rows, err := esopssnapshot.ListRepositories(ctx, s.Client.Snapshot, types.SnapshotRepositoryFilter{
+		Repository: cmd.String("repository"),
+	})
+	if err != nil {
+		return err
+	}
+	if !cmd.Bool("show-secrets") {
+		rows = esopssnapshot.RedactRepositorySettings(rows)
+	}
+	s.Log("snapshot.repository.list", "repositories", len(rows))
+	return output.SnapshotRepositories(os.Stdout, rows, s.Format)
+}
+
+func repositoryRegisterCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "register",
 		Usage: "Register a snapshot repository",
@@ -54,11 +131,11 @@ context, --i-know-this-is-prod is required.`,
 				Usage: "Skip the cluster's post-register connectivity check (verify=false)",
 			},
 		},
-		Action: runRegister,
+		Action: runRepositoryRegister,
 	}
 }
 
-func runRegister(ctx context.Context, cmd *cli.Command) error {
+func runRepositoryRegister(ctx context.Context, cmd *cli.Command) error {
 	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
 		Destructive:      true,
 		SupportedFormats: cmdsetup.FormatsStandard,
@@ -102,7 +179,7 @@ func runRegister(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	s.Log("snapshot.register",
+	s.Log("snapshot.repository.register",
 		"repository", result.Repository,
 		"type", result.Type,
 		"dry_run", result.DryRun,
@@ -111,14 +188,14 @@ func runRegister(ctx context.Context, cmd *cli.Command) error {
 	return output.SnapshotRegister(os.Stdout, result, s.Format)
 }
 
-func deregisterCommand() *cli.Command {
+func repositoryRemoveCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "deregister",
+		Name:  "remove",
 		Usage: "Remove a snapshot repository registration",
-		Description: `Deregister a snapshot repository via DELETE /_snapshot/<repo>.
+		Description: `Remove a snapshot repository via DELETE /_snapshot/<repo>.
 
 Removes the registration only — does not touch the snapshots stored in
-the backing store. The cluster refuses to deregister a repository with
+the backing store. The cluster refuses to remove a repository with
 in-progress snapshots; that 4xx is surfaced verbatim.
 
 Mutates cluster state. Use --dry-run first; against a prod-protected
@@ -127,14 +204,14 @@ context, --i-know-this-is-prod is required.`,
 			&cli.StringFlag{
 				Name:     "repository",
 				Required: true,
-				Usage:    "Repository name to deregister (literal, no patterns)",
+				Usage:    "Repository name to remove (literal, no patterns)",
 			},
 		},
-		Action: runDeregister,
+		Action: runRepositoryRemove,
 	}
 }
 
-func runDeregister(ctx context.Context, cmd *cli.Command) error {
+func runRepositoryRemove(ctx context.Context, cmd *cli.Command) error {
 	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
 		Destructive:      true,
 		SupportedFormats: cmdsetup.FormatsStandard,
@@ -151,7 +228,7 @@ func runDeregister(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	s.Log("snapshot.deregister",
+	s.Log("snapshot.repository.remove",
 		"repository", result.Repository,
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,
@@ -179,4 +256,3 @@ func parseKeyValueSettings(values []string) (map[string]any, error) {
 	}
 	return out, nil
 }
-

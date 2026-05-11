@@ -14,23 +14,21 @@ import (
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
-// listCommand is `esops snapshot list`. By default lists registered
-// repositories; with --repository (or --all) it lists snapshots inside
-// matching repos. Two operator-facing questions ("what backups exist?"
-// and "where can backups go?") merit one verb because both wear the
-// same hat — read-only inventory of the cluster's snapshot surface.
+// listCommand is `esops snapshot list` — list snapshots inside one or
+// more repositories. The parallel verb `snapshot repository list`
+// lists registered repositories; the no-flag form here used to fall
+// back to repository listing, but that hand-rolled overload was
+// removed when `snapshot repository` landed. A bare `snapshot list`
+// now refuses with a usage error pointing at the right verb — two
+// verbs, two behaviours, no surprises.
 func listCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
-		Usage: "List snapshot repositories or snapshots",
-		Description: `Without --repository, lists registered snapshot repositories.
-With --repository <name|pattern>, lists snapshots in matching repos.
-Use --all to fan out across every repository.
-
-By default the repository listing redacts known-secret keys
-(access_key, secret_key, etc.) from the settings cell. Pass
---show-secrets to include the raw values; useful for reproducing a
-config and dangerous to feed into shell history or shared captures.
+		Usage: "List snapshots in one or more repositories",
+		Description: `List snapshots in matching repositories. Requires --repository
+<name|pattern> to narrow the scope, or --all to fan out across every
+registered repository. To list registered repositories themselves use
+'esops snapshot repository list'.
 
 --slim asks the cluster for the lightweight snapshot envelope
 (?verbose=false on ES 7.15+/OS 2.x). Drops indices, per-shard counters
@@ -72,10 +70,6 @@ Read-only and safe to run against a prod-protected context at any time.`,
 				Name:  "slim",
 				Usage: "Ask the cluster for the lightweight envelope (verbose=false). ES 7.15+ / OS 2.x.",
 			},
-			&cli.BoolFlag{
-				Name:  "show-secrets",
-				Usage: "Print repository settings verbatim including credential keys (default: redacted)",
-			},
 		},
 		Action: runList,
 	}
@@ -86,9 +80,17 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 	all := cmd.Bool("all")
 	snapshotPattern := cmd.String("snapshot")
 
-	// --snapshot only makes sense in snapshot-listing mode; refuse it in
-	// the default repository-listing mode so a typo surfaces here rather
-	// than producing a confusing "no rows" output.
+	// `snapshot list` lists snapshots; repositories have their own
+	// verb (`snapshot repository list`). A bare `snapshot list` is
+	// therefore a usage error rather than a silent repo-listing
+	// fallback, so muscle memory built around the old behaviour
+	// surfaces loudly instead of producing different data.
+	if repository == "" && !all {
+		return client.UsageError("snapshot list requires --repository or --all; use 'esops snapshot repository list' to list registered repositories")
+	}
+	// --snapshot only makes sense in snapshot-listing mode; refuse it
+	// without --repository/--all so a typo surfaces here rather than
+	// producing a confusing "no rows" output.
 	if snapshotPattern != "" && repository == "" && !all {
 		return client.UsageError("--snapshot requires --repository or --all")
 	}
@@ -100,22 +102,7 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	if repository == "" && !all {
-		return runRepositoriesList(ctx, cmd, s)
-	}
 	return runSnapshotsList(ctx, cmd, s, repository, snapshotPattern)
-}
-
-func runRepositoriesList(ctx context.Context, cmd *cli.Command, s cmdsetup.Setup) error {
-	rows, err := esopssnapshot.ListRepositories(ctx, s.Client.Snapshot, types.SnapshotRepositoryFilter{})
-	if err != nil {
-		return err
-	}
-	if !cmd.Bool("show-secrets") {
-		rows = esopssnapshot.RedactRepositorySettings(rows)
-	}
-	s.Log("snapshot.list.repositories", "repositories", len(rows))
-	return output.SnapshotRepositories(os.Stdout, rows, s.Format)
 }
 
 func runSnapshotsList(ctx context.Context, cmd *cli.Command, s cmdsetup.Setup, repository, snapshotPattern string) error {

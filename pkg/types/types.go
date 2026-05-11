@@ -2315,6 +2315,105 @@ type SnapshotRepositoryDeregisterResult struct {
 	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
 }
 
+// SnapshotPolicy is the neutral view of one scheduled snapshot policy.
+// On Elasticsearch this maps to GET /_slm/policy/<name> (Snapshot
+// Lifecycle Management); on OpenSearch to
+// GET /_plugins/_sm/policies/<name> (Snapshot Management plugin).
+//
+// The body shapes between the two products differ enough that the
+// neutral type focuses on metadata that always comes back, while
+// Definition carries the cluster's policy block verbatim so renderers
+// can pretty-print it without re-parsing. An ES "snapshot create
+// schedule" and an OS "creation+deletion schedule" are different
+// concepts and we don't translate them — `--output json/yaml` is the
+// faithful view, and the table renders the operator-scannable summary.
+//
+// Repository is the snapshot repository the policy targets — populated
+// from the policy body when present (top-level `repository` on ES,
+// `snapshot_config.repository` on OS) so a captured table tells the
+// operator where snapshots will land without drilling into JSON.
+//
+// Schedule is a human-readable rendering of the policy's primary cron
+// (ES: top-level `schedule`; OS: `creation.schedule.cron.expression`).
+// Empty when the cluster doesn't surface one.
+//
+// LastSuccessMillis / LastFailureMillis / NextExecutionMillis are
+// populated when the cluster reports them — ES SLM reports last_success
+// and next_execution natively, OS SM exposes them on per-policy GET
+// inside `last_updated_time` and the metadata block. Missing values
+// surface as zero.
+type SnapshotPolicy struct {
+	Name                string         `json:"name"                            yaml:"name"`
+	Repository          string         `json:"repository,omitempty"            yaml:"repository,omitempty"`
+	Schedule            string         `json:"schedule,omitempty"              yaml:"schedule,omitempty"`
+	Enabled             bool           `json:"enabled"                         yaml:"enabled"`
+	Version             int64          `json:"version,omitempty"               yaml:"version,omitempty"`
+	ModifiedDateMillis  int64          `json:"modified_date_millis,omitempty"  yaml:"modified_date_millis,omitempty"`
+	LastSuccessMillis   int64          `json:"last_success_millis,omitempty"   yaml:"last_success_millis,omitempty"`
+	LastFailureMillis   int64          `json:"last_failure_millis,omitempty"   yaml:"last_failure_millis,omitempty"`
+	NextExecutionMillis int64          `json:"next_execution_millis,omitempty" yaml:"next_execution_millis,omitempty"`
+	Definition          map[string]any `json:"definition,omitempty"            yaml:"definition,omitempty"`
+}
+
+// SnapshotPolicyPutRequest is the input to PUT /_slm/policy/<name> on ES
+// or PUT /_plugins/_sm/policies/<name> on OS. Body is the raw JSON the
+// operator handed in — the cluster validates the inner shape, esops
+// only checks that the body is a JSON object so the cluster's reasoning
+// stays the source of truth.
+type SnapshotPolicyPutRequest struct {
+	Name string
+	Body []byte
+}
+
+// SnapshotPolicyPutResult mirrors the cluster's create/update echo.
+// Both dialects return an acknowledged-style response; OS additionally
+// returns the stored policy with fresh sequence tokens (dropped here —
+// `policy get` retrieves them).
+type SnapshotPolicyPutResult struct {
+	Action       string `json:"action"        yaml:"action"`
+	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
+	Name         string `json:"name"          yaml:"name"`
+	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// SnapshotPolicyDeleteRequest is the input to DELETE /_slm/policy/<name>
+// (ES) or DELETE /_plugins/_sm/policies/<name> (OS). Name is a literal
+// policy name — neither product accepts patterns on the delete path.
+type SnapshotPolicyDeleteRequest struct {
+	Name string
+}
+
+// SnapshotPolicyDeleteResult mirrors the cluster's delete echo.
+type SnapshotPolicyDeleteResult struct {
+	Action       string `json:"action"        yaml:"action"`
+	DryRun       bool   `json:"dry_run"       yaml:"dry_run"`
+	Name         string `json:"name"          yaml:"name"`
+	Acknowledged bool   `json:"acknowledged"  yaml:"acknowledged"`
+}
+
+// SnapshotPolicyExecuteRequest is the input to a "run-now" call:
+// POST /_slm/policy/<name>/_execute on ES, POST
+// /_plugins/_sm/policies/<name>/_start on OS. The two dialects differ
+// in semantics — ES synthesises a one-shot snapshot from the policy
+// template; OS toggles the policy's enabled flag — but both serve the
+// same operator intent: "kick this policy now".
+type SnapshotPolicyExecuteRequest struct {
+	Name string
+}
+
+// SnapshotPolicyExecuteResult is the normalised result of an execute
+// call. SnapshotName carries the cluster's synthesised snapshot name
+// when ES returns one; on OS it is empty (the plugin returns no
+// snapshot name on _start). Action is "policy-execute" so a captured
+// JSON record stays self-describing.
+type SnapshotPolicyExecuteResult struct {
+	Action       string `json:"action"                 yaml:"action"`
+	DryRun       bool   `json:"dry_run"                yaml:"dry_run"`
+	Name         string `json:"name"                   yaml:"name"`
+	SnapshotName string `json:"snapshot_name,omitempty" yaml:"snapshot_name,omitempty"`
+	Acknowledged bool   `json:"acknowledged"           yaml:"acknowledged"`
+}
+
 // Task is the neutral view of one in-flight task as reported by GET
 // /_tasks?group_by=none. ID is the cluster's composite "<node_id>:
 // <task_number>" identifier; the cancel API requires this exact form.
@@ -3660,4 +3759,31 @@ type IndexSegments struct {
 	MaxSegmentsShard  int    `json:"max_segments_shard"  yaml:"max_segments_shard"`
 	Committed         int    `json:"committed,omitempty" yaml:"committed,omitempty"`
 	Searchable        int    `json:"searchable,omitempty" yaml:"searchable,omitempty"`
+}
+
+// IngestPipeline is the neutral view of an ingest pipeline as reported
+// by GET /_ingest/pipeline[/<id>]. Both Elasticsearch and OpenSearch
+// share the same envelope ({"<id>": {"description":..., "processors":
+// [...], "version":..., "_meta":..., "on_failure":[...]}}), so one
+// shape covers both dialects.
+//
+// Processors and OnFailure are preserved as map[string]any slices: the
+// processor set differs across products and versions (ES has
+// `enrich`, OS has `text_embedding`, both add new ones in minor
+// versions), so freezing a typed schema for them would force a lossy
+// translation. The renderer pretty-prints the slice; structured
+// consumers (--output json/yaml) get the same shape the cluster
+// returned.
+type IngestPipeline struct {
+	Name string `json:"name" yaml:"name"`
+
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+
+	Version int64 `json:"version,omitempty" yaml:"version,omitempty"`
+
+	Meta map[string]any `json:"meta,omitempty" yaml:"meta,omitempty"`
+
+	Processors []map[string]any `json:"processors,omitempty" yaml:"processors,omitempty"`
+
+	OnFailure []map[string]any `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`
 }

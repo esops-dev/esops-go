@@ -558,6 +558,63 @@ type SnapshotPruner interface {
 	DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error)
 }
 
+// SnapshotPolicyInspector exposes the read-only policy listing surface
+// for the cluster's scheduled-snapshot system: ES SLM
+// (/_slm/policy[/<name>]) and OS Snapshot Management
+// (/_plugins/_sm/policies[/<name>]). Split from SnapshotPolicyManager
+// so read-only consumers (esops-doctor's "is anything actually backing
+// this cluster up?" rule) can depend on the read surface alone without
+// pulling in a type whose method set lets them mutate.
+//
+// The two products surface fundamentally different policy bodies — ES
+// SLM's flat schedule + retention vs OS SM's creation/deletion split —
+// so the neutral SnapshotPolicy view focuses on the metadata that
+// always comes back and carries Definition verbatim. Renderers diff
+// the two shapes loudly (`-o json`/`-o yaml`) instead of forcing a
+// lossy translation.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrNotFound on a missing-policy 404
+//   - generic wrapped error on other 4xx with the cluster's body in
+//     the message (typical case: a 404 from `/_plugins/_sm/policies`
+//     on an OpenSearch cluster where the SM plugin has not been
+//     installed — surfaced verbatim so the operator sees the gap)
+type SnapshotPolicyInspector interface {
+	ListSnapshotPolicies(ctx context.Context, names []string) ([]types.SnapshotPolicy, error)
+	GetSnapshotPolicy(ctx context.Context, name string) (types.SnapshotPolicy, error)
+}
+
+// SnapshotPolicyManager wraps the create/update/delete/execute mutations
+// on the same scheduled-snapshot surface. ES backs the methods with
+// /_slm/policy/<name> and /_slm/policy/<name>/_execute; OS backs them
+// with /_plugins/_sm/policies/<name> and /_plugins/_sm/policies/<name>/_start.
+//
+// The read half lives on SnapshotPolicyInspector and is embedded here
+// so the manager IS-A inspector — esops calls a single capability for
+// `snapshot policy <verb>`, while esops-doctor depends on the inspector
+// alone.
+//
+// ExecuteSnapshotPolicy semantics differ between dialects:
+//   - ES SLM `_execute` synthesises a one-shot snapshot named after the
+//     policy template and returns that name. Useful for ad-hoc
+//     "back this up right now" without changing the schedule.
+//   - OS SM `_start` toggles the policy's enabled flag on; the plugin
+//     does not return a snapshot name (the snapshot lands on the next
+//     scheduled cron tick). Adapters surface what the plugin returns
+//     verbatim and esops keeps the divergence visible in the result.
+//
+// Errors mirror SnapshotPolicyInspector. Both adapters surface the
+// cluster's reason on a 4xx so a "policy already running" or
+// "repository missing" rejection lands intact.
+type SnapshotPolicyManager interface {
+	SnapshotPolicyInspector
+	PutSnapshotPolicy(ctx context.Context, req types.SnapshotPolicyPutRequest) (types.SnapshotPolicyPutResult, error)
+	DeleteSnapshotPolicy(ctx context.Context, req types.SnapshotPolicyDeleteRequest) (types.SnapshotPolicyDeleteResult, error)
+	ExecuteSnapshotPolicy(ctx context.Context, req types.SnapshotPolicyExecuteRequest) (types.SnapshotPolicyExecuteResult, error)
+}
+
 // ClusterSettingsInspector wraps GET /_cluster/settings — the read-only
 // half of the cluster-level settings surface. Split out from
 // ClusterSettingsManager so read-only consumers (esops-doctor's hygiene
@@ -1390,6 +1447,34 @@ type LicenseInspector interface {
 	License(ctx context.Context) (types.LicenseStatus, error)
 }
 
+// IngestPipelineInspector exposes the read-only ingest-pipeline surface
+// — GET /_ingest/pipeline[/<id>]. Both Elasticsearch and OpenSearch
+// share the endpoint path and the response envelope
+// (`{"<id>": {"description":..., "processors":[...], ...}}`), so one
+// capability covers both dialects with the same adapter shape.
+//
+// ListPipelines returns every configured pipeline (sorted by name in
+// the business layer for stable output). Names is a comma-joined
+// filter forwarded to the cluster at the path segment — both dialects
+// honour it. An empty list returns every pipeline; a 404 from the
+// cluster (no pipelines configured at all) is normalised to an empty
+// slice rather than a not-found error.
+//
+// GetPipeline returns one pipeline by literal id, or a wrapped
+// ErrNotFound the caller can match on. Patterns are rejected in the
+// business layer — same convention as policy get.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrNotFound (wrapped) from GetPipeline on a 404
+//   - generic wrapped error on other 4xx/5xx with the cluster's body in
+//     the message
+type IngestPipelineInspector interface {
+	ListPipelines(ctx context.Context, names []string) ([]types.IngestPipeline, error)
+	GetPipeline(ctx context.Context, name string) (types.IngestPipeline, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -1425,6 +1510,8 @@ type Client struct {
 	SnapshotRestore     SnapshotRestorer
 	SnapshotPrune       SnapshotPruner
 	SnapshotRepoMgr     SnapshotRepositoryManager
+	SnapshotPolicy      SnapshotPolicyManager
+	SnapshotPolicyRead  SnapshotPolicyInspector
 	Recovery            RecoveryInspector
 	Segments            SegmentsInspector
 	ClusterSettings     ClusterSettingsManager
@@ -1456,4 +1543,5 @@ type Client struct {
 	RestoreHistory      SnapshotRestoreHistoryInspector
 	RemoteClusters      RemoteClusterInspector
 	License             LicenseInspector
+	IngestPipeline      IngestPipelineInspector
 }

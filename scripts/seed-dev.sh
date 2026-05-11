@@ -18,12 +18,19 @@
 #   --with-snapshots     Register an `fs` repository (`local-fs`) at the
 #                        cluster's path.repo and take two snapshots:
 #                        `seed-products-<ts>` (esops-products only) and
-#                        `seed-all-<ts>` (every esops-* index). Requires
-#                        path.repo to be configured cluster-side — the
-#                        local docker-compose sets this automatically.
-#                        Exercises `snapshot list` and gives `snapshot
-#                        create/verify/restore/prune` something to work
-#                        with later.
+#                        `seed-all-<ts>` (every esops-* index). Also
+#                        registers a scheduled-snapshot policy
+#                        (`seed-nightly`) — SLM on Elasticsearch, SM
+#                        on OpenSearch — so `snapshot policy list/get`
+#                        has something to render. The policy will
+#                        never actually fire because the schedule is
+#                        well in the future, but the wire shape is real.
+#                        Requires path.repo to be configured cluster-
+#                        side — the local docker-compose sets this
+#                        automatically. Exercises `snapshot list`,
+#                        `snapshot repository list`, `snapshot policy
+#                        list` and gives `snapshot create/verify/
+#                        restore/prune` something to work with later.
 
 set -euo pipefail
 
@@ -209,6 +216,34 @@ for i in $(seq 1 20); do
 done
 bulk "/esops-users/_bulk?refresh=wait_for" "$body"
 
+# Register a small ingest-pipeline catalogue so `pipeline list` /
+# `pipeline get` have something to render. Both Elasticsearch and
+# OpenSearch share the path and wire shape, so the same bodies work
+# against either dialect. PUT semantics are upsert — safe to re-run.
+echo ">>> registering ingest pipelines"
+http PUT /_ingest/pipeline/esops-logs-enrich '{
+  "description": "esops dev seed: normalise log level + tag the host with a datacenter id",
+  "version": 1,
+  "_meta": {"managed-by": "esops-seed"},
+  "processors": [
+    {"lowercase": {"field": "level"}},
+    {"set": {"field": "datacenter", "value": "dev-local"}},
+    {"remove": {"field": "duration_ms", "ignore_missing": true, "if": "ctx.duration_ms == null"}}
+  ],
+  "on_failure": [
+    {"set": {"field": "_ingest_error", "value": "{{ _ingest.on_failure_message }}"}}
+  ]
+}'
+
+http PUT /_ingest/pipeline/esops-products-rename '{
+  "description": "esops dev seed: rename legacy product fields to the current schema",
+  "version": 2,
+  "processors": [
+    {"rename": {"field": "title", "target_field": "name", "ignore_missing": true}},
+    {"rename": {"field": "cost",  "target_field": "price", "ignore_missing": true}}
+  ]
+}'
+
 if (( WITH_UNASSIGNED )); then
   # Over-replicate on purpose: 3 replicas + 1 primary = 4 copies needed.
   # ES dev (2 data nodes) places 2 copies, leaves 2 unassigned.
@@ -255,6 +290,47 @@ if (( WITH_SNAPSHOTS )); then
   echo ">>> taking snapshot '$SNAP_ALL' (esops-* wildcard)"
   http PUT "/_snapshot/$REPO_NAME/$SNAP_ALL?wait_for_completion=true" \
     '{"indices":"esops-*","include_global_state":false}'
+
+  # Register a scheduled-snapshot policy. The wire format diverges
+  # between products: ES wants /_slm/policy/<name> with SLM's flat
+  # schedule+config shape; OS wants /_plugins/_sm/policies/<name> with
+  # SM's creation+deletion+snapshot_config block. Detect dialect via
+  # the root response — OS reports `distribution:"opensearch"`, ES
+  # omits the field. Reliable on every supported version of either
+  # product.
+  echo ">>> registering scheduled snapshot policy 'seed-nightly'"
+  if curl -sS "${AUTH_ARG[@]}" "$URL/" | grep -q '"distribution"[[:space:]]*:[[:space:]]*"opensearch"'; then
+    # OpenSearch — Snapshot Management plugin (OS 2.1+).
+    # OS SM uses Quartz 5-part cron (minute hour day-of-month month
+    # day-of-week), not the 6-part form ES SLM accepts. Mismatch is the
+    # most common reason a hand-rolled SM policy bounces with HTTP 400.
+    http PUT "/_plugins/_sm/policies/seed-nightly" '{
+      "description": "esops dev seed: nightly snapshot of esops-* into local-fs",
+      "creation": {
+        "schedule": { "cron": { "expression": "30 1 * * *", "timezone": "UTC" } },
+        "time_limit": "1h"
+      },
+      "deletion": {
+        "schedule": { "cron": { "expression": "0 2 * * *", "timezone": "UTC" } },
+        "condition": { "max_age": "30d", "max_count": 50, "min_count": 5 },
+        "time_limit": "1h"
+      },
+      "snapshot_config": {
+        "date_format": "yyyy-MM-dd",
+        "indices": "esops-*",
+        "repository": "local-fs"
+      }
+    }' || echo "!!! SM plugin may not be available on this OS version — skipping policy"
+  else
+    # Elasticsearch — Snapshot Lifecycle Management.
+    http PUT "/_slm/policy/seed-nightly" '{
+      "schedule": "0 30 1 * * ?",
+      "name": "<seed-nightly-{now/d}>",
+      "repository": "local-fs",
+      "config": { "indices": ["esops-*"], "include_global_state": false },
+      "retention": { "expire_after": "30d", "min_count": 5, "max_count": 50 }
+    }'
+  fi
 fi
 
 echo ">>> done. doc counts:"
