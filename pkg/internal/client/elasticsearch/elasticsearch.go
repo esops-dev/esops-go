@@ -2205,9 +2205,10 @@ func (c *Client) Aliases(ctx context.Context, filter types.AliasFilter) ([]types
 
 // AliasesStream implements client.AliasInspector. Streams the
 // /_cat/aliases JSON array via json.Decoder.Token + Decode per row so
-// `aliases list -o ndjson` honours the §6 contract on a 5k-alias
-// cluster. Per-index filtering happens client-side row-by-row to keep
-// the streaming path identical to the buffered Aliases call.
+// `aliases list -o ndjson` emits the first row before the full
+// response has decoded on a 5k-alias cluster. Per-index filtering
+// happens client-side row-by-row to keep the streaming path identical
+// to the buffered Aliases call.
 func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yield func(types.Alias) error) error {
 	ca := c.api.Cat.Aliases
 	opts := []func(*esapi.CatAliasesRequest){

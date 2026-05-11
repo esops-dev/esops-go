@@ -15,14 +15,12 @@ import (
 )
 
 // repositoryCommand is the parent for `esops snapshot repository
-// <list|register|remove>`. The subcommand surface mirrors the spec
-// (CLAUDE.md §6) — all repository management lives here so the
-// top-level `esops snapshot` tree stays focused on *snapshots* and
-// repository churn doesn't crowd it.
+// <list|register|remove>`. All repository management lives here so
+// the top-level `esops snapshot` tree stays focused on *snapshots*
+// and repository churn doesn't crowd it.
 //
 // `register` and `remove` mutate cluster state (PUT/DELETE
-// /_snapshot/<repo>); `list` is read-only and identical to the
-// no-flag form of `esops snapshot list`.
+// /_snapshot/<repo>); `list` is read-only.
 func repositoryCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "repository",

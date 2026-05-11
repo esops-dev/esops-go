@@ -30,7 +30,7 @@ import (
 // run of FAILED nightlies doesn't push real backups out of retention. An
 // explicit "" disables the filter.
 //
-// AllowLargePrune is the explicit opt-in for the §6 blast-radius limit:
+// AllowLargePrune is the explicit opt-in for the blast-radius limit:
 // refuse when retention would delete more than 50% of the *eligible* set
 // in one run (rows pinned by the state filter are *not* counted in the
 // denominator — see Prune for the exact ratio). The threshold is shared
@@ -115,7 +115,7 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 		SnapshotPattern: opts.SnapshotPattern,
 	}
 
-	// Blast-radius guard (§6): refuse a prune that wipes more than half
+	// Blast-radius guard: refuse a prune that wipes more than half
 	// the *eligible* candidate set in one run. The eligible count
 	// excludes rows pinned by the state filter — a repo with 90 FAILED
 	// + 10 SUCCESS where we delete 6 SUCCESS reads as 6/10 (60%, trips

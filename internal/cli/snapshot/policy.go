@@ -17,7 +17,8 @@ import (
 // policyCommand is the parent for `esops snapshot policy
 // <list|get|put|delete|execute>`. Backed by SLM on Elasticsearch and
 // the Snapshot Management plugin (SM) on OpenSearch — the CLI surface
-// is identical, the wire underneath diverges (CLAUDE.md §3, §6).
+// is identical, the wire underneath diverges (ES uses /_slm/policy,
+// OS uses /_plugins/_sm/policies, and the body shapes differ).
 //
 // list and get are read-only; put, delete and execute mutate cluster
 // state and trigger the protection-tier check. SM was introduced in

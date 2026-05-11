@@ -10,12 +10,12 @@ import (
 // Command returns the `snapshot` command group.
 //
 // Repository management lives under `snapshot repository <register|
-// remove|list>` (CLAUDE.md §6); the historical flat `register` /
-// `deregister` verbs have been removed in favour of that nested form
-// to keep the spec and the CLI in sync. `snapshot policy` is the
-// parallel home for SLM (Elasticsearch) and SM (OpenSearch) policy
-// management — same operator question, two different cluster surfaces
-// underneath, one CLI surface above.
+// remove|list>`; the historical flat `register` / `deregister` verbs
+// have been removed in favour of that nested form so the top-level
+// `snapshot` tree stays focused on snapshots themselves.
+// `snapshot policy` is the parallel home for SLM (Elasticsearch) and
+// SM (OpenSearch) policy management — same operator question, two
+// different cluster surfaces underneath, one CLI surface above.
 func Command() *cli.Command {
 	return &cli.Command{
 		Name:  "snapshot",

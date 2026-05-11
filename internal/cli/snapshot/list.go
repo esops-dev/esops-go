@@ -15,13 +15,12 @@ import (
 )
 
 // listCommand is `esops snapshot list` — list snapshots inside one or
-// more repositories. Per the spec (CLAUDE.md §6) `snapshot list` lists
-// snapshots; the parallel verb `snapshot repository list` lists
-// registered repositories. The no-flag form here used to fall back to
-// repository listing — that hand-rolled overload was removed when
-// `snapshot repository` landed, so a bare `snapshot list` now refuses
-// with a usage error pointing at the right verb. Two verbs, two
-// behaviours, no surprises.
+// more repositories. The parallel verb `snapshot repository list`
+// lists registered repositories; the no-flag form here used to fall
+// back to repository listing, but that hand-rolled overload was
+// removed when `snapshot repository` landed. A bare `snapshot list`
+// now refuses with a usage error pointing at the right verb — two
+// verbs, two behaviours, no surprises.
 func listCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
@@ -81,11 +80,11 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 	all := cmd.Bool("all")
 	snapshotPattern := cmd.String("snapshot")
 
-	// Per CLAUDE.md §6 `snapshot list` lists snapshots. Repositories
-	// have their own verb (`snapshot repository list`); a bare
-	// `snapshot list` is therefore a usage error rather than a silent
-	// repo-listing fallback, so muscle memory built around the old
-	// behaviour surfaces loudly instead of producing different data.
+	// `snapshot list` lists snapshots; repositories have their own
+	// verb (`snapshot repository list`). A bare `snapshot list` is
+	// therefore a usage error rather than a silent repo-listing
+	// fallback, so muscle memory built around the old behaviour
+	// surfaces loudly instead of producing different data.
 	if repository == "" && !all {
 		return client.UsageError("snapshot list requires --repository or --all; use 'esops snapshot repository list' to list registered repositories")
 	}
