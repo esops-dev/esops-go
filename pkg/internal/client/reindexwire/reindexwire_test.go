@@ -53,6 +53,16 @@ func TestParseRemoteWhitelist(t *testing.T) {
 			in:   map[string]any{"reindex.remote.whitelist": 42},
 			want: nil,
 		},
+		{
+			name: "opensearch allowlist key string",
+			in:   map[string]any{"reindex.remote.allowlist": "host:9200"},
+			want: []string{"host:9200"},
+		},
+		{
+			name: "opensearch allowlist key json array",
+			in:   map[string]any{"reindex.remote.allowlist": []any{"a:9200", "b:9200"}},
+			want: []string{"a:9200", "b:9200"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -243,39 +243,43 @@ func DecodeDynamic(raw json.RawMessage) string {
 	return strings.Trim(string(raw), `"`)
 }
 
-// ParseRemoteWhitelist extracts `reindex.remote.whitelist` from a flat
-// settings map. The cluster serialises the value as a string when set
-// via the `host:port,host:port` shorthand and as a slice when set via
-// the JSON-array form. Both are normalised to []string with whitespace
+// ParseRemoteWhitelist extracts the remote-reindex allowlist from a
+// flat settings map. ES exposes it as `reindex.remote.whitelist`; OS
+// renamed the same setting to `reindex.remote.allowlist` as part of
+// the inclusive-language changes, so both spellings are accepted. The
+// cluster serialises the value as a string when set via the
+// `host:port,host:port` shorthand and as a slice when set via the
+// JSON-array form. Both are normalised to []string with whitespace
 // trimmed; an empty/missing key returns nil.
 func ParseRemoteWhitelist(m map[string]any) []string {
 	if m == nil {
 		return nil
 	}
-	raw, ok := m["reindex.remote.whitelist"]
-	if !ok {
-		return nil
-	}
-	switch v := raw.(type) {
-	case string:
-		if v == "" {
-			return nil
+	for _, key := range []string{"reindex.remote.whitelist", "reindex.remote.allowlist"} {
+		raw, ok := m[key]
+		if !ok {
+			continue
 		}
-		return SplitTrim(v)
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
-				out = append(out, strings.TrimSpace(s))
+		switch v := raw.(type) {
+		case string:
+			if v == "" {
+				continue
 			}
+			return SplitTrim(v)
+		case []any:
+			out := make([]string, 0, len(v))
+			for _, item := range v {
+				if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+					out = append(out, strings.TrimSpace(s))
+				}
+			}
+			if len(out) == 0 {
+				continue
+			}
+			return out
 		}
-		if len(out) == 0 {
-			return nil
-		}
-		return out
-	default:
-		return nil
 	}
+	return nil
 }
 
 // SplitTrim splits "a, b ,c" into []string{"a","b","c"}, dropping empty
