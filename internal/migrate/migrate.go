@@ -260,6 +260,12 @@ func majorOf(v string) (int, bool) {
 // whitelist is the gate. ErrUnreachable on the read becomes a warn
 // (we still got a probe earlier) so the report stays useful.
 func remoteWhitelistCheck(ctx context.Context, src, tgt Endpoint) (types.MigrationCheck, error) {
+	// The setting was renamed in OpenSearch; emit the name the target
+	// dialect actually accepts so the remediation hint is copy-pasteable.
+	settingName := "reindex.remote.whitelist"
+	if tgt.Info.Dialect == types.DialectOpenSearch {
+		settingName = "reindex.remote.allowlist"
+	}
 	if tgt.Whitelist == nil {
 		return types.MigrationCheck{
 			Name:   "target.remote_whitelist",
@@ -296,20 +302,20 @@ func remoteWhitelistCheck(ctx context.Context, src, tgt Endpoint) (types.Migrati
 		return types.MigrationCheck{
 			Name:   "target.remote_whitelist",
 			Status: types.MigrationStatusBlock,
-			Detail: "target has no reindex.remote.whitelist; remote /_reindex from " + hostPort + " will be refused — set reindex.remote.whitelist on the target",
+			Detail: fmt.Sprintf("target has no %s; remote /_reindex from %s will be refused — set %s on the target", settingName, hostPort, settingName),
 		}, nil
 	}
 	if matchWhitelist(entries, hostPort) {
 		return types.MigrationCheck{
 			Name:   "target.remote_whitelist",
 			Status: types.MigrationStatusOK,
-			Detail: fmt.Sprintf("%s allowed by target reindex.remote.whitelist (%s)", hostPort, strings.Join(entries, ", ")),
+			Detail: fmt.Sprintf("%s allowed by target %s (%s)", hostPort, settingName, strings.Join(entries, ", ")),
 		}, nil
 	}
 	return types.MigrationCheck{
 		Name:   "target.remote_whitelist",
 		Status: types.MigrationStatusBlock,
-		Detail: fmt.Sprintf("%s is not in target reindex.remote.whitelist (%s) — add it before reindex", hostPort, strings.Join(entries, ", ")),
+		Detail: fmt.Sprintf("%s is not in target %s (%s) — add it before reindex", hostPort, settingName, strings.Join(entries, ", ")),
 	}, nil
 }
 
