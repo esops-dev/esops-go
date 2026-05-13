@@ -3,6 +3,7 @@ package index_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/esops-dev/esops-go/internal/index"
@@ -234,5 +235,60 @@ func TestList_combinesHealthAndHidden(t *testing.T) {
 	// green + hidden: users and .kibana_1 (archive-2024 is Status=close with empty Health).
 	if len(got) != 2 {
 		t.Fatalf("got %d rows, want 2: %+v", len(got), got)
+	}
+}
+
+// indicesWithDataStreamBacking mixes a regular hidden index
+// (`.kibana_1`) with two data-stream backing indices (`.ds-*`). Used
+// to assert that --exclude-managed drops only the data-stream
+// backers, not every dot-prefixed index.
+func indicesWithDataStreamBacking() []types.Index {
+	return []types.Index{
+		{Name: "users", Health: "green", Status: "open"},
+		{Name: ".kibana_1", Health: "green", Status: "open"},
+		{Name: ".ds-logs-stream-2026.05.13-000001", Health: "green", Status: "open"},
+		{Name: ".ds-logs-stream-2026.05.13-000002", Health: "green", Status: "open"},
+	}
+}
+
+func TestList_excludeManagedDropsDataStreamBackingIndices(t *testing.T) {
+	fake := &fakeIndexInspector{indices: indicesWithDataStreamBacking()}
+	got, err := index.List(context.Background(), fake, types.IndexFilter{
+		Hidden:         true,
+		ExcludeManaged: true,
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// `.kibana_1` is hidden but not a data-stream backing index, so it
+	// stays in the view; the two `.ds-*` entries must be dropped.
+	want := []string{".kibana_1", "users"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(got), len(want), got)
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Errorf("got[%d] = %s, want %s", i, got[i].Name, name)
+		}
+	}
+}
+
+func TestListStream_excludeManagedDropsDataStreamBackingIndices(t *testing.T) {
+	fake := &fakeIndexInspector{indices: indicesWithDataStreamBacking()}
+	var got []string
+	err := index.ListStream(context.Background(), fake, types.IndexFilter{
+		Hidden:         true,
+		ExcludeManaged: true,
+	}, func(ix types.Index) error {
+		got = append(got, ix.Name)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ListStream: %v", err)
+	}
+	for _, name := range got {
+		if strings.HasPrefix(name, ".ds-") {
+			t.Errorf("data-stream backing index leaked through: %s", name)
+		}
 	}
 }

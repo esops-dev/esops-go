@@ -4391,3 +4391,339 @@ func processorTypes(procs []map[string]any) []string {
 	}
 	return out
 }
+
+// DataStreams renders the data-stream list view for `esops datastream
+// list`. Table columns track what an operator scanning a fleet
+// reaches for: name, generation, backing-index count, oldest and
+// newest backing index, and the bound lifecycle policy
+// (ILM on ES, ISM template on OS — only one of the two is ever set
+// for a given stream). Wide adds the bound template and
+// hidden/system flags. JSON/YAML/NDJSON emit the neutral DataStream
+// shape; NDJSON writes one record per line so a cluster with
+// thousands of streams doesn't have to be parsed as one blob.
+func DataStreams(w io.Writer, rows []types.DataStream, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(rows)
+	case FormatWide:
+		return dataStreamsTable(w, rows, true)
+	case FormatTable, "":
+		return dataStreamsTable(w, rows, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func dataStreamsTable(w io.Writer, rows []types.DataStream, wide bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tGEN\tINDICES\tOLDEST\tNEWEST\tLIFECYCLE\tSIZE\tDOCS\tHEALTH\tTEMPLATE\tHIDDEN\tSYSTEM")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tGEN\tINDICES\tOLDEST\tNEWEST\tLIFECYCLE\tSIZE\tDOCS")
+	}
+	for _, r := range rows {
+		gen := "-"
+		if r.Generation > 0 {
+			gen = fmt.Sprintf("%d", r.Generation)
+		}
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				r.Name,
+				dashIfEmpty(r.Status),
+				gen,
+				r.IndexCount,
+				dashIfEmpty(r.BackingIndexOldest),
+				dashIfEmpty(r.BackingIndexNewest),
+				dashIfEmpty(dataStreamLifecycle(r)),
+				humanBytesOrDash(r.StoreBytes),
+				docsCountOrDash(r.DocsCount),
+				dataStreamHealthSummary(r),
+				dashIfEmpty(r.Template),
+				masterMark(r.Hidden),
+				masterMark(r.System),
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+				r.Name,
+				dashIfEmpty(r.Status),
+				gen,
+				r.IndexCount,
+				dashIfEmpty(r.BackingIndexOldest),
+				dashIfEmpty(r.BackingIndexNewest),
+				dashIfEmpty(dataStreamLifecycle(r)),
+				humanBytesOrDash(r.StoreBytes),
+				docsCountOrDash(r.DocsCount),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// dataStreamHealthSummary collapses the per-backing-index health
+// counts to a compact string like "2g/0y/0r". Rendered in wide mode
+// so an operator scanning a fleet sees the spread of backing-index
+// health without expanding into `datastream get`. "-" when no
+// enrichment data is available (older clusters, /_cat/indices
+// permission denial, etc.).
+func dataStreamHealthSummary(d types.DataStream) string {
+	if len(d.Indices) == 0 {
+		return "-"
+	}
+	var green, yellow, red, unknown int
+	for _, ix := range d.Indices {
+		switch strings.ToLower(ix.Health) {
+		case "green":
+			green++
+		case "yellow":
+			yellow++
+		case "red":
+			red++
+		default:
+			unknown++
+		}
+	}
+	// If we never saw a health value at all, the enrichment step
+	// either ran into an error or was skipped — render "-" so
+	// operators don't read "0g/0y/0r" as "everything is broken".
+	if green+yellow+red == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%dg/%dy/%dr", green, yellow, red)
+}
+
+// docsCountOrDash renders a doc-count cell. Zero is ambiguous —
+// "the stream has no docs" vs "the cluster did not report a count"
+// — so we render zero as "-" to match the convention store-bytes
+// uses via humanBytesOrDash.
+func docsCountOrDash(n int64) string {
+	if n <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+// DataStream renders a single data stream — `esops datastream get`.
+// Table mode is a header line followed by an indented list of the
+// backing indices in generation order; wide adds the indices' uuid
+// and managed-by columns when the cluster reports them. JSON/YAML
+// emit the neutral DataStream shape directly.
+func DataStream(w io.Writer, d types.DataStream, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(d)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(d)
+	case FormatWide:
+		return dataStreamDetail(w, d, true)
+	case FormatTable, "":
+		return dataStreamDetail(w, d, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func dataStreamDetail(w io.Writer, d types.DataStream, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "NAME\tSTATUS\tGEN\tINDICES\tWRITE_INDEX\tLIFECYCLE\tTEMPLATE\tSIZE\tDOCS")
+	gen := "-"
+	if d.Generation > 0 {
+		gen = fmt.Sprintf("%d", d.Generation)
+	}
+	_, _ = fmt.Fprintf(hw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+		d.Name,
+		dashIfEmpty(d.Status),
+		gen,
+		d.IndexCount,
+		dashIfEmpty(d.WriteIndex),
+		dashIfEmpty(dataStreamLifecycle(d)),
+		dashIfEmpty(d.Template),
+		humanBytesOrDash(d.StoreBytes),
+		docsCountOrDash(d.DocsCount),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if len(d.Indices) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "BACKING INDICES")
+	bw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(bw, "  INDEX\tHEALTH\tSIZE\tDOCS\tUUID\tMANAGED_BY")
+		for _, ix := range d.Indices {
+			_, _ = fmt.Fprintf(bw, "  %s\t%s\t%s\t%s\t%s\t%s\n",
+				ix.Name,
+				dashIfEmpty(ix.Health),
+				humanBytesOrDash(ix.StoreBytes),
+				docsCountOrDash(ix.DocsCount),
+				dashIfEmpty(ix.UUID),
+				dashIfEmpty(ix.ManagedBy),
+			)
+		}
+	} else {
+		_, _ = fmt.Fprintln(bw, "  INDEX\tHEALTH\tSIZE\tDOCS")
+		for _, ix := range d.Indices {
+			_, _ = fmt.Fprintf(bw, "  %s\t%s\t%s\t%s\n",
+				ix.Name,
+				dashIfEmpty(ix.Health),
+				humanBytesOrDash(ix.StoreBytes),
+				docsCountOrDash(ix.DocsCount),
+			)
+		}
+	}
+	return bw.Flush()
+}
+
+// dataStreamLifecycle picks the one lifecycle reference set on the
+// stream — ILMPolicy on Elasticsearch, ISMTemplate on OpenSearch —
+// for the LIFECYCLE table column. Both fields are zero on streams
+// the operator hasn't bound to a policy, in which case the column
+// renders as "-".
+func dataStreamLifecycle(d types.DataStream) string {
+	if d.ILMPolicy != "" {
+		return d.ILMPolicy
+	}
+	return d.ISMTemplate
+}
+
+// DataStreamRollover renders the outcome of `esops datastream
+// rollover`. Mirrors IndexRollover output: table is a one-line
+// header (data_stream, dry-run, old/new index, rolled-over flag,
+// ack flags) followed by the per-condition outcome block when
+// present. JSON/YAML emit the neutral DataStreamRolloverResult
+// shape directly.
+func DataStreamRollover(w io.Writer, r types.DataStreamRolloverResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "DATA_STREAM\tDRY_RUN\tOLD_INDEX\tNEW_INDEX\tROLLED_OVER\tACK\tSHARDS_ACK")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%s\t%s\t%t\t%t\t%t\n",
+			r.DataStream, r.DryRun,
+			dashIfEmpty(r.OldIndex), dashIfEmpty(r.NewIndex),
+			r.RolledOver, r.Acknowledged, r.ShardsAcknowledged,
+		)
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if len(r.ConditionsMet) > 0 {
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, "CONDITIONS")
+			cw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(cw, "  KEY\tMET")
+			for k, v := range r.ConditionsMet {
+				_, _ = fmt.Fprintf(cw, "  %s\t%t\n", k, v)
+			}
+			if err := cw.Flush(); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// DataStreamModify renders the outcome of `esops datastream modify`.
+// Table is a one-line header plus a list of the submitted actions.
+// JSON/YAML emit the neutral DataStreamModifyResult shape directly.
+func DataStreamModify(w io.Writer, r types.DataStreamModifyResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tACK\tACTIONS")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%t\t%d\n",
+			r.Action, r.DryRun, r.Acknowledged, len(r.Actions))
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if len(r.Actions) == 0 {
+			return nil
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "ACTIONS")
+		aw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(aw, "  ACTION\tDATA_STREAM\tINDEX")
+		for _, a := range r.Actions {
+			_, _ = fmt.Fprintf(aw, "  %s\t%s\t%s\n", a.Action, a.DataStream, a.Index)
+		}
+		return aw.Flush()
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+// DataStreamDelete renders the outcome of `esops datastream delete`.
+// Table is a one-line header plus the resolved stream names.
+// JSON/YAML emit the neutral DataStreamDeleteResult shape directly.
+func DataStreamDelete(w io.Writer, r types.DataStreamDeleteResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide, FormatTable, "":
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "ACTION\tDRY_RUN\tACK\tSTREAMS")
+		_, _ = fmt.Fprintf(tw, "%s\t%t\t%t\t%d\n",
+			r.Action, r.DryRun, r.Acknowledged, len(r.Names))
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if len(r.Names) == 0 {
+			return nil
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "STREAMS")
+		for _, n := range r.Names {
+			_, _ = fmt.Fprintf(w, "  %s\n", n)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+

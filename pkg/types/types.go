@@ -144,11 +144,12 @@ const (
 // across dialects — the OS and ES cat APIs treat hidden indices slightly
 // differently and we want one story at the CLI surface.
 type IndexFilter struct {
-	Index  string    // comma-separated index patterns; "" = "*"
-	Health string    // "green"|"yellow"|"red"; "" = any; case-insensitive
-	Status string    // "open"|"close"; "" = any; case-insensitive
-	Hidden bool      // include hidden (dot-prefixed / system) indices
-	Sort   IndexSort // ordering applied after filtering
+	Index          string    // comma-separated index patterns; "" = "*"
+	Health         string    // "green"|"yellow"|"red"; "" = any; case-insensitive
+	Status         string    // "open"|"close"; "" = any; case-insensitive
+	Hidden         bool      // include hidden (dot-prefixed / system) indices
+	ExcludeManaged bool      // hide data-stream backing indices (`.ds-*`)
+	Sort           IndexSort // ordering applied after filtering
 }
 
 // IndexStateAction names a single index lifecycle transition. The
@@ -3786,4 +3787,181 @@ type IngestPipeline struct {
 	Processors []map[string]any `json:"processors,omitempty" yaml:"processors,omitempty"`
 
 	OnFailure []map[string]any `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`
+}
+
+// DataStreamBackingIndex is one entry under data_streams[].indices in
+// GET /_data_stream. Both Elasticsearch and OpenSearch report the
+// backing index name and uuid; ES additionally surfaces the prefer_ilm
+// flag and managed_by string ("Index Lifecycle Management",
+// "Data stream lifecycle", "Unmanaged"), which we preserve when the
+// cluster reports them and leave zero otherwise.
+//
+// Health, StoreBytes, and DocsCount are *not* in the /_data_stream
+// envelope itself — the business layer enriches them from a single
+// /_cat/indices call against the backing-index names. They stay
+// zero when the enrichment is skipped or fails.
+type DataStreamBackingIndex struct {
+	Name       string `json:"name"                   yaml:"name"`
+	UUID       string `json:"uuid,omitempty"         yaml:"uuid,omitempty"`
+	PreferILM  *bool  `json:"prefer_ilm,omitempty"   yaml:"prefer_ilm,omitempty"`
+	ManagedBy  string `json:"managed_by,omitempty"   yaml:"managed_by,omitempty"`
+	Health     string `json:"health,omitempty"       yaml:"health,omitempty"`
+	StoreBytes int64  `json:"store_bytes,omitempty"  yaml:"store_bytes,omitempty"`
+	DocsCount  int64  `json:"docs_count,omitempty"   yaml:"docs_count,omitempty"`
+}
+
+// DataStream is the neutral view of a data stream as reported by
+// GET /_data_stream[/<name>]. Data streams sit *next to* indices —
+// each one is backed by a generation-numbered chain of hidden
+// `.ds-<stream>-<date>-<gen>` indices that the cluster manages on
+// rollover. Both Elasticsearch and OpenSearch share the endpoint shape
+// (top-level {"data_streams": [...]}) so one type covers both
+// dialects, but a handful of fields are dialect-specific:
+//
+//   - ILMPolicy: Elasticsearch only. The data stream's associated ILM
+//     policy when one is bound via the matching index template;
+//     empty on OS because ILM is ES-native.
+//   - ISMTemplate: OpenSearch only. The ISM template name resolved for
+//     the stream when one is bound; empty on ES.
+//   - Lifecycle: ES-only data-stream lifecycle (DSL) block — the
+//     newer per-stream retention model that landed in 8.11. We
+//     preserve it as a free-form map because the field set is still
+//     evolving across minor versions.
+//   - Hidden / System / Replicated / AllowCustomRouting: cluster-
+//     reported flags. AllowCustomRouting is ES-only; the others apply
+//     to both dialects.
+//
+// Indices is ordered by generation as the cluster returned it (oldest
+// first, write index last). Generation, IndexCount, BackingIndexNewest
+// and BackingIndexOldest are derived for table rendering so an
+// operator can see the lifecycle shape without expanding the full
+// index list.
+type DataStream struct {
+	Name                string                   `json:"name"                            yaml:"name"`
+	Status              string                   `json:"status,omitempty"                yaml:"status,omitempty"`
+	Generation          int64                    `json:"generation,omitempty"            yaml:"generation,omitempty"`
+	Template            string                   `json:"template,omitempty"              yaml:"template,omitempty"`
+	ILMPolicy           string                   `json:"ilm_policy,omitempty"            yaml:"ilm_policy,omitempty"`
+	ISMTemplate         string                   `json:"ism_template,omitempty"          yaml:"ism_template,omitempty"`
+	Lifecycle           map[string]any           `json:"lifecycle,omitempty"             yaml:"lifecycle,omitempty"`
+	Hidden              bool                     `json:"hidden,omitempty"                yaml:"hidden,omitempty"`
+	System              bool                     `json:"system,omitempty"                yaml:"system,omitempty"`
+	Replicated          bool                     `json:"replicated,omitempty"            yaml:"replicated,omitempty"`
+	AllowCustomRouting  bool                     `json:"allow_custom_routing,omitempty"  yaml:"allow_custom_routing,omitempty"`
+	WriteIndex          string                   `json:"write_index,omitempty"           yaml:"write_index,omitempty"`
+	IndexCount          int                      `json:"index_count,omitempty"           yaml:"index_count,omitempty"`
+	BackingIndexOldest  string                   `json:"backing_index_oldest,omitempty"  yaml:"backing_index_oldest,omitempty"`
+	BackingIndexNewest  string                   `json:"backing_index_newest,omitempty"  yaml:"backing_index_newest,omitempty"`
+	Indices             []DataStreamBackingIndex `json:"indices,omitempty"               yaml:"indices,omitempty"`
+
+	// StoreBytes and DocsCount aggregate the per-backing-index store
+	// size and doc count after the business layer enriches the stream
+	// with /_cat/indices. They stay zero when enrichment is skipped
+	// or fails — the cluster's /_data_stream envelope alone does not
+	// carry these numbers.
+	StoreBytes int64 `json:"store_bytes,omitempty"  yaml:"store_bytes,omitempty"`
+	DocsCount  int64 `json:"docs_count,omitempty"   yaml:"docs_count,omitempty"`
+}
+
+// DataStreamFilter narrows a DataStreamInspector.DataStreams call. Names
+// is forwarded to the cluster as a comma-joined path segment (both
+// dialects honour patterns there). Empty Names returns every
+// configured data stream — both ES and OS surface hidden streams by
+// default on the bare endpoint, so no separate hidden toggle is
+// needed at the capability layer.
+type DataStreamFilter struct {
+	Names []string
+}
+
+// DataStreamRolloverRequest is the input to a DataStreamManager.RolloverDataStream
+// call. Name is the literal data stream name (no patterns — rollover
+// targets one stream). Conditions reuses the index-rollover shape;
+// both ES and OS accept the same {conditions:{...}} body on
+// /<stream>/_rollover. DryRun maps to ?dry_run=true (cluster-native on
+// ES; OS supports it from 2.x).
+type DataStreamRolloverRequest struct {
+	Name                string
+	Conditions          IndexRolloverConditions
+	DryRun              bool
+	WaitForActiveShards string
+}
+
+// DataStreamRolloverResult is the normalised view of a data stream
+// rollover. Mirrors IndexRolloverResult so renderers can reuse the
+// same shape; "alias" is replaced by "data_stream" in JSON/YAML
+// output to keep captured records self-describing.
+type DataStreamRolloverResult struct {
+	DataStream         string          `json:"data_stream"          yaml:"data_stream"`
+	OldIndex           string          `json:"old_index,omitempty"  yaml:"old_index,omitempty"`
+	NewIndex           string          `json:"new_index,omitempty"  yaml:"new_index,omitempty"`
+	RolledOver         bool            `json:"rolled_over"          yaml:"rolled_over"`
+	DryRun             bool            `json:"dry_run"              yaml:"dry_run"`
+	Acknowledged       bool            `json:"acknowledged"         yaml:"acknowledged"`
+	ShardsAcknowledged bool            `json:"shards_acknowledged"  yaml:"shards_acknowledged"`
+	ConditionsMet      map[string]bool `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+}
+
+// DataStreamModifyAction names a single _data_stream/_modify action.
+// Values match the wire field names that wrap the per-action object
+// in the cluster's request body ("add_backing_index",
+// "remove_backing_index").
+type DataStreamModifyAction string
+
+const (
+	DataStreamModifyAdd    DataStreamModifyAction = "add_backing_index"
+	DataStreamModifyRemove DataStreamModifyAction = "remove_backing_index"
+)
+
+// DataStreamModifyRequest is the input to a DataStreamManager.ModifyDataStream
+// call. POSTs to /_data_stream/_modify with a {"actions": [...]} body
+// of add_backing_index / remove_backing_index entries. Modify is
+// advanced usage — primarily during migrations to splice an existing
+// index into a stream — so the request shape preserves the order the
+// operator submitted, and the response is a simple acknowledged flag
+// from the cluster.
+type DataStreamModifyRequest struct {
+	Actions []DataStreamModifyEntry
+	DryRun  bool
+}
+
+// DataStreamModifyEntry is one action in a DataStreamModifyRequest.
+// Action is the verb; DataStream is the stream name; Index is the
+// backing index name on the cluster.
+type DataStreamModifyEntry struct {
+	Action     DataStreamModifyAction `json:"action"      yaml:"action"`
+	DataStream string                 `json:"data_stream" yaml:"data_stream"`
+	Index      string                 `json:"index"       yaml:"index"`
+}
+
+// DataStreamModifyResult is the normalised view of a
+// POST /_data_stream/_modify response. The cluster returns a single
+// acknowledged flag; Actions echoes what the operator submitted so a
+// captured JSON record is self-describing.
+type DataStreamModifyResult struct {
+	Action       string                  `json:"action"             yaml:"action"`
+	DryRun       bool                    `json:"dry_run"            yaml:"dry_run"`
+	Acknowledged bool                    `json:"acknowledged"       yaml:"acknowledged"`
+	Actions      []DataStreamModifyEntry `json:"actions,omitempty"  yaml:"actions,omitempty"`
+}
+
+// DataStreamDeleteRequest is the input to a
+// DataStreamManager.DeleteDataStream call. Names is the resolved
+// literal-name list (already partitioned by the business layer's
+// pre-flight, with patterns expanded); the adapter joins them for the
+// URL path. Deleting a data stream removes the stream object **and**
+// all of its backing indices, so the business layer enforces a
+// blast-radius cap and the CLI requires --allow-data-loss.
+type DataStreamDeleteRequest struct {
+	Names []string
+}
+
+// DataStreamDeleteResult is the normalised view of a
+// DELETE /_data_stream/<names> response. Both dialects return only an
+// acknowledged flag; Names echoes the resolved targets so captured
+// records are self-describing.
+type DataStreamDeleteResult struct {
+	Action       string   `json:"action"            yaml:"action"`
+	DryRun       bool     `json:"dry_run"           yaml:"dry_run"`
+	Names        []string `json:"names,omitempty"   yaml:"names,omitempty"`
+	Acknowledged bool     `json:"acknowledged"      yaml:"acknowledged"`
 }

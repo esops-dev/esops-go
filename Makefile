@@ -15,7 +15,7 @@ GOBIN   := $(shell $(GO) env GOPATH)/bin
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-integration lint security update tidy clean release-snapshot certs certs-clean dev-up dev-down dev-logs dev-seed dev-seed-unassigned dev-seed-snapshots
+.PHONY: help build test test-integration lint security update tidy clean release-snapshot certs certs-clean dev-up dev-down dev-logs dev-seed dev-seed-unassigned dev-seed-snapshots dev-seed-data-streams
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -81,3 +81,7 @@ dev-seed-unassigned: ## Same as dev-seed, plus an over-replicated index so alloc
 dev-seed-snapshots: ## Same as dev-seed, plus a registered fs repo and two snapshots so `esops snapshot list` has data
 	./scripts/seed-dev.sh --url http://localhost:9200 --with-snapshots
 	./scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!' --with-snapshots
+
+dev-seed-data-streams: ## Same as dev-seed, plus two data streams so `esops datastream list/get/rollover/delete` has data
+	./scripts/seed-dev.sh --url http://localhost:9200 --with-data-streams
+	./scripts/seed-dev.sh --url http://localhost:9202 --user 'admin:EsopsDev123!' --with-data-streams
