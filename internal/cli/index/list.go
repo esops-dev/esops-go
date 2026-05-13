@@ -33,6 +33,10 @@ func listCommand() *cli.Command {
 				Name:  "hidden",
 				Usage: "Include hidden indices (dot-prefixed system indices)",
 			},
+			&cli.BoolFlag{
+				Name:  "exclude-managed",
+				Usage: "Hide data-stream backing indices (`.ds-*`); useful for operators triaging standalone indices",
+			},
 			&cli.StringFlag{
 				Name:  "sort",
 				Usage: "Sort by: name | size | docs",
@@ -67,11 +71,12 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	filter := types.IndexFilter{
-		Index:  cmd.String("index"),
-		Health: cmd.String("health"),
-		Status: cmd.String("status"),
-		Hidden: cmd.Bool("hidden"),
-		Sort:   sortKey,
+		Index:          cmd.String("index"),
+		Health:         cmd.String("health"),
+		Status:         cmd.String("status"),
+		Hidden:         cmd.Bool("hidden"),
+		ExcludeManaged: cmd.Bool("exclude-managed"),
+		Sort:           sortKey,
 	}
 
 	// NDJSON takes the streaming path: rows reach stdout as the cluster

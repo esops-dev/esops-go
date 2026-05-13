@@ -26,6 +26,9 @@ func ListStream(ctx context.Context, c client.IndexInspector, f types.IndexFilte
 		if !f.Hidden && strings.HasPrefix(ix.Name, ".") {
 			return nil
 		}
+		if f.ExcludeManaged && isDataStreamBackingIndex(ix.Name) {
+			return nil
+		}
 		if wantHealth != "" && strings.ToLower(ix.Health) != wantHealth {
 			return nil
 		}
@@ -56,6 +59,9 @@ func List(ctx context.Context, c client.IndexInspector, f types.IndexFilter) ([]
 		if !f.Hidden && strings.HasPrefix(ix.Name, ".") {
 			continue
 		}
+		if f.ExcludeManaged && isDataStreamBackingIndex(ix.Name) {
+			continue
+		}
 		if wantHealth != "" && strings.ToLower(ix.Health) != wantHealth {
 			continue
 		}
@@ -65,7 +71,29 @@ func List(ctx context.Context, c client.IndexInspector, f types.IndexFilter) ([]
 		out = append(out, ix)
 	}
 
-	switch f.Sort {
+	sortIndices(out, f.Sort)
+	return out, nil
+}
+
+// isDataStreamBackingIndex reports whether name follows the
+// data-stream backing-index convention shared by ES and OS:
+// `.ds-<stream>-<date>-<gen>`. The cluster surfaces backing indices
+// in /_cat/indices alongside standalone indices; operators who only
+// want to see the latter pass --exclude-managed to drop them.
+//
+// Both products use the `.ds-` prefix for data-stream-managed
+// backing indices; standalone hidden indices (`.kibana`, `.security`)
+// don't carry it. Checking the prefix alone is enough — the cluster
+// is the source of truth for the naming convention, and we don't
+// want to round-trip /_data_stream just to filter the cat list.
+func isDataStreamBackingIndex(name string) bool {
+	return strings.HasPrefix(name, ".ds-")
+}
+
+// sortIndices is the small helper that backs List's post-filter
+// ordering. Pulled out of List so the filter loop stays linear.
+func sortIndices(out []types.Index, key types.IndexSort) {
+	switch key {
 	case types.IndexSortSize:
 		sort.SliceStable(out, func(i, j int) bool {
 			return out[i].StoreBytes > out[j].StoreBytes
@@ -79,5 +107,4 @@ func List(ctx context.Context, c client.IndexInspector, f types.IndexFilter) ([]
 			return out[i].Name < out[j].Name
 		})
 	}
-	return out, nil
 }

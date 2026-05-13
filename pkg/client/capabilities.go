@@ -1475,6 +1475,68 @@ type IngestPipelineInspector interface {
 	GetPipeline(ctx context.Context, name string) (types.IngestPipeline, error)
 }
 
+// DataStreamInspector exposes the read-only data-stream surface —
+// GET /_data_stream[/<names>]. Both Elasticsearch and OpenSearch share
+// the endpoint path and the top-level
+// {"data_streams": [...]} envelope, so one capability covers both
+// dialects with the same adapter shape. Dialect-specific fields
+// (ES `ilm_policy` and `lifecycle`; OS `ism_template`) are surfaced
+// on types.DataStream when the cluster reports them and left zero
+// otherwise.
+//
+// DataStreams returns every data stream the cluster reports, sorted
+// by name in the business layer for stable output. Filter.Names is a
+// comma-joined path segment both dialects honour (including
+// patterns); an empty Names returns every stream. A 404 from the
+// cluster against the bare endpoint normalises to an empty slice —
+// some older builds 404 a cluster with no streams configured rather
+// than returning `{"data_streams":[]}`.
+//
+// GetDataStream returns one stream by literal name, or a wrapped
+// ErrNotFound. Patterns are rejected in the business layer to match
+// the policy/pipeline get convention.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrNotFound (wrapped) from GetDataStream on a 404
+//   - generic wrapped error on other 4xx/5xx with the cluster's body
+//     in the message
+type DataStreamInspector interface {
+	DataStreams(ctx context.Context, filter types.DataStreamFilter) ([]types.DataStream, error)
+	GetDataStream(ctx context.Context, name string) (types.DataStream, error)
+}
+
+// DataStreamManager exposes the mutating data-stream surface —
+// rollover, modify (add/remove backing index) and delete. Kept as a
+// separate interface from DataStreamInspector so external read-only
+// consumers (esops-doctor) can import the inspector without pulling
+// in mutate methods.
+//
+// RolloverDataStream POSTs to /<name>/_rollover. Both dialects accept
+// the same {conditions:{...}} body and honour ?dry_run=true.
+//
+// ModifyDataStream POSTs to /_data_stream/_modify with a body of
+// {"actions": [...]}. Advanced — primarily used during migrations to
+// splice an index into a stream's backing-index chain. Both products
+// support the endpoint (OS added it in 2.x); the adapter passes the
+// actions through verbatim.
+//
+// DeleteDataStream DELETEs /_data_stream/<names>. The cluster removes
+// the stream object **and** all of its backing indices in one shot —
+// the business layer enforces a blast-radius cap (default 5 streams)
+// and the CLI requires --allow-data-loss, so this method assumes the
+// caller has cleared both gates already.
+//
+// Errors mirror the inspector set, plus ErrDryRunBlocker when a
+// dry-run rollover reports conditions that did not match and the
+// caller treats that as a blocker.
+type DataStreamManager interface {
+	RolloverDataStream(ctx context.Context, req types.DataStreamRolloverRequest) (types.DataStreamRolloverResult, error)
+	ModifyDataStream(ctx context.Context, req types.DataStreamModifyRequest) (types.DataStreamModifyResult, error)
+	DeleteDataStream(ctx context.Context, req types.DataStreamDeleteRequest) (types.DataStreamDeleteResult, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -1544,4 +1606,6 @@ type Client struct {
 	RemoteClusters      RemoteClusterInspector
 	License             LicenseInspector
 	IngestPipeline      IngestPipelineInspector
+	DataStream          DataStreamInspector
+	DataStreamManage    DataStreamManager
 }

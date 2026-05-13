@@ -15,6 +15,14 @@
 #                        OS cluster. Exercises `ops allocation-explain`
 #                        and the unassigned-reason path in `ops shards`.
 #
+#   --with-data-streams  Also create `esops-logs-stream` and `esops-metrics-stream`
+#                        as data streams (via an index template that names them
+#                        in `index_patterns`), bootstrap one backing index per
+#                        stream, and roll `esops-logs-stream` once so the stream
+#                        has a multi-generation chain. Gives `esops datastream
+#                        list / get / rollover / delete` and `esops index list
+#                        --exclude-managed` something realistic to render.
+#
 #   --with-snapshots     Register an `fs` repository (`local-fs`) at the
 #                        cluster's path.repo and take two snapshots:
 #                        `seed-products-<ts>` (esops-products only) and
@@ -38,14 +46,16 @@ URL=""
 AUTH=""
 WITH_UNASSIGNED=0
 WITH_SNAPSHOTS=0
+WITH_DATA_STREAMS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --url)             URL="$2";  shift 2 ;;
-    --user)            AUTH="$2"; shift 2 ;;
-    --with-unassigned) WITH_UNASSIGNED=1; shift ;;
-    --with-snapshots)  WITH_SNAPSHOTS=1;  shift ;;
+    --url)               URL="$2";  shift 2 ;;
+    --user)              AUTH="$2"; shift 2 ;;
+    --with-unassigned)   WITH_UNASSIGNED=1; shift ;;
+    --with-snapshots)    WITH_SNAPSHOTS=1;  shift ;;
+    --with-data-streams) WITH_DATA_STREAMS=1; shift ;;
     -h|--help)
-      sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -99,6 +109,15 @@ for _ in $(seq 1 30); do
   [[ "$status" == "200" ]] && break
   sleep 1
 done
+
+# Probe dialect once — both products advertise themselves in GET /.
+# A handful of fields diverge in the seed payloads below (ingest
+# pipeline `_meta`, snapshot policy shape); set the flag here so each
+# section can consult it without re-probing.
+IS_OS=0
+if curl -sS "${AUTH_ARG[@]}" "$URL/" | grep -q '"distribution"[[:space:]]*:[[:space:]]*"opensearch"'; then
+  IS_OS=1
+fi
 
 # Note on names: ES 9 ships a built-in `logs-*-*` data-stream index template,
 # so a regular-index PUT on `logs-app-000001` is rejected. Prefix with `esops-`
@@ -221,10 +240,13 @@ bulk "/esops-users/_bulk?refresh=wait_for" "$body"
 # OpenSearch share the path and wire shape, so the same bodies work
 # against either dialect. PUT semantics are upsert — safe to re-run.
 echo ">>> registering ingest pipelines"
-http PUT /_ingest/pipeline/esops-logs-enrich '{
+# `_meta` on ingest pipelines is Elasticsearch 8.x-only; OpenSearch
+# rejects it with parse_exception. Build the body so `_meta` is the
+# last key and append it conditionally to keep the JSON valid on
+# either dialect.
+ENRICH_BODY='{
   "description": "esops dev seed: normalise log level + tag the host with a datacenter id",
   "version": 1,
-  "_meta": {"managed-by": "esops-seed"},
   "processors": [
     {"lowercase": {"field": "level"}},
     {"set": {"field": "datacenter", "value": "dev-local"}},
@@ -232,8 +254,14 @@ http PUT /_ingest/pipeline/esops-logs-enrich '{
   ],
   "on_failure": [
     {"set": {"field": "_ingest_error", "value": "{{ _ingest.on_failure_message }}"}}
-  ]
+  ]'
+if (( IS_OS == 0 )); then
+  ENRICH_BODY+=',
+  "_meta": {"managed-by": "esops-seed"}'
+fi
+ENRICH_BODY+='
 }'
+http PUT /_ingest/pipeline/esops-logs-enrich "$ENRICH_BODY"
 
 http PUT /_ingest/pipeline/esops-products-rename '{
   "description": "esops dev seed: rename legacy product fields to the current schema",
@@ -259,6 +287,61 @@ if (( WITH_UNASSIGNED )); then
   # One doc so the index shows a size > 0 in `ops shards` / `index list`.
   http POST /esops-stuck-replicas/_doc '{"note":"seeded to force unassigned replicas — see ops allocation-explain"}'
   INDEXES+=(esops-stuck-replicas)
+fi
+
+if (( WITH_DATA_STREAMS )); then
+  # Register an index template that names data streams in its
+  # index_patterns and carries the `data_stream` marker — the cluster
+  # spins up a backing index on first write. Both Elasticsearch and
+  # OpenSearch share the v2 (composable) template wire shape, so the
+  # same body works against either dialect.
+  echo ">>> registering composable template 'esops-streams-tmpl' for data streams"
+  http PUT /_index_template/esops-streams-tmpl '{
+    "index_patterns": ["esops-logs-stream", "esops-metrics-stream"],
+    "data_stream": {},
+    "priority": 500,
+    "template": {
+      "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+      "mappings": {
+        "properties": {
+          "@timestamp": {"type": "date"},
+          "level":      {"type": "keyword"},
+          "service":    {"type": "keyword"},
+          "value":      {"type": "double"}
+        }
+      }
+    }
+  }'
+
+  # Tear down any previous run so re-runs stay idempotent. DELETE
+  # against a non-existent stream returns 404 — swallow the error.
+  for ds in esops-logs-stream esops-metrics-stream; do
+    curl -sS "${AUTH_ARG[@]}" -o /dev/null -X DELETE "$URL/_data_stream/$ds" || true
+  done
+
+  echo ">>> bootstrapping data stream 'esops-logs-stream' (50 docs)"
+  body=""
+  for i in $(seq 1 50); do
+    ts=$(iso_date $((NOW - i*60)))
+    body+='{"create":{}}'$'\n'
+    body+="{\"@timestamp\":\"$ts\",\"level\":\"info\",\"service\":\"seed-dev\"}"$'\n'
+  done
+  bulk "/esops-logs-stream/_bulk?refresh=wait_for" "$body"
+
+  # Roll the stream once so it has a multi-generation backing-index
+  # chain — exercises `esops datastream list` (oldest != newest) and
+  # the rollover/cutover paths.
+  echo ">>> rolling 'esops-logs-stream' to generation 2"
+  http POST /esops-logs-stream/_rollover '{}'
+
+  echo ">>> bootstrapping data stream 'esops-metrics-stream' (20 docs)"
+  body=""
+  for i in $(seq 1 20); do
+    ts=$(iso_date $((NOW - i*120)))
+    body+='{"create":{}}'$'\n'
+    body+="{\"@timestamp\":\"$ts\",\"service\":\"seed-dev\",\"value\":$(( RANDOM % 1000 ))}"$'\n'
+  done
+  bulk "/esops-metrics-stream/_bulk?refresh=wait_for" "$body"
 fi
 
 if (( WITH_SNAPSHOTS )); then
@@ -294,12 +377,9 @@ if (( WITH_SNAPSHOTS )); then
   # Register a scheduled-snapshot policy. The wire format diverges
   # between products: ES wants /_slm/policy/<name> with SLM's flat
   # schedule+config shape; OS wants /_plugins/_sm/policies/<name> with
-  # SM's creation+deletion+snapshot_config block. Detect dialect via
-  # the root response — OS reports `distribution:"opensearch"`, ES
-  # omits the field. Reliable on every supported version of either
-  # product.
+  # SM's creation+deletion+snapshot_config block.
   echo ">>> registering scheduled snapshot policy 'seed-nightly'"
-  if curl -sS "${AUTH_ARG[@]}" "$URL/" | grep -q '"distribution"[[:space:]]*:[[:space:]]*"opensearch"'; then
+  if (( IS_OS )); then
     # OpenSearch — Snapshot Management plugin (OS 2.1+).
     # OS SM uses Quartz 5-part cron (minute hour day-of-month month
     # day-of-week), not the 6-part form ES SLM accepts. Mismatch is the
