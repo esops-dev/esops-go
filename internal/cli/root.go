@@ -40,13 +40,47 @@ func Run(ctx context.Context, args []string) error {
 			ops.Command(),
 			indexcmd.Command(),
 			snapshotcmd.Command(),
-			migratecmd.Command(),
 			pipelinecmd.Command(),
 			configcmd.Command(),
+			migratecmd.Command(),
 		},
+		CustomRootCommandHelpTemplate: rootHelpTemplate,
 	}
 	return wrapUsageError(app.Run(ctx, args))
 }
+
+// rootHelpTemplate mirrors urfave/cli's RootCommandHelpTemplate but
+// renders the COMMANDS section in three passes — user commands, then
+// completion, then help — because the library auto-appends help before
+// completion to the Commands slice and offers no knob to influence that
+// ordering.
+const rootHelpTemplate = `NAME:
+   {{template "helpNameTemplate" .}}
+
+USAGE:
+   {{if .UsageText}}{{wrap .UsageText 3}}{{else}}{{.FullName}} {{if .VisibleFlags}}[global options]{{end}}{{if .VisibleCommands}} [command [command options]]{{end}}{{if .ArgsUsage}} {{.ArgsUsage}}{{else}}{{if .Arguments}} [arguments...]{{end}}{{end}}{{end}}{{if .Version}}{{if not .HideVersion}}
+
+VERSION:
+   {{.Version}}{{end}}{{end}}{{if .Description}}
+
+DESCRIPTION:
+   {{template "descriptionTemplate" .}}{{end}}
+{{- if len .Authors}}
+
+AUTHOR{{template "authorsTemplate" .}}{{end}}{{if .Commands}}
+
+COMMANDS:{{ $cv := offsetCommands .Commands 5}}{{range .Commands}}{{if and (not .Hidden) (ne .Name "help") (ne .Name "completion")}}
+   {{$s := join .Names ", "}}{{$s}}{{ $sp := subtract $cv (offset $s 3) }}{{ indent $sp ""}}{{wrap .Usage $cv}}{{end}}{{end}}{{range .Commands}}{{if and (not .Hidden) (eq .Name "completion")}}
+   {{$s := join .Names ", "}}{{$s}}{{ $sp := subtract $cv (offset $s 3) }}{{ indent $sp ""}}{{wrap .Usage $cv}}{{end}}{{end}}{{range .Commands}}{{if eq .Name "help"}}
+   {{$s := join .Names ", "}}{{$s}}{{ $sp := subtract $cv (offset $s 3) }}{{ indent $sp ""}}{{wrap .Usage $cv}}{{end}}{{end}}{{end}}{{if .VisibleFlagCategories}}
+
+GLOBAL OPTIONS:{{template "visibleFlagCategoryTemplate" .}}{{else if .VisibleFlags}}
+
+GLOBAL OPTIONS:{{template "visibleFlagTemplate" .}}{{end}}{{if .Copyright}}
+
+COPYRIGHT:
+   {{template "copyrightTemplate" .}}{{end}}
+`
 
 // wrapUsageError wraps urfave's flag-validation errors with
 // client.ErrUsage so they map to exit code 2. urfave's typed errors
