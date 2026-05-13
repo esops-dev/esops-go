@@ -94,17 +94,22 @@ func enrichBackingIndexStats(ctx context.Context, indexes client.IndexInspector,
 	for _, ix := range out {
 		byName[ix.Name] = ix
 	}
+	// Bind pointers per iteration so gosec G602 doesn't have to trace
+	// the nested `rows[i].Indices[j]` access through two layers of
+	// indexing — each pointer is a single bounded `&slice[idx]` step.
 	for i := range rows {
-		for j := range rows[i].Indices {
-			ix, ok := byName[rows[i].Indices[j].Name]
+		r := &rows[i]
+		for j := range r.Indices {
+			b := &r.Indices[j]
+			ix, ok := byName[b.Name]
 			if !ok {
 				continue
 			}
-			rows[i].Indices[j].Health = ix.Health
-			rows[i].Indices[j].StoreBytes = ix.StoreBytes
-			rows[i].Indices[j].DocsCount = ix.DocsCount
-			rows[i].StoreBytes += ix.StoreBytes
-			rows[i].DocsCount += ix.DocsCount
+			b.Health = ix.Health
+			b.StoreBytes = ix.StoreBytes
+			b.DocsCount = ix.DocsCount
+			r.StoreBytes += ix.StoreBytes
+			r.DocsCount += ix.DocsCount
 		}
 	}
 }
