@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -58,7 +59,8 @@ implementation detail, not a stable schema.`,
 				Usage: "Include threads parked on idle socket/queue selectors (default: hide them)",
 			},
 		},
-		Action: runHotThreads,
+		Action:        runHotThreads,
+		ShellComplete: completion.ForFlags(nodeFlagSuggesters),
 	}
 }
 

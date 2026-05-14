@@ -8,6 +8,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 	"github.com/esops-dev/esops-go/pkg/client"
@@ -66,6 +67,9 @@ time.`,
 			},
 		},
 		Action: runRepositoryList,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"repository": completion.SuggestRepositories,
+		}),
 	}
 }
 
@@ -132,6 +136,8 @@ context, --i-know-this-is-prod is required.`,
 			},
 		},
 		Action: runRepositoryRegister,
+		// --repository is the new-repo name on register, so completion
+		// would only confuse the operator; leave it un-suggested.
 	}
 }
 
@@ -208,6 +214,9 @@ context, --i-know-this-is-prod is required.`,
 			},
 		},
 		Action: runRepositoryRemove,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"repository": completion.SuggestRepositories,
+		}),
 	}
 }
 

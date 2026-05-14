@@ -7,10 +7,19 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
+
+// ismFlagSuggesters drives tab-completion for ISM subcommands.
+// The plugin keys policies by `id` (not `name`), so the policy-id
+// completer is mapped to --id; --index is shared with explain.
+var ismFlagSuggesters = map[string]completion.Suggester{
+	"id":    completion.SuggestISMPolicies,
+	"index": completion.SuggestIndices,
+}
 
 // ismCommand is the parent for `esops index ism <list|get|put|delete|
 // explain>` against an OpenSearch cluster's ISM plugin admin surface.
@@ -55,7 +64,8 @@ context fails with exit code 6 and a hint to use 'index ilm' instead.`,
 				Usage: "Limit to specific policy id(s); repeatable",
 			},
 		},
-		Action: runISMList,
+		Action:        runISMList,
+		ShellComplete: completion.ForFlags(ismFlagSuggesters),
 	}
 }
 
@@ -98,7 +108,8 @@ Read-only. ISM is OpenSearch-only.`,
 				Usage:    "Policy id (literal)",
 			},
 		},
-		Action: runISMGet,
+		Action:        runISMGet,
+		ShellComplete: completion.ForFlags(ismFlagSuggesters),
 	}
 }
 
@@ -164,7 +175,8 @@ OpenSearch-only.`,
 				Usage: "Optimistic-concurrency primary_term. Must be set together with --if-seq-no.",
 			},
 		},
-		Action: runISMPut,
+		Action:        runISMPut,
+		ShellComplete: completion.ForFlags(ismFlagSuggesters),
 	}
 }
 
@@ -223,7 +235,8 @@ OpenSearch-only.`,
 				Usage:    "Policy id (literal, no patterns)",
 			},
 		},
-		Action: runISMDelete,
+		Action:        runISMDelete,
+		ShellComplete: completion.ForFlags(ismFlagSuggesters),
 	}
 }
 
@@ -281,7 +294,8 @@ OpenSearch-only.`,
 				Usage: "Forward as ?show_policy=true (embed each managed index's policy body in the response)",
 			},
 		},
-		Action: runISMExplain,
+		Action:        runISMExplain,
+		ShellComplete: completion.ForFlags(ismFlagSuggesters),
 	}
 }
 

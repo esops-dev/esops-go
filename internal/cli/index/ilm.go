@@ -7,10 +7,19 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
+
+// ilmFlagSuggesters drives tab-completion for ILM subcommands.
+// --name maps to ILM policy IDs; --index uses the regular index
+// suggester so `index ilm explain --index logs-*` benefits too.
+var ilmFlagSuggesters = map[string]completion.Suggester{
+	"name":  completion.SuggestILMPolicies,
+	"index": completion.SuggestIndices,
+}
 
 // ilmCommand is the parent for `esops index ilm <list|get|put|delete|
 // explain>` against an Elasticsearch cluster's ILM admin surface.
@@ -55,7 +64,8 @@ context fails with exit code 6 and a hint to use 'index ism' instead.`,
 				Usage: "Limit to specific policy name(s) or pattern(s); repeatable",
 			},
 		},
-		Action: runILMList,
+		Action:        runILMList,
+		ShellComplete: completion.ForFlags(ilmFlagSuggesters),
 	}
 }
 
@@ -99,7 +109,8 @@ Read-only. ILM is Elasticsearch-only.`,
 				Usage:    "Policy name (literal)",
 			},
 		},
-		Action: runILMGet,
+		Action:        runILMGet,
+		ShellComplete: completion.ForFlags(ilmFlagSuggesters),
 	}
 }
 
@@ -153,7 +164,8 @@ required. ILM is Elasticsearch-only.`,
 				Usage: "Path to a file containing the JSON policy body",
 			},
 		},
-		Action: runILMPut,
+		Action:        runILMPut,
+		ShellComplete: completion.ForFlags(ilmFlagSuggesters),
 	}
 }
 
@@ -208,7 +220,8 @@ required. ILM is Elasticsearch-only.`,
 				Usage:    "Policy name (literal, no patterns)",
 			},
 		},
-		Action: runILMDelete,
+		Action:        runILMDelete,
+		ShellComplete: completion.ForFlags(ilmFlagSuggesters),
 	}
 }
 
@@ -271,7 +284,8 @@ Elasticsearch-only.`,
 				Usage: "Forward as ?only_managed=true (omit indices with no policy attached)",
 			},
 		},
-		Action: runILMExplain,
+		Action:        runILMExplain,
+		ShellComplete: completion.ForFlags(ilmFlagSuggesters),
 	}
 }
 

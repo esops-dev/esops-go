@@ -9,6 +9,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
@@ -64,6 +65,11 @@ context, --i-know-this-is-prod is required.`,
 			},
 		},
 		Action: runRebalance,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"index":     completion.SuggestIndices,
+			"from-node": completion.SuggestNodes,
+			"to-node":   completion.SuggestNodes,
+		}),
 	}
 }
 

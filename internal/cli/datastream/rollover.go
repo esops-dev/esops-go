@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsdatastream "github.com/esops-dev/esops-go/internal/datastream"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -58,7 +59,8 @@ context, --i-know-this-is-prod is required.`,
 				Usage: "Forward to the cluster as ?wait_for_active_shards=<value> on the new index (numeric or 'all')",
 			},
 		},
-		Action: runRollover,
+		Action:        runRollover,
+		ShellComplete: completion.ForFlags(dsNameSuggesters),
 	}
 }
 

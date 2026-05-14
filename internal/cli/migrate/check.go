@@ -7,12 +7,24 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
+
+// twinCompleteSuggesters drives tab-completion for the source/target
+// flags shared across every twin-context migrate subcommand. Both flags
+// take *context names* (not indices); --indices stays cluster-backed
+// against whichever endpoint is being typed for, which is impractical
+// to attribute correctly during completion, so it's left
+// unsuggested.
+var twinCompleteSuggesters = map[string]completion.Suggester{
+	"source": completion.SuggestContexts,
+	"target": completion.SuggestContexts,
+}
 
 func checkCommand() *cli.Command {
 	return &cli.Command{
@@ -33,8 +45,9 @@ Surfaces the cluster-side conditions that decide whether a subsequent
 Read-only on both clusters. The command exits non-zero (code 7) when
 any check is reported as a blocker, so a CI pipeline can chain
 'migrate check && migrate reindex' without an explicit grep.`,
-		Flags:  twinFlags(),
-		Action: runCheck,
+		Flags:         twinFlags(),
+		Action:        runCheck,
+		ShellComplete: completion.ForFlags(twinCompleteSuggesters),
 	}
 }
 

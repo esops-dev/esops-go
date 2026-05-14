@@ -8,6 +8,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -69,6 +70,9 @@ clusters where a full settings dump per index is multiple kilobytes.`,
 			},
 		},
 		Action: runSettingsGet,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"index": completion.SuggestIndices,
+		}),
 	}
 }
 
@@ -167,6 +171,9 @@ name a pattern that matches the indices you intend to mutate.`,
 			},
 		},
 		Action: runSettingsSet,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"index": completion.SuggestIndices,
+		}),
 	}
 }
 

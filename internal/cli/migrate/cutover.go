@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/client"
@@ -78,6 +79,11 @@ the read-only steps (verify-target-exists, inspect-alias) and prints
 			},
 		},
 		Action: runCutover,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"alias": completion.SuggestAliases,
+			"from":  completion.SuggestIndices,
+			"to":    completion.SuggestIndices,
+		}),
 	}
 }
 

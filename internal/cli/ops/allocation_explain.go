@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -43,7 +44,8 @@ per-decider breakdown ("disk watermark", "same_shard", "awaiting_info", …).`,
 				Usage: "Include YES decider rulings too (noisier; useful for 'why did it pick X')",
 			},
 		},
-		Action: runAllocationExplain,
+		Action:        runAllocationExplain,
+		ShellComplete: completion.ForFlags(indexFlagSuggesters),
 	}
 }
 

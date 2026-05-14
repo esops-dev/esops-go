@@ -8,6 +8,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -62,7 +63,8 @@ expects).`,
 				Usage: "Ask the cluster for the per-task description field (slower; useful with -o wide)",
 			},
 		},
-		Action: runTasksList,
+		Action:        runTasksList,
+		ShellComplete: completion.ForFlags(nodeFlagSuggesters),
 	}
 }
 
@@ -161,7 +163,8 @@ context, --i-know-this-is-prod is required.`,
 				Usage: "Block until the cluster reports the cancel landed (forwards wait_for_completion=true)",
 			},
 		},
-		Action: runTasksCancel,
+		Action:        runTasksCancel,
+		ShellComplete: completion.ForFlags(nodeFlagSuggesters),
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsdatastream "github.com/esops-dev/esops-go/internal/datastream"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -40,7 +41,8 @@ prod-protected context, --i-know-this-is-prod is required.`,
 				Usage: "Confirm that deleting the matched streams also destroys every backing index they own",
 			},
 		},
-		Action: runDelete,
+		Action:        runDelete,
+		ShellComplete: completion.ForFlags(dsNameSuggesters),
 	}
 }
 

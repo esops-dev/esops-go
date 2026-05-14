@@ -7,10 +7,19 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
+
+// aliasFlagSuggesters is the alias-add/remove flag-value completion
+// map. Hoisted because the same flags appear on three subcommands and
+// drift between them would be annoying to debug.
+var aliasFlagSuggesters = map[string]completion.Suggester{
+	"alias": completion.SuggestAliases,
+	"index": completion.SuggestIndices,
+}
 
 // aliasesCommand is the parent for `esops index aliases <list|add|remove>`.
 // list is read-only; add and remove mutate cluster state and trigger
@@ -45,7 +54,8 @@ Read-only and safe to run against a prod-protected context at any time.`,
 				Usage: "Limit to alias rows whose index matches one of these names, comma-separated",
 			},
 		},
-		Action: runAliasesList,
+		Action:        runAliasesList,
+		ShellComplete: completion.ForFlags(aliasFlagSuggesters),
 	}
 }
 
@@ -104,8 +114,9 @@ OpenSearch query DSL fragment) to install a filtered alias; the
 cluster validates it. --routing forwards as the alias's routing
 value; --is-write-index marks this binding as the alias's write
 target (used for rolling-write aliases).`,
-		Flags:  aliasesUpdateFlags(true),
-		Action: runAliasesAdd,
+		Flags:         aliasesUpdateFlags(true),
+		Action:        runAliasesAdd,
+		ShellComplete: completion.ForFlags(aliasFlagSuggesters),
 	}
 }
 
@@ -120,8 +131,9 @@ context, --i-know-this-is-prod is required.
 Both --alias and --index must be literal names. To remove every
 binding for an alias, run remove once per index (or use a script
 on top of 'index aliases list -o json').`,
-		Flags:  aliasesUpdateFlags(false),
-		Action: runAliasesRemove,
+		Flags:         aliasesUpdateFlags(false),
+		Action:        runAliasesRemove,
+		ShellComplete: completion.ForFlags(aliasFlagSuggesters),
 	}
 }
 

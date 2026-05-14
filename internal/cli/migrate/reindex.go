@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -97,7 +98,8 @@ submitted, and exits without firing /_reindex.`,
 				Usage: "Resume a prior interrupted run from $XDG_STATE_HOME/esops/migrate; do not submit new reindexes",
 			},
 		),
-		Action: runReindex,
+		Action:        runReindex,
+		ShellComplete: completion.ForFlags(twinCompleteSuggesters),
 	}
 }
 
