@@ -8,6 +8,7 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -29,7 +30,7 @@ the operator-friendly way to skip already-merged indices when triaging
 fragmentation. --sort defaults to name; "count" surfaces the most
 fragmented indices first, "deleted" surfaces the indices where
 --only-expunge-deletes would reclaim the most space.`,
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:  "index",
 				Usage: "Comma-separated index names or patterns (default: all indices)",
@@ -47,7 +48,7 @@ fragmented indices first, "deleted" surfaces the indices where
 				Usage: "Sort by: name | count | deleted | bytes",
 				Value: "name",
 			},
-		},
+		}, watch.Flags()...),
 		Action: runSegments,
 		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
 			"index": completion.SuggestIndices,
@@ -74,11 +75,12 @@ func runSegments(ctx context.Context, cmd *cli.Command) error {
 		Hidden:      cmd.Bool("hidden"),
 		Sort:        sortKey,
 	}
-	report, err := esopsindex.Segments(ctx, s.Client.Segments, opts)
-	if err != nil {
-		return err
-	}
-
-	s.Log("index.segments", "indices", len(report.Indices))
-	return output.Segments(os.Stdout, report, s.Format)
+	return watch.Run(ctx, cmd, "esops index segments", s.Format, func(ctx context.Context) error {
+		report, err := esopsindex.Segments(ctx, s.Client.Segments, opts)
+		if err != nil {
+			return err
+		}
+		s.Log("index.segments", "indices", len(report.Indices))
+		return output.Segments(os.Stdout, report, s.Format)
+	})
 }

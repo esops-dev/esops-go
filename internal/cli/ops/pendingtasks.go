@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -27,6 +28,7 @@ healthy burst from a stuck master.
 
 The cluster's own queue ordering is preserved — entries with lower
 insert_order are older.`,
+		Flags:  watch.Flags(),
 		Action: runPendingTasks,
 	}
 }
@@ -39,10 +41,12 @@ func runPendingTasks(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	tasks, err := esopsops.ListPendingTasks(ctx, s.Client.PendingTasks)
-	if err != nil {
-		return err
-	}
-	s.Log("ops.pending_tasks", "tasks", len(tasks))
-	return output.PendingTasks(os.Stdout, tasks, s.Format)
+	return watch.Run(ctx, cmd, "esops ops pending-tasks", s.Format, func(ctx context.Context) error {
+		tasks, err := esopsops.ListPendingTasks(ctx, s.Client.PendingTasks)
+		if err != nil {
+			return err
+		}
+		s.Log("ops.pending_tasks", "tasks", len(tasks))
+		return output.PendingTasks(os.Stdout, tasks, s.Format)
+	})
 }

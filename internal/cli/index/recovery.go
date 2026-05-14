@@ -8,6 +8,7 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -32,7 +33,7 @@ Wide output adds the source snapshot tuple and raw byte/file totals;
 the default keeps to stage, primary, percent recovered, and a
 human-readable size so an operator watching a restore can tell at a
 glance which shards are still copying.`,
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:  "index",
 				Usage: "Comma-separated index names or patterns (default: all indices)",
@@ -42,7 +43,7 @@ glance which shards are still copying.`,
 				Usage: "Only show shards still recovering (drops DONE entries)",
 				Value: true,
 			},
-		},
+		}, watch.Flags()...),
 		Action: runRecovery,
 		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
 			"index": completion.SuggestIndices,
@@ -62,20 +63,21 @@ func runRecovery(ctx context.Context, cmd *cli.Command) error {
 		Pattern:    cmd.String("index"),
 		ActiveOnly: cmd.Bool("active-only"),
 	}
-	report, err := esopsindex.Recovery(ctx, s.Client.Recovery, opts)
-	if err != nil {
-		return err
-	}
-
-	shardCount := 0
-	for _, ix := range report.Indices {
-		shardCount += len(ix.Shards)
-	}
-	s.Log("index.recovery",
-		"indices", len(report.Indices),
-		"shards", shardCount,
-		"all_done", report.AllDone,
-		"active_only", opts.ActiveOnly,
-	)
-	return output.Recovery(os.Stdout, report, s.Format)
+	return watch.Run(ctx, cmd, "esops index recovery", s.Format, func(ctx context.Context) error {
+		report, err := esopsindex.Recovery(ctx, s.Client.Recovery, opts)
+		if err != nil {
+			return err
+		}
+		shardCount := 0
+		for _, ix := range report.Indices {
+			shardCount += len(ix.Shards)
+		}
+		s.Log("index.recovery",
+			"indices", len(report.Indices),
+			"shards", shardCount,
+			"all_done", report.AllDone,
+			"active_only", opts.ActiveOnly,
+		)
+		return output.Recovery(os.Stdout, report, s.Format)
+	})
 }
