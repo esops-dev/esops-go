@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsdatastream "github.com/esops-dev/esops-go/internal/datastream"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -35,7 +36,8 @@ flag for them — pass --name '.*' if you want to scan them specifically.`,
 				Usage: "Limit to specific data stream name(s) or pattern(s); repeatable",
 			},
 		},
-		Action: runList,
+		Action:        runList,
+		ShellComplete: completion.ForFlags(dsNameSuggesters),
 	}
 }
 

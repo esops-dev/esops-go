@@ -7,9 +7,20 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsdatastream "github.com/esops-dev/esops-go/internal/datastream"
 	"github.com/esops-dev/esops-go/internal/output"
 )
+
+// dsModifySuggesters extends dsNameSuggesters with index suggestions
+// for --add-index / --remove-index. The backing-index splice flags
+// always take literal index names, so the regular index completer
+// applies.
+var dsModifySuggesters = map[string]completion.Suggester{
+	"name":         completion.SuggestDataStreams,
+	"add-index":    completion.SuggestIndices,
+	"remove-index": completion.SuggestIndices,
+}
 
 func modifyCommand() *cli.Command {
 	return &cli.Command{
@@ -41,7 +52,8 @@ context, --i-know-this-is-prod is required.`,
 				Usage: "Backing index to remove from the data stream; repeatable",
 			},
 		},
-		Action: runModify,
+		Action:        runModify,
+		ShellComplete: completion.ForFlags(dsModifySuggesters),
 	}
 }
 

@@ -7,9 +7,17 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 )
+
+// templateNameSuggesters drives tab-completion for the --name flag on
+// every `index template *` subcommand. Hoisted because the same map
+// is wired on four call sites.
+var templateNameSuggesters = map[string]completion.Suggester{
+	"name": completion.SuggestIndexTemplates,
+}
 
 // templateCommand is the parent for `esops index template
 // <list|get|put|delete>`. list and get are read-only; put and delete
@@ -48,7 +56,8 @@ to narrow the response.`,
 				Usage: "Limit to specific template name(s) or pattern(s); repeatable",
 			},
 		},
-		Action: runTemplateList,
+		Action:        runTemplateList,
+		ShellComplete: completion.ForFlags(templateNameSuggesters),
 	}
 }
 
@@ -93,7 +102,8 @@ time.`,
 				Usage:    "Template name (literal)",
 			},
 		},
-		Action: runTemplateGet,
+		Action:        runTemplateGet,
+		ShellComplete: completion.ForFlags(templateNameSuggesters),
 	}
 }
 
@@ -154,7 +164,8 @@ for first-time installs in a CI pipeline.`,
 				Usage: "Forward as ?create=true (refuse if a template with this name already exists)",
 			},
 		},
-		Action: runTemplatePut,
+		Action:        runTemplatePut,
+		ShellComplete: completion.ForFlags(templateNameSuggesters),
 	}
 }
 
@@ -212,7 +223,8 @@ required.`,
 				Usage:    "Template name (literal, no patterns)",
 			},
 		},
-		Action: runTemplateDelete,
+		Action:        runTemplateDelete,
+		ShellComplete: completion.ForFlags(templateNameSuggesters),
 	}
 }
 

@@ -8,11 +8,22 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
+
+// snapshotFlagSuggesters drives tab-completion for `snapshot *`
+// subcommands. SuggestSnapshots needs --repository to have been
+// supplied already (snapshot names are scoped per-repo); when the
+// operator tabs --snapshot first, the suggester returns nothing,
+// which is the right outcome.
+var snapshotFlagSuggesters = map[string]completion.Suggester{
+	"repository": completion.SuggestRepositories,
+	"snapshot":   completion.SuggestSnapshots,
+}
 
 // listCommand is `esops snapshot list` — list snapshots inside one or
 // more repositories. The parallel verb `snapshot repository list`
@@ -71,7 +82,8 @@ Read-only and safe to run against a prod-protected context at any time.`,
 				Usage: "Ask the cluster for the lightweight envelope (verbose=false). ES 7.15+ / OS 2.x.",
 			},
 		},
-		Action: runList,
+		Action:        runList,
+		ShellComplete: completion.ForFlags(snapshotFlagSuggesters),
 	}
 }
 

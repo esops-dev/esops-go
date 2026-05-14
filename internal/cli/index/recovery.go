@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -43,6 +44,9 @@ glance which shards are still copying.`,
 			},
 		},
 		Action: runRecovery,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"index": completion.SuggestIndices,
+		}),
 	}
 }
 

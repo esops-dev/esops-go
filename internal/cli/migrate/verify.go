@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -50,7 +51,8 @@ Verify-then-cutover is one runbook command:
 				Usage: "Explicit target index name; only valid when --indices resolves to one source. Mirrors `migrate reindex --to-index`.",
 			},
 		),
-		Action: runVerify,
+		Action:        runVerify,
+		ShellComplete: completion.ForFlags(twinCompleteSuggesters),
 	}
 }
 

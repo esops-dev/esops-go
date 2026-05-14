@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -36,7 +37,8 @@ dialect) when targeted at an OS context.`,
 				Usage: "Limit the index_settings category to indices matching this pattern (cluster-wildcard syntax)",
 			},
 		},
-		Action: runDeprecations,
+		Action:        runDeprecations,
+		ShellComplete: completion.ForFlags(indexFlagSuggesters),
 	}
 }
 

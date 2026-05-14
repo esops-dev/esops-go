@@ -11,6 +11,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
@@ -95,7 +96,8 @@ context, --i-know-this-is-prod is required.`,
 				Usage: "Cluster-side master_timeout for this request (e.g. 1m). Default: cluster default (30s).",
 			},
 		},
-		Action: runCreate,
+		Action:        runCreate,
+		ShellComplete: completion.ForFlags(snapshotFlagSuggesters),
 	}
 }
 

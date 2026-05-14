@@ -36,7 +36,11 @@ func Run(ctx context.Context, args []string) error {
 		Flags:                           globalFlags(),
 		EnableShellCompletion:           true,
 		ConfigureShellCompletionCommand: completion.Configure,
-		Before:                          initLogger,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"context": completion.SuggestContexts,
+			"cluster": completion.SuggestContexts,
+		}),
+		Before: initLogger,
 		Commands: []*cli.Command{
 			ops.Command(),
 			indexcmd.Command(),
@@ -231,6 +235,16 @@ func globalFlags() []cli.Flag {
 		&cli.BoolFlag{
 			Name:  "i-know-this-is-prod",
 			Usage: "Required for destructive operations against a prod-protected context",
+		},
+		&cli.DurationFlag{
+			Name:  "complete-timeout",
+			Usage: "Hard timeout for cluster-backed tab-completion lookups (e.g. --context, --index, --repository)",
+			Value: completion.DefaultCompleteTimeout,
+		},
+		&cli.DurationFlag{
+			Name:  "complete-cache",
+			Usage: "TTL for cached tab-completion results under $XDG_CACHE_HOME/esops/complete; 0 disables caching",
+			Value: completion.DefaultCompleteCacheTTL,
 		},
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 )
@@ -66,7 +67,8 @@ extra flags.`,
 				Usage: "Cluster-side timeout for --deep (forwarded to ?timeout)",
 			},
 		},
-		Action: runVerify,
+		Action:        runVerify,
+		ShellComplete: completion.ForFlags(snapshotFlagSuggesters),
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsmigrate "github.com/esops-dev/esops-go/internal/migrate"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -43,7 +44,8 @@ convention as 'migrate check'.`,
 				Usage: "Override the duration estimate's docs/sec rate (0 = package default)",
 			},
 		),
-		Action: runPlan,
+		Action:        runPlan,
+		ShellComplete: completion.ForFlags(twinCompleteSuggesters),
 	}
 }
 

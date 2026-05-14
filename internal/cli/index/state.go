@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -24,6 +25,9 @@ Mutates cluster state. Use --dry-run first; against a prod-protected
 context, --i-know-this-is-prod is required.`,
 		Flags:  stateChangeFlags(),
 		Action: runStateChange(types.IndexStateOpen),
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"index": completion.SuggestIndices,
+		}),
 	}
 }
 
@@ -41,6 +45,9 @@ first; against a prod-protected context, --i-know-this-is-prod is
 required.`,
 		Flags:  stateChangeFlags(),
 		Action: runStateChange(types.IndexStateClose),
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"index": completion.SuggestIndices,
+		}),
 	}
 }
 

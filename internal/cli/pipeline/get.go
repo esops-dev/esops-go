@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopspipeline "github.com/esops-dev/esops-go/internal/pipeline"
 )
@@ -34,6 +35,9 @@ Elasticsearch and OpenSearch.`,
 			},
 		},
 		Action: runGet,
+		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
+			"name": completion.SuggestPipelines,
+		}),
 	}
 }
 

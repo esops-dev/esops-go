@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -47,7 +48,8 @@ context, --i-know-this-is-prod is required.`,
 				Usage: "Also clear /_cluster/voting_config_exclusions (cluster-wide; the API only supports clear-all)",
 			},
 		},
-		Action: runUncordon,
+		Action:        runUncordon,
+		ShellComplete: completion.ForFlags(nodeFlagSuggesters),
 	}
 }
 

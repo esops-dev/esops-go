@@ -15,6 +15,7 @@ func Command() *cli.Command {
 			getContextsCommand(),
 			useContextCommand(),
 			viewCommand(),
+			cacheClearCommand(),
 		},
 	}
 }

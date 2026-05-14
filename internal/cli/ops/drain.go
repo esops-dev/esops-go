@@ -10,6 +10,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -75,7 +76,8 @@ in place until ops uncordon removes it.`,
 				Usage: "Read-only: print current drained nodes and voting exclusions, then exit",
 			},
 		},
-		Action: runDrain,
+		Action:        runDrain,
+		ShellComplete: completion.ForFlags(nodeFlagSuggesters),
 	}
 }
 

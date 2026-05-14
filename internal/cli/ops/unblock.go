@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -45,7 +46,8 @@ name a pattern that matches the indices you intend to unblock.`,
 				Usage: "Treat missing indices as a no-op instead of a 404 error",
 			},
 		},
-		Action: runUnblock,
+		Action:        runUnblock,
+		ShellComplete: completion.ForFlags(indexFlagSuggesters),
 	}
 }
 

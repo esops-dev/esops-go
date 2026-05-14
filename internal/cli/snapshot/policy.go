@@ -9,10 +9,17 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 	"github.com/esops-dev/esops-go/pkg/client"
 )
+
+// snapshotPolicySuggesters drives tab-completion for `snapshot policy
+// *` subcommands — --name maps to SLM/SM policy IDs.
+var snapshotPolicySuggesters = map[string]completion.Suggester{
+	"name": completion.SuggestSnapshotPolicies,
+}
 
 // policyCommand is the parent for `esops snapshot policy
 // <list|get|put|delete|execute>`. Backed by SLM on Elasticsearch and
@@ -62,7 +69,8 @@ per-id under the hood — same flag, same behaviour at the CLI surface.`,
 				Usage: "Limit to specific policy name(s); repeatable",
 			},
 		},
-		Action: runPolicyList,
+		Action:        runPolicyList,
+		ShellComplete: completion.ForFlags(snapshotPolicySuggesters),
 	}
 }
 
@@ -105,7 +113,8 @@ Read-only.`,
 				Usage:    "Policy name (literal)",
 			},
 		},
-		Action: runPolicyGet,
+		Action:        runPolicyGet,
+		ShellComplete: completion.ForFlags(snapshotPolicySuggesters),
 	}
 }
 
@@ -160,7 +169,8 @@ is required.`,
 				Usage: "Path to a file containing the JSON policy body",
 			},
 		},
-		Action: runPolicyPut,
+		Action:        runPolicyPut,
+		ShellComplete: completion.ForFlags(snapshotPolicySuggesters),
 	}
 }
 
@@ -216,7 +226,8 @@ is required.`,
 				Usage:    "Policy name (literal, no patterns)",
 			},
 		},
-		Action: runPolicyDelete,
+		Action:        runPolicyDelete,
+		ShellComplete: completion.ForFlags(snapshotPolicySuggesters),
 	}
 }
 
@@ -273,7 +284,8 @@ dry-run for execute).`,
 				Usage:    "Policy name (literal, no patterns)",
 			},
 		},
-		Action: runPolicyExecute,
+		Action:        runPolicyExecute,
+		ShellComplete: completion.ForFlags(snapshotPolicySuggesters),
 	}
 }
 

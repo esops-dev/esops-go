@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
@@ -60,7 +61,8 @@ Mutates cluster state. Against a prod-protected context,
 				Usage: "When the bulk DELETE 404s on one or more names (concurrent operator), retry remaining names individually and report the missing ones in the audit trail",
 			},
 		},
-		Action: runPrune,
+		Action:        runPrune,
+		ShellComplete: completion.ForFlags(snapshotFlagSuggesters),
 	}
 }
 

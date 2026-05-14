@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsdatastream "github.com/esops-dev/esops-go/internal/datastream"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -33,7 +34,8 @@ and OpenSearch.`,
 				Usage:    "Data stream name (literal)",
 			},
 		},
-		Action: runGet,
+		Action:        runGet,
+		ShellComplete: completion.ForFlags(dsNameSuggesters),
 	}
 }
 
