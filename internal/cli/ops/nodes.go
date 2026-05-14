@@ -7,6 +7,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
 )
@@ -24,6 +25,7 @@ The same /_cat/nodes pull powers shard-skew analysis (ops shards
 analyze) — a node holding zero shards is invisible to /_cat/shards
 but still listed here, which is exactly the row that matters when a
 freshly-added or drained node is the cause of allocation drift.`,
+		Flags:  watch.Flags(),
 		Action: runNodes,
 	}
 }
@@ -36,11 +38,12 @@ func runNodes(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	nodes, err := esopsops.Nodes(ctx, s.Client.Nodes)
-	if err != nil {
-		return err
-	}
-
-	s.Log("ops.nodes", "nodes", len(nodes))
-	return output.Nodes(os.Stdout, nodes, s.Format)
+	return watch.Run(ctx, cmd, "esops ops nodes", s.Format, func(ctx context.Context) error {
+		nodes, err := esopsops.Nodes(ctx, s.Client.Nodes)
+		if err != nil {
+			return err
+		}
+		s.Log("ops.nodes", "nodes", len(nodes))
+		return output.Nodes(os.Stdout, nodes, s.Format)
+	})
 }

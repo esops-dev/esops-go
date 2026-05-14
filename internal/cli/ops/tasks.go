@@ -9,6 +9,7 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	"github.com/esops-dev/esops-go/pkg/client"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -45,7 +46,7 @@ names with shell-style wildcards ("*search*", "indices:data/write/*").
 --nodes accepts node names or IDs. --parent-task-id narrows to the
 descendants of one composite ID (the same shape ops tasks cancel
 expects).`,
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringSliceFlag{
 				Name:  "actions",
 				Usage: "Filter by cluster action name(s). Repeatable, or comma-separated. Wildcards allowed",
@@ -62,7 +63,7 @@ expects).`,
 				Name:  "detailed",
 				Usage: "Ask the cluster for the per-task description field (slower; useful with -o wide)",
 			},
-		},
+		}, watch.Flags()...),
 		Action:        runTasksList,
 		ShellComplete: completion.ForFlags(nodeFlagSuggesters),
 	}
@@ -83,39 +84,41 @@ func runTasksList(ctx context.Context, cmd *cli.Command) error {
 		Detailed:     cmd.Bool("detailed"),
 	}
 
-	// NDJSON takes the streaming path: rows reach stdout as the
-	// cluster's response is decoded so a fleet running thousands of
-	// concurrent tasks doesn't have to be buffered before the first
-	// row prints. Other formats (table/json/yaml/wide) need the full
-	// sorted set, so they go through ListTasks which buffers, sorts,
-	// and renders.
-	if s.Format == output.FormatNDJSON {
-		count := 0
-		err := output.TasksNDJSONStream(os.Stdout, func(yield func(types.Task) error) error {
-			return esopsops.ListTasksStream(ctx, s.Client.Tasks, filter, func(t types.Task) error {
-				count++
-				return yield(t)
+	return watch.Run(ctx, cmd, "esops ops tasks list", s.Format, func(ctx context.Context) error {
+		// NDJSON takes the streaming path: rows reach stdout as the
+		// cluster's response is decoded so a fleet running thousands
+		// of concurrent tasks doesn't have to be buffered before the
+		// first row prints. Other formats (table/json/yaml/wide) need
+		// the full sorted set, so they go through ListTasks which
+		// buffers, sorts, and renders.
+		if s.Format == output.FormatNDJSON {
+			count := 0
+			err := output.TasksNDJSONStream(os.Stdout, func(yield func(types.Task) error) error {
+				return esopsops.ListTasksStream(ctx, s.Client.Tasks, filter, func(t types.Task) error {
+					count++
+					return yield(t)
+				})
 			})
-		})
+			if err != nil {
+				return err
+			}
+			s.Log("ops.tasks.list", "tasks", count, "stream", true,
+				"actions", filter.Actions, "nodes", filter.Nodes,
+				"parent_task_id", filter.ParentTaskID, "detailed", filter.Detailed,
+			)
+			return nil
+		}
+
+		tasks, err := esopsops.ListTasks(ctx, s.Client.Tasks, filter)
 		if err != nil {
 			return err
 		}
-		s.Log("ops.tasks.list", "tasks", count, "stream", true,
+		s.Log("ops.tasks.list", "tasks", len(tasks),
 			"actions", filter.Actions, "nodes", filter.Nodes,
 			"parent_task_id", filter.ParentTaskID, "detailed", filter.Detailed,
 		)
-		return nil
-	}
-
-	tasks, err := esopsops.ListTasks(ctx, s.Client.Tasks, filter)
-	if err != nil {
-		return err
-	}
-	s.Log("ops.tasks.list", "tasks", len(tasks),
-		"actions", filter.Actions, "nodes", filter.Nodes,
-		"parent_task_id", filter.ParentTaskID, "detailed", filter.Detailed,
-	)
-	return output.Tasks(os.Stdout, tasks, s.Format)
+		return output.Tasks(os.Stdout, tasks, s.Format)
+	})
 }
 
 func tasksCancelCommand() *cli.Command {

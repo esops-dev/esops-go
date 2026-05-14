@@ -9,6 +9,7 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	"github.com/esops-dev/esops-go/internal/logging"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -19,7 +20,7 @@ func shardsCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "shards",
 		Usage: "Show shard allocation across the cluster",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:  "index",
 				Usage: "Limit to index pattern(s), comma-separated (e.g. 'logs-*,users')",
@@ -44,7 +45,7 @@ func shardsCommand() *cli.Command {
 				Name:  "unassigned",
 				Usage: "Shortcut for --state UNASSIGNED",
 			},
-		},
+		}, watch.Flags()...),
 		// `analyze` is a subcommand of shards because it answers
 		// distribution / skew / oversized questions over the same
 		// /_cat/shards data the parent lists. urfave/cli/v3 routes a
@@ -88,18 +89,19 @@ func runShards(ctx context.Context, cmd *cli.Command) error {
 		filter.Role = types.ShardRoleReplica
 	}
 
-	shards, err := esopsops.Shards(ctx, s.Client.Shards, filter)
-	if err != nil {
-		return err
-	}
-
-	logging.Logger().Info("ops.shards",
-		"context", s.ContextName,
-		"dialect", string(s.Client.Info.Dialect),
-		"version", s.Client.Info.Version,
-		"shards", len(shards),
-	)
-	return output.Shards(os.Stdout, shards, s.Format)
+	return watch.Run(ctx, cmd, "esops ops shards", s.Format, func(ctx context.Context) error {
+		shards, err := esopsops.Shards(ctx, s.Client.Shards, filter)
+		if err != nil {
+			return err
+		}
+		logging.Logger().Info("ops.shards",
+			"context", s.ContextName,
+			"dialect", string(s.Client.Info.Dialect),
+			"version", s.Client.Info.Version,
+			"shards", len(shards),
+		)
+		return output.Shards(os.Stdout, shards, s.Format)
+	})
 }
 
 func shardsAnalyzeCommand() *cli.Command {

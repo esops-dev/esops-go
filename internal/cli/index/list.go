@@ -8,6 +8,7 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -17,7 +18,7 @@ func listCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
 		Usage: "List indices with size, docs and health",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:  "index",
 				Usage: "Limit to index pattern(s), comma-separated (e.g. 'logs-*,users')",
@@ -43,7 +44,7 @@ func listCommand() *cli.Command {
 				Usage: "Sort by: name | size | docs",
 				Value: "name",
 			},
-		},
+		}, watch.Flags()...),
 		Action: runList,
 		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
 			"index": completion.SuggestIndices,
@@ -83,31 +84,32 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 		Sort:           sortKey,
 	}
 
-	// NDJSON takes the streaming path: rows reach stdout as the cluster
-	// sends them, so a 20k-index cluster doesn't have to be buffered
-	// into memory before the first row prints. Other formats (table,
-	// json, yaml, wide) need the full sorted set, so they go through
-	// List which buffers, sorts, and renders.
-	if s.Format == output.FormatNDJSON {
-		count := 0
-		err := output.IndicesNDJSONStream(os.Stdout, func(yield func(types.Index) error) error {
-			return esopsindex.ListStream(ctx, s.Client.Indices, filter, func(ix types.Index) error {
-				count++
-				return yield(ix)
+	return watch.Run(ctx, cmd, "esops index list", s.Format, func(ctx context.Context) error {
+		// NDJSON takes the streaming path: rows reach stdout as the
+		// cluster sends them, so a 20k-index cluster doesn't have to
+		// be buffered into memory before the first row prints. Other
+		// formats (table, json, yaml, wide) need the full sorted set,
+		// so they go through List which buffers, sorts, and renders.
+		if s.Format == output.FormatNDJSON {
+			count := 0
+			err := output.IndicesNDJSONStream(os.Stdout, func(yield func(types.Index) error) error {
+				return esopsindex.ListStream(ctx, s.Client.Indices, filter, func(ix types.Index) error {
+					count++
+					return yield(ix)
+				})
 			})
-		})
+			if err != nil {
+				return err
+			}
+			s.Log("index.list", "indices", count, "stream", true)
+			return nil
+		}
+
+		indices, err := esopsindex.List(ctx, s.Client.Indices, filter)
 		if err != nil {
 			return err
 		}
-		s.Log("index.list", "indices", count, "stream", true)
-		return nil
-	}
-
-	indices, err := esopsindex.List(ctx, s.Client.Indices, filter)
-	if err != nil {
-		return err
-	}
-
-	s.Log("index.list", "indices", len(indices))
-	return output.Indices(os.Stdout, indices, s.Format)
+		s.Log("index.list", "indices", len(indices))
+		return output.Indices(os.Stdout, indices, s.Format)
+	})
 }
