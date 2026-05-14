@@ -71,7 +71,7 @@ func Run(ctx context.Context, cmd *cli.Command, label string, format output.Form
 	if !cmd.Bool("watch") {
 		return tick(ctx)
 	}
-	cfg, err := parseConfig(cmd, format, isTTY(os.Stdout))
+	cfg, err := parseConfig(cmd, format, isTTY(os.Stdout), inCI())
 	if err != nil {
 		return err
 	}
@@ -88,8 +88,8 @@ type config struct {
 	ClearScreen bool // table/wide on a real terminal — never write ANSI to a pipe
 }
 
-func parseConfig(cmd *cli.Command, format output.Format, stdoutIsTTY bool) (config, error) {
-	if inCI() {
+func parseConfig(cmd *cli.Command, format output.Format, stdoutIsTTY, ci bool) (config, error) {
+	if ci {
 		return config{}, client.UsageError("--watch is refused under CI=true; watch loops in CI are almost always a mistake")
 	}
 	switch format {

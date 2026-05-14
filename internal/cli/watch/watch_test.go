@@ -70,7 +70,7 @@ func TestRun_watchDisabled_propagatesError(t *testing.T) {
 
 func TestParseConfig_rejectsJSON(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	_, err := parseConfig(cmd, output.FormatJSON, true)
+	_, err := parseConfig(cmd, output.FormatJSON, true, false)
 	if !errors.Is(err, client.ErrUsage) {
 		t.Errorf("parseConfig with json: err = %v, want ErrUsage", err)
 	}
@@ -78,7 +78,7 @@ func TestParseConfig_rejectsJSON(t *testing.T) {
 
 func TestParseConfig_rejectsYAML(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	_, err := parseConfig(cmd, output.FormatYAML, true)
+	_, err := parseConfig(cmd, output.FormatYAML, true, false)
 	if !errors.Is(err, client.ErrUsage) {
 		t.Errorf("parseConfig with yaml: err = %v, want ErrUsage", err)
 	}
@@ -86,7 +86,7 @@ func TestParseConfig_rejectsYAML(t *testing.T) {
 
 func TestParseConfig_acceptsTable(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	cfg, err := parseConfig(cmd, output.FormatTable, true)
+	cfg, err := parseConfig(cmd, output.FormatTable, true, false)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestParseConfig_acceptsTable(t *testing.T) {
 
 func TestParseConfig_acceptsWide(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	cfg, err := parseConfig(cmd, output.FormatWide, true)
+	cfg, err := parseConfig(cmd, output.FormatWide, true, false)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestParseConfig_acceptsWide(t *testing.T) {
 
 func TestParseConfig_tableOnNonTTY_dropsClearScreen(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	cfg, err := parseConfig(cmd, output.FormatTable, false)
+	cfg, err := parseConfig(cmd, output.FormatTable, false, false)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestParseConfig_tableOnNonTTY_dropsClearScreen(t *testing.T) {
 
 func TestParseConfig_acceptsNDJSON_noHeader(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	cfg, err := parseConfig(cmd, output.FormatNDJSON, true)
+	cfg, err := parseConfig(cmd, output.FormatNDJSON, true, false)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestParseConfig_acceptsNDJSON_noHeader(t *testing.T) {
 
 func TestParseConfig_rejectsIntervalBelowMin(t *testing.T) {
 	cmd := cmdWith(t, "--watch", "--watch-interval", "100ms")
-	_, err := parseConfig(cmd, output.FormatTable, true)
+	_, err := parseConfig(cmd, output.FormatTable, true, false)
 	if !errors.Is(err, client.ErrUsage) {
 		t.Errorf("parseConfig with 100ms: err = %v, want ErrUsage", err)
 	}
@@ -150,7 +150,7 @@ func TestParseConfig_rejectsIntervalBelowMin(t *testing.T) {
 
 func TestParseConfig_rejectsIntervalAboveMax(t *testing.T) {
 	cmd := cmdWith(t, "--watch", "--watch-interval", "10m")
-	_, err := parseConfig(cmd, output.FormatTable, true)
+	_, err := parseConfig(cmd, output.FormatTable, true, false)
 	if !errors.Is(err, client.ErrUsage) {
 		t.Errorf("parseConfig with 10m: err = %v, want ErrUsage", err)
 	}
@@ -158,7 +158,7 @@ func TestParseConfig_rejectsIntervalAboveMax(t *testing.T) {
 
 func TestParseConfig_rejectsNegativeIterations(t *testing.T) {
 	cmd := cmdWith(t, "--watch", "--watch-iterations", "-1")
-	_, err := parseConfig(cmd, output.FormatTable, true)
+	_, err := parseConfig(cmd, output.FormatTable, true, false)
 	if !errors.Is(err, client.ErrUsage) {
 		t.Errorf("parseConfig with -1 iterations: err = %v, want ErrUsage", err)
 	}
@@ -166,7 +166,7 @@ func TestParseConfig_rejectsNegativeIterations(t *testing.T) {
 
 func TestParseConfig_defaultInterval(t *testing.T) {
 	cmd := cmdWith(t, "--watch")
-	cfg, err := parseConfig(cmd, output.FormatTable, true)
+	cfg, err := parseConfig(cmd, output.FormatTable, true, false)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -176,9 +176,8 @@ func TestParseConfig_defaultInterval(t *testing.T) {
 }
 
 func TestParseConfig_rejectsUnderCI(t *testing.T) {
-	t.Setenv("CI", "true")
 	cmd := cmdWith(t, "--watch")
-	_, err := parseConfig(cmd, output.FormatTable, true)
+	_, err := parseConfig(cmd, output.FormatTable, true, true)
 	if !errors.Is(err, client.ErrUsage) {
 		t.Errorf("parseConfig under CI: err = %v, want ErrUsage", err)
 	}
