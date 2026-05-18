@@ -1537,6 +1537,85 @@ type DataStreamManager interface {
 	DeleteDataStream(ctx context.Context, req types.DataStreamDeleteRequest) (types.DataStreamDeleteResult, error)
 }
 
+// TransformInspector exposes the read-only transform surface — list,
+// get, stats and preview. Both Elasticsearch (/_transform[...]) and
+// OpenSearch (/_plugins/_transform[...]) ship the same conceptual
+// shape; the adapter normalises the per-dialect envelopes onto
+// types.Transform / types.TransformStats.
+//
+// ListTransforms returns every configured transform (sorted by id in
+// the business layer for stable output). Names is a comma-joined
+// filter forwarded to the cluster at the path segment — both dialects
+// honour it on ES; OS only supports it via per-id lookups, and the
+// adapter falls back to client-side filtering when the operator
+// passed names.
+//
+// GetTransform returns one transform by literal id, or a wrapped
+// ErrNotFound the caller can match on.
+//
+// StatsTransform returns a single transform's runtime stats (state,
+// docs/processing counters, last-checkpoint time, recent failures).
+// CheckpointAgeMillis is set by the business layer from
+// CheckpointLastTimeMillis so adapters stay deterministic.
+//
+// PreviewTransform forwards the operator-supplied transform body to
+// the cluster's preview endpoint and returns a bounded sample of
+// materialised rows plus the dest-index mapping the cluster would
+// generate. Surfaced as non-exhaustive in --help.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrNotFound (wrapped) from GetTransform / StatsTransform on a 404
+//   - generic wrapped error on other 4xx/5xx with the cluster's body
+//     in the message
+type TransformInspector interface {
+	ListTransforms(ctx context.Context, names []string) ([]types.Transform, error)
+	GetTransform(ctx context.Context, name string) (types.Transform, error)
+	StatsTransform(ctx context.Context, name string) (types.TransformStats, error)
+
+	// ListTransformStats returns runtime stats for the given transform
+	// names (or every configured transform when names is nil/empty).
+	// Used by the list view's stats join so an operator's first column
+	// is operational state, not just configured definitions.
+	//
+	// ES backs this with a single GET /_transform[/<ids>]/_stats call.
+	// OS has no bulk explain endpoint — its adapter fans out per id
+	// using a bounded parallel pool, so callers get the same neutral
+	// shape with one round-trip per id on OS and one call total on ES.
+	ListTransformStats(ctx context.Context, names []string) ([]types.TransformStats, error)
+
+	PreviewTransform(ctx context.Context, req types.TransformPreviewRequest) (types.TransformPreviewResult, error)
+}
+
+// TransformManager exposes the mutating transform surface — apply,
+// delete, start and stop. Kept as a separate interface from
+// TransformInspector so external read-only consumers (esops-doctor)
+// can import the inspector without pulling in mutate methods.
+//
+// ApplyTransform creates a transform when one with the same id does
+// not exist, or replaces it when it does. The business layer performs
+// the cluster-side "fetch existing → byte-compare body → skip on
+// match" no-op short-circuit, so the adapter implementation is the
+// single-shot PUT path.
+//
+// DeleteTransform removes a transform by id. The cluster refuses to
+// delete a running transform; ForceStop=true tells the adapter to
+// issue a stop first, then delete.
+//
+// StartTransform / StopTransform are the lifecycle verbs. Stop
+// honours WaitForCheckpoint so continuous transforms can be halted
+// cleanly without leaving the destination index mid-batch.
+//
+// Errors mirror the inspector set, plus wrapped errors when a stop
+// or delete fails halfway through a multi-step flow.
+type TransformManager interface {
+	ApplyTransform(ctx context.Context, req types.TransformApplyRequest) (types.TransformApplyResult, error)
+	DeleteTransform(ctx context.Context, req types.TransformDeleteRequest) (types.TransformDeleteResult, error)
+	StartTransform(ctx context.Context, req types.TransformStartRequest) (types.TransformStartResult, error)
+	StopTransform(ctx context.Context, req types.TransformStopRequest) (types.TransformStopResult, error)
+}
+
 // Client is the composite surface returned by the cluster factory: the
 // probed cluster metadata plus one capability per feature area.
 // Business-logic callers should depend on the capability interfaces, not
@@ -1608,4 +1687,6 @@ type Client struct {
 	IngestPipeline      IngestPipelineInspector
 	DataStream          DataStreamInspector
 	DataStreamManage    DataStreamManager
+	Transform           TransformInspector
+	TransformManage     TransformManager
 }

@@ -145,6 +145,21 @@ func SuggestDataStreams(ctx context.Context, cmd *cli.Command) []string {
 	})
 }
 
+// SuggestTransforms emits configured transform ids.
+func SuggestTransforms(ctx context.Context, cmd *cli.Command) []string {
+	return clusterSuggest(ctx, cmd, "transforms", func(ctx context.Context, c *client.Client) ([]string, error) {
+		rows, err := c.Transform.ListTransforms(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(rows))
+		for _, r := range rows {
+			names = append(names, r.Name)
+		}
+		return names, nil
+	})
+}
+
 // SuggestILMPolicies emits Elasticsearch ILM policy names. On an
 // OpenSearch cluster the underlying capability returns ErrUnsupported
 // and we collapse to zero suggestions.
