@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -187,5 +188,135 @@ func TestLoadDefault_resolveErrorPropagates(t *testing.T) {
 	_, _, err := config.LoadDefault("")
 	if err == nil {
 		t.Fatal("expected error from failed resolve")
+	}
+}
+
+func TestIsSecretRef(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"hunter2", false},
+		{"${env:VAR}", true},
+		{"${file:/run/secret}", true},
+		{"${keyring:svc/acct}", true},
+		{"${env:VAR}suffix", false},
+		{"prefix${env:VAR}", false},
+		{"${ENV:VAR}", false}, // scheme is lowercase only
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := config.IsSecretRef(tc.in); got != tc.want {
+				t.Errorf("IsSecretRef(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSecretRef(t *testing.T) {
+	cases := []struct {
+		in         string
+		wantScheme string
+		wantArg    string
+		wantOK     bool
+	}{
+		{"", "", "", false},
+		{"plaintext", "", "", false},
+		{"${env:VAR}", "env", "VAR", true},
+		{"${file:/run/secret}", "file", "/run/secret", true},
+		{"${keyring:svc/acct}", "keyring", "svc/acct", true},
+		{"${keyring:svc/host:9200/path}", "keyring", "svc/host:9200/path", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			scheme, arg, ok := config.ParseSecretRef(tc.in)
+			if ok != tc.wantOK || scheme != tc.wantScheme || arg != tc.wantArg {
+				t.Errorf("ParseSecretRef(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.in, scheme, arg, ok, tc.wantScheme, tc.wantArg, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestHasPlaintextSecret(t *testing.T) {
+	cases := []struct {
+		name string
+		auth config.Auth
+		want bool
+	}{
+		{"empty", config.Auth{}, false},
+		{"plaintext password", config.Auth{Password: "hunter2"}, true},
+		{"plaintext api_key", config.Auth{APIKey: "ABC"}, true},
+		{"plaintext token", config.Auth{Token: "tok"}, true},
+		{"env-ref password", config.Auth{Password: "${env:PW}"}, false},
+		{"file-ref token", config.Auth{Token: "${file:/run/secret}"}, false},
+		{"client-cert path is not a secret", config.Auth{ClientCert: "/etc/cert.pem", ClientKey: "/etc/key.pem"}, false},
+		{"mix: ref + plaintext", config.Auth{Password: "${env:PW}", Token: "literal"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := config.HasPlaintextSecret(tc.auth); got != tc.want {
+				t.Errorf("HasPlaintextSecret(%+v) = %v, want %v", tc.auth, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContextsWithPlaintextSecret_sorted(t *testing.T) {
+	cfg := config.Config{
+		Contexts: map[string]config.Context{
+			"zulu":  {Auth: config.Auth{Password: "literal"}},
+			"alpha": {Auth: config.Auth{APIKey: "literal"}},
+			"clean": {Auth: config.Auth{Password: "${env:PW}"}},
+		},
+	}
+	got := config.ContextsWithPlaintextSecret(cfg)
+	want := []string{"alpha", "zulu"}
+	if len(got) != len(want) {
+		t.Fatalf("len=%d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestIsWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file-mode check skipped on Windows")
+	}
+	dir := t.TempDir()
+	tight := filepath.Join(dir, "tight")
+	open := filepath.Join(dir, "open")
+	if err := os.WriteFile(tight, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(open, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// os.WriteFile respects umask — force modes explicitly.
+	_ = os.Chmod(tight, 0o600)
+	_ = os.Chmod(open, 0o644)
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{tight, false},
+		{open, true},
+	} {
+		got, err := config.IsWorldReadable(tc.path)
+		if err != nil {
+			t.Fatalf("IsWorldReadable(%s): %v", tc.path, err)
+		}
+		if got != tc.want {
+			t.Errorf("IsWorldReadable(%s) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+
+	if _, err := config.IsWorldReadable(filepath.Join(dir, "missing")); err == nil {
+		t.Error("expected error for missing path")
 	}
 }

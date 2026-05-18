@@ -109,6 +109,30 @@ Default output is YAML. Use `-o json` for scripting.
 
 ---
 
+# esops config validate
+
+Validates the config file (YAML structure, auth types, secret indirection, TLS paths, protection tiers) without making any network calls. Ideal for CI/pre-merge checks.
+
+```sh
+$ esops config validate
+Config is valid: /home/op/.config/esops/config.yaml
+```
+
+**Flags**
+| Flag       | Purpose                                      |
+|------------|----------------------------------------------|
+| `--strict` | Treat warnings as errors (exit code 2)       |
+| `--output` | `table` (default) or `json`                  |
+
+**Common use cases**
+- Catch typos, missing certs, or plaintext secrets before commit
+- Pre-merge CI gate
+- Validate new contexts safely
+
+Exits with code `0` on success (warnings allowed by default) and `2` on any error. Never contacts any cluster.
+
+---
+
 ## Per-invocation overrides
 
 - `--context NAME` — use a different context for this command only

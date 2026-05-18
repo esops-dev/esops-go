@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -22,12 +21,6 @@ import (
 // yaml and json output, and short enough not to disrupt alignment
 // when an operator eyeballs the file.
 const redactionPlaceholder = "REDACTED"
-
-// secretRefPattern matches ${scheme:arg} indirection. Duplicated from
-// pkg/config so view can tell references apart from literal
-// secrets without widening the config package's exported surface —
-// indirection refs are *pointers* to secrets, safe to print verbatim.
-var secretRefPattern = regexp.MustCompile(`^\$\{[a-z]+:[^}]+\}$`)
 
 // viewDoc is the render-friendly projection of a Config. Field names
 // and casing intentionally mirror the on-disk YAML so that the output
@@ -249,7 +242,7 @@ func projectAuth(a esopsconfig.Auth, showSecrets bool) *viewAuth {
 }
 
 func maybeRedact(s string, showSecrets bool) string {
-	if showSecrets || s == "" || secretRefPattern.MatchString(s) {
+	if showSecrets || s == "" || esopsconfig.IsSecretRef(s) {
 		return s
 	}
 	return redactionPlaceholder
