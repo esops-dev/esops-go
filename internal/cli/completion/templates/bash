@@ -25,8 +25,19 @@ __{{APP}}_bash_autocomplete() {
     else
       requestComp="${words[*]} --generate-shell-completion"
     fi
-    opts=$(eval "${requestComp}" 2>/dev/null)
-    COMPREPLY=($(compgen -W "${opts}" -- ${cur}))
+    # urfave/cli emits one "name:description" per line. Strip the
+    # description suffix so compgen sees one candidate per line instead
+    # of word-splitting the entire output on whitespace (which would
+    # turn `index:Inspect and manage indices` into the candidates
+    # `index:Inspect`, `and`, `manage`, `indices`).
+    local line raw
+    raw=$(eval "${requestComp}" 2>/dev/null)
+    opts=()
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      opts+=("${line%%:*}")
+    done <<< "$raw"
+    COMPREPLY=($(compgen -W "${opts[*]}" -- "${cur}"))
     return 0
   fi
 }
