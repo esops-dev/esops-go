@@ -3965,3 +3965,232 @@ type DataStreamDeleteResult struct {
 	Names        []string `json:"names,omitempty"   yaml:"names,omitempty"`
 	Acknowledged bool     `json:"acknowledged"      yaml:"acknowledged"`
 }
+
+// Transform is the neutral view of a pivot/aggregation transform as
+// reported by GET /_transform[/<id>] (Elasticsearch) and
+// GET /_plugins/_transform[/<id>] (OpenSearch).
+//
+// The two products share the same operator-facing concepts (a job that
+// reads from one or more source indices, writes to a destination index,
+// runs as a one-shot batch or continuously) but ship genuinely
+// different wire shapes for the body. The neutral fields below cover
+// what a `transform list` row needs (id, source pattern, dest,
+// continuous flag); Definition carries the raw cluster body so
+// `transform get` can pretty-print the per-dialect detail without a
+// lossy translation.
+type Transform struct {
+	Name string `json:"name"                 yaml:"name"`
+
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+
+	// Source is the comma-joined source-index pattern the cluster
+	// reports. Both dialects accept multiple sources; the adapter
+	// flattens the list for display.
+	Source string `json:"source,omitempty"      yaml:"source,omitempty"`
+
+	// Dest is the destination index name.
+	Dest string `json:"dest,omitempty"        yaml:"dest,omitempty"`
+
+	// Continuous is true when the transform is configured to re-run on
+	// a schedule (ES: presence of `sync`, OS: `continuous: true`).
+	// Operators care about this because stopping a continuous transform
+	// halts ongoing materialisation.
+	Continuous bool `json:"continuous,omitempty"  yaml:"continuous,omitempty"`
+
+	// Version is the cluster's reported product version stamped on the
+	// transform at create time. ES surfaces it; OS does not.
+	Version string `json:"version,omitempty"     yaml:"version,omitempty"`
+
+	// CreatedAtMillis is the create-time epoch millisecond the cluster
+	// recorded. ES surfaces it on /_transform; OS does not — OS only
+	// reports UpdatedAtMillis. Empty when the cluster did not report
+	// one.
+	CreatedAtMillis int64 `json:"created_at_millis,omitempty" yaml:"created_at_millis,omitempty"`
+
+	// UpdatedAtMillis is the last-modified epoch millisecond the cluster
+	// recorded. OS surfaces it on every GET; ES does not. The renderer
+	// prefers whichever the cluster reports — both products report
+	// *some* "when this transform last changed" timestamp, just under
+	// different names.
+	UpdatedAtMillis int64 `json:"updated_at_millis,omitempty" yaml:"updated_at_millis,omitempty"`
+
+	// Definition is the raw cluster body — preserved verbatim because
+	// the source/dest/pivot/sync shapes are dialect-specific and
+	// evolving. The renderer pretty-prints this; structured consumers
+	// (--output json/yaml) get the shape the cluster returned.
+	Definition map[string]any `json:"definition,omitempty"  yaml:"definition,omitempty"`
+
+	// State is the runtime state the cluster reports on /_stats or
+	// /_explain. Populated by the list view's stats join and stays
+	// zero when no stats were fetched (e.g. `transform get`, which
+	// answers from a single GET /_transform/<id>). Same pattern
+	// DataStream uses to surface enrichment results.
+	State string `json:"state,omitempty"               yaml:"state,omitempty"`
+
+	// DocsProcessed is the cluster's running total of source documents
+	// processed by the transform. Joined from /_stats on the list view.
+	DocsProcessed int64 `json:"docs_processed,omitempty" yaml:"docs_processed,omitempty"`
+
+	// Failures is the sum of index + search failures the cluster
+	// reports, surfaced in the list table's wide mode so an operator
+	// scanning a fleet spots a misbehaving transform without paging
+	// into per-id stats.
+	Failures int64 `json:"failures,omitempty"            yaml:"failures,omitempty"`
+
+	// CheckpointLastTimeMillis is the wall-clock time the most recent
+	// checkpoint completed. ES reports it on `checkpoint.last`; OS
+	// reports it on `metadata.last_updated_at`. Joined from /_stats on
+	// the list view.
+	CheckpointLastTimeMillis int64 `json:"checkpoint_last_time_millis,omitempty" yaml:"checkpoint_last_time_millis,omitempty"`
+
+	// CheckpointAgeMillis is derived (now - CheckpointLastTimeMillis)
+	// in the business layer so renderers don't have to do arithmetic
+	// against time.Now.
+	CheckpointAgeMillis int64 `json:"checkpoint_age_millis,omitempty"     yaml:"checkpoint_age_millis,omitempty"`
+}
+
+// TransformStats normalises the stats overlap between
+// GET /_transform/<id>/_stats (Elasticsearch) and
+// GET /_plugins/_transform/<id>/_explain (OpenSearch). The two
+// products report different envelopes — ES nests counters under
+// `stats`, OS exposes them as a flat `metadata` block — so the
+// adapter is responsible for flattening to this neutral shape.
+//
+// State strings come straight from the cluster — both dialects emit
+// values like "started", "stopped", "indexing", "aborting", "failed".
+// The renderer treats them as opaque.
+//
+// CheckpointLastTimeMillis is the wall-clock time the most recent
+// checkpoint completed (ES: `checkpoint.last.timestamp_millis`, OS:
+// `metadata.last_updated_at`). CheckpointAgeMillis is derived by the
+// business layer (now - last) so the renderer doesn't have to do
+// arithmetic against `time.Now`. Both stay zero when the cluster has
+// not reported a completed checkpoint yet.
+type TransformStats struct {
+	Name string `json:"name"                          yaml:"name"`
+
+	State string `json:"state,omitempty"               yaml:"state,omitempty"`
+
+	Continuous bool `json:"continuous,omitempty"          yaml:"continuous,omitempty"`
+
+	DocsProcessed  int64 `json:"docs_processed,omitempty"   yaml:"docs_processed,omitempty"`
+	DocsIndexed    int64 `json:"docs_indexed,omitempty"     yaml:"docs_indexed,omitempty"`
+	PagesProcessed int64 `json:"pages_processed,omitempty"  yaml:"pages_processed,omitempty"`
+	TriggerCount   int64 `json:"trigger_count,omitempty"    yaml:"trigger_count,omitempty"`
+
+	SearchTimeMillis int64 `json:"search_time_millis,omitempty" yaml:"search_time_millis,omitempty"`
+	IndexTimeMillis  int64 `json:"index_time_millis,omitempty"  yaml:"index_time_millis,omitempty"`
+
+	IndexFailures  int64 `json:"index_failures,omitempty"    yaml:"index_failures,omitempty"`
+	SearchFailures int64 `json:"search_failures,omitempty"   yaml:"search_failures,omitempty"`
+
+	// CheckpointLastTimeMillis is the wall-clock time the most recent
+	// checkpoint finished. ES reports it on `checkpoint.last`; OS
+	// reports it on `metadata.last_updated_at`.
+	CheckpointLastTimeMillis int64 `json:"checkpoint_last_time_millis,omitempty" yaml:"checkpoint_last_time_millis,omitempty"`
+
+	// CheckpointAgeMillis is derived (now - CheckpointLastTimeMillis)
+	// in the business layer, so renderers can show "checkpoint age"
+	// without doing arithmetic against time.Now themselves.
+	CheckpointAgeMillis int64 `json:"checkpoint_age_millis,omitempty"      yaml:"checkpoint_age_millis,omitempty"`
+
+	// Reason carries the cluster's failure message when State is
+	// "failed". Empty otherwise.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+}
+
+// TransformApplyRequest is the input to a TransformManager.ApplyTransform
+// call. Body is the raw transform definition the operator submitted
+// (file or stdin); the adapter forwards it verbatim and lets the
+// cluster validate the shape. Update=true switches the adapter from
+// PUT-create to the cluster's update path when one exists.
+type TransformApplyRequest struct {
+	Name   string
+	Body   []byte
+	Update bool
+}
+
+// TransformApplyResult is the normalised view of an apply response.
+// Created is true when the transform did not previously exist;
+// Updated is true when the apply overwrote an existing definition;
+// Unchanged is true when the submitted body matched the existing
+// definition byte-for-byte and the adapter short-circuited the call.
+type TransformApplyResult struct {
+	Action       string `json:"action"                  yaml:"action"`
+	Name         string `json:"name"                    yaml:"name"`
+	Created      bool   `json:"created,omitempty"       yaml:"created,omitempty"`
+	Updated      bool   `json:"updated,omitempty"       yaml:"updated,omitempty"`
+	Unchanged    bool   `json:"unchanged,omitempty"     yaml:"unchanged,omitempty"`
+	DryRun       bool   `json:"dry_run,omitempty"       yaml:"dry_run,omitempty"`
+	Acknowledged bool   `json:"acknowledged,omitempty"  yaml:"acknowledged,omitempty"`
+}
+
+// TransformDeleteRequest is the input to a TransformManager.DeleteTransform
+// call. Force=true tells the adapter to stop the transform first when
+// the cluster otherwise refuses to delete a running one.
+type TransformDeleteRequest struct {
+	Name      string
+	ForceStop bool
+}
+
+// TransformDeleteResult is the normalised view of a delete response.
+// Stopped reports whether the adapter had to stop the transform first
+// to satisfy a --force-stop flow.
+type TransformDeleteResult struct {
+	Action       string `json:"action"                 yaml:"action"`
+	Name         string `json:"name"                   yaml:"name"`
+	Stopped      bool   `json:"stopped,omitempty"      yaml:"stopped,omitempty"`
+	DryRun       bool   `json:"dry_run,omitempty"      yaml:"dry_run,omitempty"`
+	Acknowledged bool   `json:"acknowledged,omitempty" yaml:"acknowledged,omitempty"`
+}
+
+// TransformStartRequest is the input to a TransformManager.StartTransform
+// call. Single literal name; no other knobs.
+type TransformStartRequest struct {
+	Name string
+}
+
+// TransformStartResult is the normalised view of a start response.
+type TransformStartResult struct {
+	Action       string `json:"action"                 yaml:"action"`
+	Name         string `json:"name"                   yaml:"name"`
+	DryRun       bool   `json:"dry_run,omitempty"      yaml:"dry_run,omitempty"`
+	Acknowledged bool   `json:"acknowledged,omitempty" yaml:"acknowledged,omitempty"`
+}
+
+// TransformStopRequest is the input to a TransformManager.StopTransform
+// call. WaitForCheckpoint asks the cluster to let the in-flight
+// checkpoint finish before halting, so the destination index isn't
+// left mid-batch — critical for continuous transforms.
+type TransformStopRequest struct {
+	Name              string
+	WaitForCheckpoint bool
+}
+
+// TransformStopResult is the normalised view of a stop response.
+type TransformStopResult struct {
+	Action            string `json:"action"                          yaml:"action"`
+	Name              string `json:"name"                            yaml:"name"`
+	WaitForCheckpoint bool   `json:"wait_for_checkpoint,omitempty"   yaml:"wait_for_checkpoint,omitempty"`
+	DryRun            bool   `json:"dry_run,omitempty"               yaml:"dry_run,omitempty"`
+	Acknowledged      bool   `json:"acknowledged,omitempty"          yaml:"acknowledged,omitempty"`
+}
+
+// TransformPreviewRequest is the input to a TransformInspector.PreviewTransform
+// call. Body is the raw transform definition the operator submitted
+// (file or stdin); the adapter forwards it to the cluster's preview
+// endpoint and returns a bounded sample of materialised rows.
+type TransformPreviewRequest struct {
+	Body []byte
+}
+
+// TransformPreviewResult is the normalised view of a preview response.
+// Documents is the bounded sample of materialised rows the cluster
+// returned; Mappings is the dest-index mapping the cluster would
+// generate. Both products surface the same conceptual shape; we
+// preserve the cluster's payload as map[string]any so the renderer
+// can pretty-print it without a typed schema.
+type TransformPreviewResult struct {
+	Documents []map[string]any `json:"documents,omitempty" yaml:"documents,omitempty"`
+	Mappings  map[string]any   `json:"mappings,omitempty"  yaml:"mappings,omitempty"`
+}

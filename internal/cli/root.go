@@ -20,6 +20,7 @@ import (
 	"github.com/esops-dev/esops-go/internal/cli/ops"
 	pipelinecmd "github.com/esops-dev/esops-go/internal/cli/pipeline"
 	snapshotcmd "github.com/esops-dev/esops-go/internal/cli/snapshot"
+	transformcmd "github.com/esops-dev/esops-go/internal/cli/transform"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/logging"
@@ -47,6 +48,7 @@ func Run(ctx context.Context, args []string) error {
 			datastreamcmd.Command(),
 			snapshotcmd.Command(),
 			pipelinecmd.Command(),
+			transformcmd.Command(),
 			configcmd.Command(),
 			migratecmd.Command(),
 		},
