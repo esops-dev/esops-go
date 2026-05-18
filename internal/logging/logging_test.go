@@ -190,3 +190,61 @@ func TestRedactingHandler_enabledDelegates(t *testing.T) {
 		t.Error("expected warn to be enabled under info-level handler")
 	}
 }
+
+func TestValidateLevel(t *testing.T) {
+	// ValidateLevel and Init must agree — every accepted value here
+	// should also be accepted by Init, and every rejection here should
+	// trip Init's parseLevel call.
+	cases := []struct {
+		in  string
+		bad bool
+	}{
+		{"", false},
+		{"info", false},
+		{"INFO", false},
+		{" debug ", false},
+		{"warn", false},
+		{"warning", false},
+		{"error", false},
+		{"trace", true},
+		{"verbose", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			err := ValidateLevel(tc.in)
+			if tc.bad && err == nil {
+				t.Errorf("ValidateLevel(%q): want error, got nil", tc.in)
+			}
+			if !tc.bad && err != nil {
+				t.Errorf("ValidateLevel(%q): unexpected error: %v", tc.in, err)
+			}
+		})
+	}
+}
+
+func TestValidateFormat(t *testing.T) {
+	cases := []struct {
+		in  string
+		bad bool
+	}{
+		{"", false},
+		{"text", false},
+		{"TEXT", false},
+		{"json", false},
+		{" json ", false},
+		{"ndjson", true},
+		{"yaml", true},
+		{"logfmt", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			err := ValidateFormat(tc.in)
+			if tc.bad && err == nil {
+				t.Errorf("ValidateFormat(%q): want error, got nil", tc.in)
+			}
+			if !tc.bad && err != nil {
+				t.Errorf("ValidateFormat(%q): unexpected error: %v", tc.in, err)
+			}
+		})
+	}
+}

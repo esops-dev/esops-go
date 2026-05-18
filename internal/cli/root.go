@@ -119,13 +119,24 @@ func wrapUsageError(err error) error {
 // at Before time so every subcommand observes the same logger. Config
 // load is best-effort: if no config is found the command may still be
 // useful (e.g. `esops --help`), so we don't fail here.
+//
+// A bad logger value (typo in defaults.log_level, --log-format=yamll,
+// unwritable --log-file) must not block the command tree — notably
+// `config validate`, whose entire job is to *surface* this exact class
+// of bug. On failure we print a one-line warning to stderr, retry with
+// safe builtins, and proceed.
 func initLogger(ctx context.Context, cmd *cli.Command) (context.Context, error) {
 	defaults := readDefaults(cmd.String("config"))
 	level := resolveSetting(cmd, "log-level", defaults.LogLevel, "info")
 	format := resolveSetting(cmd, "log-format", defaults.LogFormat, defaultLogFormat())
 	logFile := resolveSetting(cmd, "log-file", defaults.LogFile, "")
 	if err := logging.Init(level, format, logFile); err != nil {
-		return ctx, err
+		fmt.Fprintf(os.Stderr, "esops: warning: %v; falling back to default logger\n", err)
+		// Builtin fallback is guaranteed valid; a second failure would
+		// indicate a programming error, surface it.
+		if err := logging.Init("info", "text", ""); err != nil {
+			return ctx, err
+		}
 	}
 	return ctx, nil
 }

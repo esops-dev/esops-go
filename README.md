@@ -6,10 +6,25 @@
 [![Release](https://img.shields.io/github/v/release/esops-dev/esops-go?include_prereleases&sort=semver)](https://github.com/esops-dev/esops-go/releases)
 [![License](https://img.shields.io/github/license/esops-dev/esops-go)](LICENSE)
 
-> [!WARNING]
-> Early scaffolding. Interfaces and exit codes are not yet stable. Not yet production ready.
 
 `esops` is a Go based binary for Site Reliability Engineering (SRE) and DevOps processes. These processes can be both day-to-day maintenance and large scale migration efforts on a long-term basis against both Elasticsearch and OpenSearch. Both product implementations have the same Command Line Interface (CLI) as the rest of its counterparts. The actual implementations only differ in implementation (i.e. ILM & ISM etc.) or through snapshot key differences and/or re-indexing dialect.
+
+Showing the health of your cluster.
+
+```bash
+$ esops ops health -o wide
+NAME               STATUS  DIALECT        VERSION  NODES  DATA_NODES  SHARDS  PRIMARIES  RELOC  INIT  UNASSIGNED  PENDING  ACTIVE%
+esops-dev-es-mtls  green   elasticsearch  9.3.3    1      1           3       3          0      0     0           0        100.0
+```
+
+Showing all the 'yellow' indices.
+```bash
+$ esops index list --health yellow --context local-os -o wide
+NAME                  HEALTH  STATUS  PRI  REP  DOCS  DELETED  STORE  PRI_STORE  UUID                    CREATED
+esops-stuck-replicas  yellow  open    1    3    1     0        4.2kb  4.2kb      PFHUKha7RXmCOlj4kegBVQ  2026-05-07T08:20:57Z
+```
+
+And many more.
 
 ## Why esops
 
@@ -22,15 +37,6 @@ The older the ES/OS cluster gets, the more often you will find yourself typing c
 * Pipeline-friendly by design: `CI=true` auto-enables non-interactive mode and JSON logging. Stdout is pure data; stderr gets logs and progress. NDJSON streams large results without buffering.
 * One-command diagnostics: `esops ops diag` bundles health, shards, hot threads, tasks, ILM/ISM, snapshots, etc. into a credential-free tarball: perfect for support tickets.
 * Single static binary, `CGO_ENABLED=0`. No JVM, no Python runtime, no Docker. Drops into Alpine or scratch images without dragging a runtime along.
-
-```bash
-$ esops ops health -o wide
-NAME               STATUS  DIALECT        VERSION  NODES  DATA_NODES  SHARDS  PRIMARIES  RELOC  INIT  UNASSIGNED  PENDING  ACTIVE%
-esops-dev-es-mtls  green   elasticsearch  9.3.3    1      1           3       3          0      0     0           0        100.0
-$ esops index list --health yellow --context local-os -o wide
-NAME                  HEALTH  STATUS  PRI  REP  DOCS  DELETED  STORE  PRI_STORE  UUID                    CREATED
-esops-stuck-replicas  yellow  open    1    3    1     0        4.2kb  4.2kb      PFHUKha7RXmCOlj4kegBVQ  2026-05-07T08:20:57Z
-```
 
 ----
 
@@ -106,7 +112,7 @@ migrate     plan · check · reindex · verify · cutover
 index       list · optimize · rollover · shrink · open · close
             aliases · settings · template · ilm (ES) · ism (OS)
 snapshot    list · create · verify · restore · prune · register · deregister
-config      use-context · get-contexts · view
+config      use-context · get-contexts · view · validate
 ```
 
 See [docs/](docs/) for per-command reference.
@@ -130,6 +136,16 @@ See [docs/](docs/) for per-command reference.
 | `--url URL` | Override: single cluster URL |
 
 `CI=true` in the environment auto-enables `--no-prompt` and defaults `--log-format=json`.
+
+## CI: validate your config
+
+`esops config validate` lints the config file without contacting any cluster. Intended for a pre-merge job so a typo doesn't roll out across a fleet:
+
+```sh
+esops --config esops.yaml config validate --strict
+```
+
+Default mode exits `0` on warnings, `2` on errors; `--strict` treats warnings as failures too. `--output json` emits a findings array for CI annotation tooling. Cluster-side checks ("does this config match reality") remain `migrate check`'s job.
 
 ## Documentation
 

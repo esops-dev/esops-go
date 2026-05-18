@@ -231,8 +231,8 @@ func Load(path string) (Config, error) {
 // It inspects the *parsed* (pre-resolution) config so ${env:...} etc.
 // are recognised as indirection and not flagged as plaintext.
 func checkSafety(path string, cfg Config) error {
-	plaintextCtxs := contextsWithPlaintextSecret(cfg)
-	worldReadable, err := isWorldReadable(path)
+	plaintextCtxs := ContextsWithPlaintextSecret(cfg)
+	worldReadable, err := IsWorldReadable(path)
 	if err != nil {
 		return fmt.Errorf("checking config permissions: %w", err)
 	}
@@ -262,11 +262,15 @@ func checkSafety(path string, cfg Config) error {
 	return nil
 }
 
-// isWorldReadable reports whether the file at path is readable by
-// others (the low `r` bit of the mode). On Windows, where os.Stat's
-// mode does not reflect real ACLs, always returns false — the check
-// would be misleading.
-func isWorldReadable(path string) (bool, error) {
+// IsWorldReadable reports whether the file at path has its world-read
+// mode bit set. On Windows, where os.Stat's mode does not reflect real
+// ACLs, always returns false — the check would be misleading.
+//
+// Exported so callers that lint the same on-disk shape (the CLI's
+// `config validate`) can apply identical rules to the runtime loader.
+// Drift between the loader's safety check and any external lint is a
+// bug; sharing this function is how we prevent it.
+func IsWorldReadable(path string) (bool, error) {
 	if runtime.GOOS == "windows" {
 		return false, nil
 	}
@@ -277,13 +281,17 @@ func isWorldReadable(path string) (bool, error) {
 	return info.Mode().Perm()&0o004 != 0, nil
 }
 
-// contextsWithPlaintextSecret returns the names of contexts whose auth
+// ContextsWithPlaintextSecret returns the names of contexts whose auth
 // block contains at least one non-empty secret field that isn't an
 // indirection reference. Sorted for stable warnings.
-func contextsWithPlaintextSecret(cfg Config) []string {
+//
+// Exported alongside HasPlaintextSecret so external linters (e.g.
+// `config validate`) share the loader's plaintext detection rather
+// than replicating it. See IsWorldReadable for the drift rationale.
+func ContextsWithPlaintextSecret(cfg Config) []string {
 	var names []string
 	for name, c := range cfg.Contexts {
-		if hasPlaintextSecret(c.Auth) {
+		if HasPlaintextSecret(c.Auth) {
 			names = append(names, name)
 		}
 	}
@@ -291,20 +299,46 @@ func contextsWithPlaintextSecret(cfg Config) []string {
 	return names
 }
 
-func hasPlaintextSecret(a Auth) bool {
-	// ClientCert/ClientKey are filesystem paths, not secret material — the
-	// key's contents stay on disk, so a literal path in the config is not
-	// a leaked credential. Only password/api_key/token carry live secrets.
+// HasPlaintextSecret reports whether the auth block carries an inline
+// secret (a non-empty password / api_key / token that isn't an
+// indirection reference). ClientCert/ClientKey are filesystem paths,
+// not secret material — the key's contents stay on disk, so a literal
+// path here is not a leaked credential.
+//
+// Exported for the same reason as ContextsWithPlaintextSecret.
+func HasPlaintextSecret(a Auth) bool {
 	for _, v := range []string{a.Password, a.APIKey, a.Token} {
 		if v == "" {
 			continue
 		}
-		if secretRef.MatchString(v) {
+		if IsSecretRef(v) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// IsSecretRef reports whether s matches the indirection reference
+// syntax — ${env:VAR}, ${file:/path}, ${keyring:svc/acct}. Exported so
+// any caller that distinguishes literal secrets from pointers to
+// secrets (the loader's plaintext detection, the CLI's `config view`
+// redaction, the CLI's `config validate` lint) shares one definition.
+func IsSecretRef(s string) bool {
+	return secretRef.MatchString(s)
+}
+
+// ParseSecretRef splits an indirection reference into its scheme and
+// argument — ${env:VAR} → ("env", "VAR"), ${keyring:svc/acct} →
+// ("keyring", "svc/acct"). Returns ok=false for anything that isn't a
+// reference. Exported alongside IsSecretRef so external linters share
+// the loader's parser instead of replicating the regex.
+func ParseSecretRef(s string) (scheme, arg string, ok bool) {
+	m := secretRef.FindStringSubmatch(s)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
 }
 
 // ResolveContext returns the effective Context for `name`, or for
@@ -370,11 +404,10 @@ func resolveContextSecrets(c *Context) error {
 }
 
 func resolveOne(v string) (string, error) {
-	m := secretRef.FindStringSubmatch(v)
-	if m == nil {
+	scheme, arg, ok := ParseSecretRef(v)
+	if !ok {
 		return v, nil
 	}
-	scheme, arg := m[1], m[2]
 	switch scheme {
 	case "env":
 		val, ok := os.LookupEnv(arg)

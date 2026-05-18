@@ -106,6 +106,29 @@ func parseLevel(s string) (slog.Level, error) {
 	}
 }
 
+// ValidateLevel reports an error if s is not an accepted log level.
+// Exposed so config-validating tooling (`esops config validate`) can
+// fail fast on a bad defaults.log_level using exactly the same rule
+// Init would apply at process start. Drift between this and Init is
+// a bug — both wrap parseLevel.
+func ValidateLevel(s string) error {
+	_, err := parseLevel(s)
+	return err
+}
+
+// ValidateFormat reports an error if s is not an accepted log format.
+// Same drift-avoidance rationale as ValidateLevel: the accepted set
+// ("", "text", "json") lives in one place. Init's handler creation
+// re-checks for free via the same switch — keep both in sync.
+func ValidateFormat(s string) error {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "text", "json":
+		return nil
+	default:
+		return fmt.Errorf("unknown log format %q (supported: text, json)", s)
+	}
+}
+
 // redactedValue is the placeholder written in place of any attribute
 // whose key hits the denylist. Kept short and recognisable so operators
 // grepping logs see at a glance that redaction fired.
