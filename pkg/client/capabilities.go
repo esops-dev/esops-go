@@ -1496,6 +1496,11 @@ type IngestPipelineInspector interface {
 // ErrNotFound. Patterns are rejected in the business layer to match
 // the policy/pipeline get convention.
 //
+// DataStreamStats returns aggregate size + maximum-timestamp stats
+// from GET /_data_stream[/<names>]/_stats. Both products expose the
+// endpoint with the same shape; it's the cheap path for "how big are
+// my streams" without joining /_cat/indices.
+//
 // Errors:
 //   - ErrUnreachable on transport failure
 //   - ErrAuth / ErrForbidden on 401/403
@@ -1505,6 +1510,7 @@ type IngestPipelineInspector interface {
 type DataStreamInspector interface {
 	DataStreams(ctx context.Context, filter types.DataStreamFilter) ([]types.DataStream, error)
 	GetDataStream(ctx context.Context, name string) (types.DataStream, error)
+	DataStreamStats(ctx context.Context, req types.DataStreamStatsRequest) (types.DataStreamStatsReport, error)
 }
 
 // DataStreamManager exposes the mutating data-stream surface —

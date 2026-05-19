@@ -27,13 +27,24 @@ same envelope). Read-only and safe to run against a prod-protected
 context at any time.
 
 --name takes one or more data stream names or patterns; both products
-honour patterns at the path segment. The bare endpoint already
-includes hidden streams on both dialects, so there is no separate
-flag for them — pass --name '.*' if you want to scan them specifically.`,
+honour patterns at the path segment.
+
+Hidden data streams (Fleet, APM, and other integration-managed
+streams) are excluded from the default view to match 'index list'.
+Pass --hidden to include them, or --exclude-hidden to spell out the
+default for scripted invocations.`,
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{
 				Name:  "name",
 				Usage: "Limit to specific data stream name(s) or pattern(s); repeatable",
+			},
+			&cli.BoolFlag{
+				Name:  "hidden",
+				Usage: "Include hidden data streams (Fleet/APM/integration-managed)",
+			},
+			&cli.BoolFlag{
+				Name:  "exclude-hidden",
+				Usage: "Explicitly exclude hidden data streams (the default; spell out the intent for scripts and audit grep)",
 			},
 		},
 		Action:        runList,
@@ -42,6 +53,11 @@ flag for them — pass --name '.*' if you want to scan them specifically.`,
 }
 
 func runList(ctx context.Context, cmd *cli.Command) error {
+	hidden, err := cmdsetup.ResolveHiddenFlags(cmd.Bool("hidden"), cmd.Bool("exclude-hidden"))
+	if err != nil {
+		return err
+	}
+
 	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
 		SupportedFormats: cmdsetup.FormatsStreaming,
 	})
@@ -50,7 +66,8 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	rows, err := esopsdatastream.List(ctx, s.Client.DataStream, s.Client.Indices, esopsdatastream.ListOptions{
-		Names: cmd.StringSlice("name"),
+		Names:  cmd.StringSlice("name"),
+		Hidden: hidden,
 	})
 	if err != nil {
 		return err

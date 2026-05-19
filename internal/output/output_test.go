@@ -3435,3 +3435,113 @@ func TestIngestPipelines_rejectsUnknownFormat(t *testing.T) {
 		t.Fatal("expected error for unknown format")
 	}
 }
+
+func sampleDataStreamStats() types.DataStreamStatsReport {
+	return types.DataStreamStatsReport{
+		DataStreamCount:     2,
+		BackingIndicesCount: 5,
+		TotalStoreBytes:     2 * 1024 * 1024,
+		DataStreams: []types.DataStreamStats{
+			{
+				DataStream:             "logs-stream",
+				BackingIndicesCount:    3,
+				StoreBytes:             1024 * 1024,
+				MaximumTimestampMillis: 1748000000000,
+			},
+			{
+				DataStream:          "metrics-stream",
+				BackingIndicesCount: 2,
+				StoreBytes:          1024 * 1024,
+			},
+		},
+	}
+}
+
+func TestDataStreamStats_jsonRoundTripsAggregates(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.DataStreamStats(&buf, sampleDataStreamStats(), output.FormatJSON); err != nil {
+		t.Fatalf("DataStreamStats json: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, field := range []string{"data_stream_count", "backing_indices_count", "total_store_bytes", "data_streams"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in JSON output:\n%s", field, buf.String())
+		}
+	}
+}
+
+func TestDataStreamStats_yamlRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.DataStreamStats(&buf, sampleDataStreamStats(), output.FormatYAML); err != nil {
+		t.Fatalf("DataStreamStats yaml: %v", err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("not valid YAML: %v\n%s", err, buf.String())
+	}
+	if got := m["data_stream_count"]; got != 2 {
+		t.Errorf("data_stream_count = %v, want 2", got)
+	}
+}
+
+func TestDataStreamStats_tableHasExpectedHeadersAndRows(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.DataStreamStats(&buf, sampleDataStreamStats(), output.FormatTable); err != nil {
+		t.Fatalf("DataStreamStats: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"STREAMS", "BACKING_INDICES", "TOTAL_SIZE", "NAME", "INDICES", "SIZE", "logs-stream", "metrics-stream"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+	// MAX_TIMESTAMP must not show up in default table — that's a wide-only column.
+	if strings.Contains(out, "MAX_TIMESTAMP") {
+		t.Errorf("default table leaked MAX_TIMESTAMP header:\n%s", out)
+	}
+}
+
+func TestDataStreamStats_wideIncludesMaxTimestamp(t *testing.T) {
+	var buf bytes.Buffer
+	if err := output.DataStreamStats(&buf, sampleDataStreamStats(), output.FormatWide); err != nil {
+		t.Fatalf("DataStreamStats wide: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MAX_TIMESTAMP") {
+		t.Errorf("wide output missing MAX_TIMESTAMP header:\n%s", out)
+	}
+	// 1748000000000 ms = 2025-05-23T12:53:20Z. Render must use RFC3339 UTC,
+	// not the operator's local zone — captured records have to be
+	// interpretable across timezones.
+	if !strings.Contains(out, time.UnixMilli(1748000000000).UTC().Format(time.RFC3339)) {
+		t.Errorf("wide output missing RFC3339 timestamp:\n%s", out)
+	}
+	// metrics-stream has zero max-timestamp → should render as "-",
+	// not as the unix epoch.
+	if !strings.Contains(out, "metrics-stream") || !strings.Contains(out, " -\n") {
+		t.Errorf("wide output should render zero MaximumTimestampMillis as \"-\":\n%s", out)
+	}
+}
+
+func TestDataStreamStats_emptyReportShowsZeros(t *testing.T) {
+	var buf bytes.Buffer
+	// Zero-stream cluster: total size should render as "0b" (not "-"),
+	// matching the explicit zero counts on the same row.
+	if err := output.DataStreamStats(&buf, types.DataStreamStatsReport{}, output.FormatTable); err != nil {
+		t.Fatalf("DataStreamStats empty: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "0b") {
+		t.Errorf("empty report should show 0b for total size, got:\n%s", out)
+	}
+}
+
+func TestDataStreamStats_rejectsUnknownFormat(t *testing.T) {
+	err := output.DataStreamStats(&bytes.Buffer{}, sampleDataStreamStats(), output.Format("bogus"))
+	if err == nil {
+		t.Fatal("expected error for unknown format")
+	}
+}

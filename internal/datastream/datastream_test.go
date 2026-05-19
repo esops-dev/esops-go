@@ -22,6 +22,10 @@ type fakeDataStreamInspector struct {
 	getName string
 	getOut  types.DataStream
 	getErr  error
+
+	statsReq types.DataStreamStatsRequest
+	statsOut types.DataStreamStatsReport
+	statsErr error
 }
 
 func (f *fakeDataStreamInspector) DataStreams(_ context.Context, filter types.DataStreamFilter) ([]types.DataStream, error) {
@@ -38,6 +42,11 @@ func (f *fakeDataStreamInspector) GetDataStream(_ context.Context, name string) 
 		f.getOut.Name = name
 	}
 	return f.getOut, nil
+}
+
+func (f *fakeDataStreamInspector) DataStreamStats(_ context.Context, req types.DataStreamStatsRequest) (types.DataStreamStatsReport, error) {
+	f.statsReq = req
+	return f.statsOut, f.statsErr
 }
 
 type fakeDataStreamManager struct {

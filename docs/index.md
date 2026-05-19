@@ -22,16 +22,18 @@ NAME               HEALTH  STATUS  PRI  REP  DOCS  STORE
 esops-logs-000001  green   open    1    0    200   34.2kb
 ```
 
-Hidden (dot-prefixed) indices excluded by default. Use `--hidden` to include them.
+Hidden (dot-prefixed) indices excluded by default. Use `--hidden` to include them, or `--exclude-hidden` to spell the default out explicitly for scripted invocations (passing both is a usage error).
 
 **Filters**
-| Flag       | Purpose                              |
-|------------|--------------------------------------|
-| `--index`  | Comma-separated patterns             |
-| `--health` | `green`/`yellow`/`red`               |
-| `--status` | `open`/`close`                       |
-| `--hidden` | Include dot-prefixed indices         |
-| `--sort`   | `name` (default), `size`, `docs`     |
+| Flag                | Purpose                                                                |
+|---------------------|------------------------------------------------------------------------|
+| `--index`           | Comma-separated patterns                                               |
+| `--health`          | `green`/`yellow`/`red`                                                 |
+| `--status`          | `open`/`close`                                                         |
+| `--hidden`          | Include dot-prefixed indices                                           |
+| `--exclude-hidden`  | Explicitly exclude dot-prefixed indices (the default; for audit grep)  |
+| `--exclude-managed` | Hide data-stream backing indices (`.ds-*`)                             |
+| `--sort`            | `name` (default), `size`, `docs`                                       |
 
 **Output formats**
 - `-o table` (default)
@@ -92,12 +94,13 @@ logs-2024-12-07  3       30        12         51000   1.0%      46.8mb
 Aggregates the cluster's per-shard segment census to the index level: primary segment count, deleted-doc ratio, on-disk size, and `MAX_SHARD` — the highest per-shard segment count, which is the number that matters for `optimize --max-num-segments` planning.
 
 **Flags**
-| Flag             | Purpose                                                       |
-|------------------|---------------------------------------------------------------|
-| `--index`        | Comma-separated names or patterns (default: all indices)      |
-| `--min-segments` | Hide indices with fewer than N primary segments               |
-| `--hidden`       | Include dot-prefixed system indices                           |
-| `--sort`         | `name` (default), `count`, `deleted`, `bytes`                 |
+| Flag               | Purpose                                                                |
+|--------------------|------------------------------------------------------------------------|
+| `--index`          | Comma-separated names or patterns (default: all indices)               |
+| `--min-segments`   | Hide indices with fewer than N primary segments                        |
+| `--hidden`         | Include dot-prefixed system indices                                    |
+| `--exclude-hidden` | Explicitly exclude dot-prefixed system indices (the default)           |
+| `--sort`           | `name` (default), `count`, `deleted`, `bytes`                          |
 
 **Output formats**
 - `-o table` (default), `-o wide` (adds total segment count incl. replicas, committed/searchable counts)

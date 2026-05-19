@@ -36,6 +36,10 @@ func listCommand() *cli.Command {
 				Usage: "Include hidden indices (dot-prefixed system indices)",
 			},
 			&cli.BoolFlag{
+				Name:  "exclude-hidden",
+				Usage: "Explicitly exclude hidden indices (the default; spell out the intent for scripts and audit grep)",
+			},
+			&cli.BoolFlag{
 				Name:  "exclude-managed",
 				Usage: "Hide data-stream backing indices (`.ds-*`); useful for operators triaging standalone indices",
 			},
@@ -67,6 +71,10 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 			return err
 		}
 	}
+	hidden, err := cmdsetup.ResolveHiddenFlags(cmd.Bool("hidden"), cmd.Bool("exclude-hidden"))
+	if err != nil {
+		return err
+	}
 
 	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
 		SupportedFormats: cmdsetup.FormatsStreaming,
@@ -79,7 +87,7 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 		Index:          cmd.String("index"),
 		Health:         cmd.String("health"),
 		Status:         cmd.String("status"),
-		Hidden:         cmd.Bool("hidden"),
+		Hidden:         hidden,
 		ExcludeManaged: cmd.Bool("exclude-managed"),
 		Sort:           sortKey,
 	}
