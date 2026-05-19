@@ -43,6 +43,10 @@ fragmented indices first, "deleted" surfaces the indices where
 				Name:  "hidden",
 				Usage: "Include hidden indices (dot-prefixed system indices)",
 			},
+			&cli.BoolFlag{
+				Name:  "exclude-hidden",
+				Usage: "Explicitly exclude hidden indices (the default; spell out the intent for scripts and audit grep)",
+			},
 			&cli.StringFlag{
 				Name:  "sort",
 				Usage: "Sort by: name | count | deleted | bytes",
@@ -61,6 +65,10 @@ func runSegments(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	hidden, err := cmdsetup.ResolveHiddenFlags(cmd.Bool("hidden"), cmd.Bool("exclude-hidden"))
+	if err != nil {
+		return err
+	}
 
 	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
 		SupportedFormats: cmdsetup.FormatsStandard,
@@ -72,7 +80,7 @@ func runSegments(ctx context.Context, cmd *cli.Command) error {
 	opts := esopsindex.SegmentsOptions{
 		Pattern:     cmd.String("index"),
 		MinSegments: cmd.Int("min-segments"),
-		Hidden:      cmd.Bool("hidden"),
+		Hidden:      hidden,
 		Sort:        sortKey,
 	}
 	return watch.Run(ctx, cmd, "esops index segments", s.Format, func(ctx context.Context) error {

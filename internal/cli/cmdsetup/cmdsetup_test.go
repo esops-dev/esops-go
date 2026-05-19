@@ -42,6 +42,37 @@ func cmdWith(t *testing.T, args ...string) *cli.Command {
 	return captured
 }
 
+func TestResolveHiddenFlags_table(t *testing.T) {
+	cases := []struct {
+		name           string
+		hidden, exclude bool
+		want           bool
+		wantErr        bool
+	}{
+		{name: "neither", hidden: false, exclude: false, want: false},
+		{name: "hidden", hidden: true, exclude: false, want: true},
+		{name: "exclude-hidden", hidden: false, exclude: true, want: false},
+		{name: "both", hidden: true, exclude: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveHiddenFlags(tc.hidden, tc.exclude)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error for hidden=%v exclude=%v", tc.hidden, tc.exclude)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveHiddenFlags: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCheckProtection_nonDestructiveAlwaysAllowed(t *testing.T) {
 	cases := []string{"", "none", "staging", "prod"}
 	for _, tier := range cases {

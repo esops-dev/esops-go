@@ -4694,6 +4694,85 @@ func DataStreamModify(w io.Writer, r types.DataStreamModifyResult, f Format) err
 // DataStreamDelete renders the outcome of `esops datastream delete`.
 // Table is a one-line header plus the resolved stream names.
 // JSON/YAML emit the neutral DataStreamDeleteResult shape directly.
+// DataStreamStats renders the outcome of `esops datastream stats`.
+// Table mode is a one-line header (aggregate counts + total size)
+// followed by the per-stream rows; wide mode adds the
+// maximum-timestamp column so an operator can spot a stale stream
+// without paging into individual `datastream get` calls. JSON/YAML
+// emit the neutral DataStreamStatsReport shape directly.
+func DataStreamStats(w io.Writer, r types.DataStreamStatsReport, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatWide:
+		return dataStreamStatsTable(w, r, true)
+	case FormatTable, "":
+		return dataStreamStatsTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func dataStreamStatsTable(w io.Writer, r types.DataStreamStatsReport, wide bool) error {
+	hw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "STREAMS\tBACKING_INDICES\tTOTAL_SIZE")
+	// humanBytes (not humanBytesOrDash) for the aggregate — a cluster
+	// genuinely reporting zero bytes is unambiguous here, so "0b"
+	// reads more honestly than "-" alongside the explicit counts.
+	_, _ = fmt.Fprintf(hw, "%d\t%d\t%s\n",
+		r.DataStreamCount,
+		r.BackingIndicesCount,
+		humanBytes(r.TotalStoreBytes),
+	)
+	if err := hw.Flush(); err != nil {
+		return err
+	}
+	if len(r.DataStreams) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if wide {
+		_, _ = fmt.Fprintln(tw, "NAME\tINDICES\tSIZE\tMAX_TIMESTAMP")
+	} else {
+		_, _ = fmt.Fprintln(tw, "NAME\tINDICES\tSIZE")
+	}
+	for _, s := range r.DataStreams {
+		if wide {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
+				s.DataStream,
+				s.BackingIndicesCount,
+				humanBytes(s.StoreBytes),
+				maxTimestampOrDash(s.MaximumTimestampMillis),
+			)
+		} else {
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n",
+				s.DataStream,
+				s.BackingIndicesCount,
+				humanBytes(s.StoreBytes),
+			)
+		}
+	}
+	return tw.Flush()
+}
+
+// maxTimestampOrDash renders an epoch-millis "maximum timestamp" as an
+// RFC3339 UTC string. Zero (the cluster reported no value, or the
+// stream has no docs yet) renders as "-".
+func maxTimestampOrDash(ms int64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
+}
+
 func DataStreamDelete(w io.Writer, r types.DataStreamDeleteResult, f Format) error {
 	switch f {
 	case FormatJSON:

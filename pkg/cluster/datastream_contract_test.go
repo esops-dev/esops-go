@@ -332,6 +332,117 @@ func TestDataStreamModify_contractMethodAndPath(t *testing.T) {
 	}
 }
 
+// TestDataStreamStats_contractEnvelope proves both adapters fold the
+// shared GET /_data_stream/_stats response into the same neutral
+// shape. Top-level aggregates (data_stream_count, backing_indices,
+// total_store_size_bytes) and per-stream rows must come through
+// identically on ES and OS — the renderer relies on the shared
+// numbers.
+func TestDataStreamStats_contractEnvelope(t *testing.T) {
+	const body = `{
+		"_shards": {"total":10,"successful":10,"failed":0},
+		"data_stream_count": 2,
+		"backing_indices": 5,
+		"total_store_size_bytes": 1048576,
+		"data_streams": [
+			{"data_stream": "logs-stream", "backing_indices": 3, "store_size_bytes": 524288, "maximum_timestamp": 1748000000000},
+			{"data_stream": "metrics-stream", "backing_indices": 2, "store_size_bytes": 524288, "maximum_timestamp": 1747000000000}
+		]
+	}`
+
+	for _, dialect := range []string{dialectES, dialectOS} {
+		t.Run(dialect, func(t *testing.T) {
+			var gotPath string
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				writeDialectHeaders(w, dialect)
+				if strings.Contains(r.URL.Path, "/_stats") {
+					gotPath = r.URL.Path
+					_, _ = w.Write([]byte(body))
+					return
+				}
+				if dialect == dialectES {
+					_, _ = w.Write([]byte(esRootBody))
+				} else {
+					_, _ = w.Write([]byte(osRootBody))
+				}
+			})
+			s := httptest.NewServer(mux)
+			t.Cleanup(s.Close)
+			c := newProbedContractClient(t, s.URL)
+
+			rep, err := c.DataStream.DataStreamStats(context.Background(), types.DataStreamStatsRequest{})
+			if err != nil {
+				t.Fatalf("DataStreamStats: %v", err)
+			}
+			if gotPath != "/_data_stream/_stats" {
+				t.Errorf("path = %q, want /_data_stream/_stats", gotPath)
+			}
+			if rep.DataStreamCount != 2 {
+				t.Errorf("DataStreamCount = %d, want 2", rep.DataStreamCount)
+			}
+			if rep.BackingIndicesCount != 5 {
+				t.Errorf("BackingIndicesCount = %d, want 5", rep.BackingIndicesCount)
+			}
+			if rep.TotalStoreBytes != 1048576 {
+				t.Errorf("TotalStoreBytes = %d, want 1048576", rep.TotalStoreBytes)
+			}
+			if len(rep.DataStreams) != 2 {
+				t.Fatalf("len(DataStreams) = %d, want 2", len(rep.DataStreams))
+			}
+			byName := map[string]types.DataStreamStats{}
+			for _, r := range rep.DataStreams {
+				byName[r.DataStream] = r
+			}
+			logs, ok := byName["logs-stream"]
+			if !ok {
+				t.Fatalf("logs-stream missing from response: %+v", rep.DataStreams)
+			}
+			if logs.BackingIndicesCount != 3 {
+				t.Errorf("logs.BackingIndicesCount = %d, want 3", logs.BackingIndicesCount)
+			}
+			if logs.MaximumTimestampMillis != 1748000000000 {
+				t.Errorf("logs.MaximumTimestampMillis = %d, want 1748000000000", logs.MaximumTimestampMillis)
+			}
+		})
+	}
+}
+
+// TestDataStreamStats_namesAreForwardedInPath proves both adapters
+// stitch the names list into /_data_stream/<comma-joined>/_stats.
+func TestDataStreamStats_namesAreForwardedInPath(t *testing.T) {
+	for _, dialect := range []string{dialectES, dialectOS} {
+		t.Run(dialect, func(t *testing.T) {
+			var gotPath string
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				writeDialectHeaders(w, dialect)
+				if strings.Contains(r.URL.Path, "/_stats") {
+					gotPath = r.URL.Path
+					_, _ = w.Write([]byte(`{"data_stream_count":0,"backing_indices":0,"total_store_size_bytes":0,"data_streams":[]}`))
+					return
+				}
+				if dialect == dialectES {
+					_, _ = w.Write([]byte(esRootBody))
+				} else {
+					_, _ = w.Write([]byte(osRootBody))
+				}
+			})
+			s := httptest.NewServer(mux)
+			t.Cleanup(s.Close)
+			c := newProbedContractClient(t, s.URL)
+
+			_, err := c.DataStream.DataStreamStats(context.Background(), types.DataStreamStatsRequest{Names: []string{"a", "b"}})
+			if err != nil {
+				t.Fatalf("DataStreamStats: %v", err)
+			}
+			if gotPath != "/_data_stream/a,b/_stats" {
+				t.Errorf("request path = %q, want /_data_stream/a,b/_stats", gotPath)
+			}
+		})
+	}
+}
+
 func newDataStreamClient(t *testing.T, dialect, body string, status int) *client.Client {
 	t.Helper()
 	mux := http.NewServeMux()

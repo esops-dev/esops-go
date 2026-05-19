@@ -269,6 +269,90 @@ func dataStreamPath(names []string) string {
 	return "/_data_stream/" + strings.Join(names, ",")
 }
 
+// dataStreamStatsPath builds the GET /_data_stream[/<names>]/_stats
+// path. Empty names selects every stream; both dialects honour
+// patterns at the path segment.
+func dataStreamStatsPath(names []string) string {
+	if len(names) == 0 {
+		return "/_data_stream/_stats"
+	}
+	return "/_data_stream/" + strings.Join(names, ",") + "/_stats"
+}
+
+// dataStreamStatsWire mirrors the GET /_data_stream/_stats response
+// envelope. Both ES and OS use the same shape — top-level aggregates
+// plus a per-stream array.
+type dataStreamStatsWire struct {
+	DataStreamCount     int                       `json:"data_stream_count"`
+	BackingIndices      int                       `json:"backing_indices"`
+	TotalStoreSizeBytes int64                     `json:"total_store_size_bytes"`
+	DataStreams         []dataStreamStatsRowWire  `json:"data_streams"`
+}
+
+type dataStreamStatsRowWire struct {
+	DataStream       string `json:"data_stream"`
+	BackingIndices   int    `json:"backing_indices"`
+	StoreSizeBytes   int64  `json:"store_size_bytes"`
+	MaximumTimestamp int64  `json:"maximum_timestamp"`
+}
+
+// DataStreamStats implements client.DataStreamInspector via
+// GET /_data_stream[/<names>]/_stats. Cheap aggregate compared to
+// listing + enriching from /_cat/indices — the cluster sums sizes
+// across backing indices server-side.
+//
+// A 404 against the bare endpoint normalises to an empty report (the
+// same forgiving behaviour DataStreams uses); a 404 against an
+// explicit name list is genuinely not-found.
+func (c *Client) DataStreamStats(ctx context.Context, req types.DataStreamStatsRequest) (types.DataStreamStatsReport, error) {
+	path := dataStreamStatsPath(req.Names)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return types.DataStreamStatsReport{}, err
+	}
+	resp, err := c.api.Perform(httpReq)
+	if err != nil {
+		return types.DataStreamStatsReport{}, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return types.DataStreamStatsReport{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.DataStreamStatsReport{}, esopsclient.ErrForbidden
+	case http.StatusNotFound:
+		if len(req.Names) == 0 {
+			return types.DataStreamStatsReport{}, nil
+		}
+		return types.DataStreamStatsReport{}, fmt.Errorf("%w: data stream(s) %s", esopsclient.ErrNotFound, strings.Join(req.Names, ","))
+	}
+	if err := classifyResponse("data_stream_stats", resp.StatusCode, resp.Body); err != nil {
+		return types.DataStreamStatsReport{}, err
+	}
+
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "data_stream_stats")
+	var wire dataStreamStatsWire
+	if err := json.NewDecoder(body).Decode(&wire); err != nil {
+		return types.DataStreamStatsReport{}, errors.Join(errors.New("decoding data_stream_stats response"), err)
+	}
+	rows := make([]types.DataStreamStats, 0, len(wire.DataStreams))
+	for _, r := range wire.DataStreams {
+		rows = append(rows, types.DataStreamStats{
+			DataStream:             r.DataStream,
+			BackingIndicesCount:    r.BackingIndices,
+			StoreBytes:             r.StoreSizeBytes,
+			MaximumTimestampMillis: r.MaximumTimestamp,
+		})
+	}
+	return types.DataStreamStatsReport{
+		DataStreamCount:     wire.DataStreamCount,
+		BackingIndicesCount: wire.BackingIndices,
+		TotalStoreBytes:     wire.TotalStoreSizeBytes,
+		DataStreams:         rows,
+	}, nil
+}
+
 // buildDataStreamModifyBody serialises typed actions into the
 // cluster's wire envelope: {"actions": [{"<verb>": {...}}, ...]}.
 // Kept as a per-package helper because OS may diverge here in a

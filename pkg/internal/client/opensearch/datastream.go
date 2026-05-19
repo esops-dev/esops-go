@@ -285,6 +285,86 @@ func dataStreamPath(names []string) string {
 	return "/_data_stream/" + strings.Join(names, ",")
 }
 
+// dataStreamStatsPath builds the GET /_data_stream[/<names>]/_stats
+// path. Mirrors the ES helper; OpenSearch (1.x+) ships the same
+// endpoint at the same path.
+func dataStreamStatsPath(names []string) string {
+	if len(names) == 0 {
+		return "/_data_stream/_stats"
+	}
+	return "/_data_stream/" + strings.Join(names, ",") + "/_stats"
+}
+
+// dataStreamStatsWire mirrors the GET /_data_stream/_stats envelope.
+// OS reports the same shape as ES — one capability covers both.
+type dataStreamStatsWire struct {
+	DataStreamCount     int                      `json:"data_stream_count"`
+	BackingIndices      int                      `json:"backing_indices"`
+	TotalStoreSizeBytes int64                    `json:"total_store_size_bytes"`
+	DataStreams         []dataStreamStatsRowWire `json:"data_streams"`
+}
+
+type dataStreamStatsRowWire struct {
+	DataStream       string `json:"data_stream"`
+	BackingIndices   int    `json:"backing_indices"`
+	StoreSizeBytes   int64  `json:"store_size_bytes"`
+	MaximumTimestamp int64  `json:"maximum_timestamp"`
+}
+
+// DataStreamStats implements client.DataStreamInspector via
+// GET /_data_stream[/<names>]/_stats. Same wire shape as ES; the OS
+// adapter goes through the raw transport so the body can be wrapped
+// in a BoundedReader.
+func (c *Client) DataStreamStats(ctx context.Context, req types.DataStreamStatsRequest) (types.DataStreamStatsReport, error) {
+	path := dataStreamStatsPath(req.Names)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return types.DataStreamStatsReport{}, err
+	}
+	resp, err := c.api.Client.Perform(httpReq)
+	if err != nil {
+		return types.DataStreamStatsReport{}, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return types.DataStreamStatsReport{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.DataStreamStatsReport{}, esopsclient.ErrForbidden
+	case http.StatusNotFound:
+		if len(req.Names) == 0 {
+			return types.DataStreamStatsReport{}, nil
+		}
+		return types.DataStreamStatsReport{}, fmt.Errorf("%w: data stream(s) %s", esopsclient.ErrNotFound, strings.Join(req.Names, ","))
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return types.DataStreamStatsReport{}, clientutil.ClassifyStatus("data_stream_stats", resp.StatusCode, raw)
+	}
+
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "data_stream_stats")
+	var wire dataStreamStatsWire
+	if err := json.NewDecoder(body).Decode(&wire); err != nil {
+		return types.DataStreamStatsReport{}, errors.Join(errors.New("decoding data_stream_stats response"), err)
+	}
+	rows := make([]types.DataStreamStats, 0, len(wire.DataStreams))
+	for _, r := range wire.DataStreams {
+		rows = append(rows, types.DataStreamStats{
+			DataStream:             r.DataStream,
+			BackingIndicesCount:    r.BackingIndices,
+			StoreBytes:             r.StoreSizeBytes,
+			MaximumTimestampMillis: r.MaximumTimestamp,
+		})
+	}
+	return types.DataStreamStatsReport{
+		DataStreamCount:     wire.DataStreamCount,
+		BackingIndicesCount: wire.BackingIndices,
+		TotalStoreBytes:     wire.TotalStoreSizeBytes,
+		DataStreams:         rows,
+	}, nil
+}
+
 // buildDataStreamRolloverBody serialises a conditions block into the
 // {"conditions":{...}} envelope. Mirrors the ES helper rather than
 // importing across packages.

@@ -27,9 +27,16 @@ const DefaultMaxStreams = 5
 // ListOptions narrows a `datastream list` call. Names is a repeatable
 // filter forwarded to the inspector; both ES and OS honour a
 // comma-joined name list (including patterns) at the path segment.
-// Empty Names returns every configured stream.
+// Empty Names returns every configured stream. Hidden mirrors the
+// `index list` toggle — false (the default) drops streams the cluster
+// flagged as hidden (Fleet, APM and other integration-managed streams
+// that clutter operator output); true keeps every row the cluster
+// returned. Both ES and OS surface every stream on the bare endpoint,
+// so the filter is applied client-side using each DataStream.Hidden
+// field.
 type ListOptions struct {
-	Names []string
+	Names  []string
+	Hidden bool
 }
 
 // List returns the cluster's data streams, sorted by name for
@@ -51,6 +58,16 @@ func List(ctx context.Context, c client.DataStreamInspector, indexes client.Inde
 	rows, err := c.DataStreams(ctx, types.DataStreamFilter{Names: opts.Names})
 	if err != nil {
 		return nil, err
+	}
+	if !opts.Hidden {
+		filtered := rows[:0]
+		for _, r := range rows {
+			if r.Hidden {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		rows = filtered
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	enrichBackingIndexStats(ctx, indexes, rows)

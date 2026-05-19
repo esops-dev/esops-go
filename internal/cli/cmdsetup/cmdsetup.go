@@ -179,6 +179,23 @@ func resolveFormat(cmd *cli.Command, configDefault string, supported []output.Fo
 	return "", fmt.Errorf("output format %q is not supported for this command (accepted: %s)", f, strings.Join(names, ", "))
 }
 
+// ResolveHiddenFlags reconciles --hidden and --exclude-hidden into the
+// single "include hidden?" bool the business layer consumes. The two
+// flags are mutually exclusive; passing both is a usage error so a
+// scripted invocation never quietly resolves one way or the other.
+// --exclude-hidden alone is the default behaviour spelt out — useful
+// in audited shell history where "this command is meant to skip
+// hidden rows" is the kind of intent operators want grep-able.
+//
+// Shared across the `index` and `datastream` command trees so both
+// surfaces stay in step on flag semantics.
+func ResolveHiddenFlags(hidden, excludeHidden bool) (bool, error) {
+	if hidden && excludeHidden {
+		return false, client.UsageError("--hidden and --exclude-hidden are mutually exclusive")
+	}
+	return hidden, nil
+}
+
 // CheckProtection enforces the per-context protection tier. Dry-runs
 // and read-only operations are always allowed; destructive operations
 // against a `prod` context require an explicit acknowledgement flag,

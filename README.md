@@ -45,6 +45,7 @@ The older the ES/OS cluster gets, the more often you will find yourself typing c
 * **Cluster Operations**  - Health, Shard Allocation Explanation, Shard Distribution, Hot Threads, Security Audit, Rebalance Helper, Redacted Diagnostic Bundle
 * **Migrating databases** - Pre-flight Check, Mapping Plan One with Incompatibility Diffs, Task based Reindex With Resume + Auto Throttle, Doc Count And Sampled Checksum Verify, Atomic Alias-swap Cutover
 * **Manage your Indexes** - List, Optimise, Rollover, Shrink, Open/Close, Aliases, Settings and Template ILM (ES) and ISM (OS) Policies 
+* **Manage your Data Streams** - List, Get, Stats, Recovery, Segments, Optimize, Rollover, Modify, Delete (Elasticsearch and OpenSearch)
 * **Manage your Snapshots**  - List, Create, Verify, Restore, Retention Prune 
 * **Inspect Ingest Pipelines** - List, Get (Elasticsearch and OpenSearch)
 * **Multiple Settings** - Named contexts like kubectl's with per-context protection levels; Explicit acknowledgement is needed for destructive operations against prod context.
@@ -109,9 +110,13 @@ ops         health · nodes · shards · allocation-explain · hot-threads
             audit · rebalance · drain · uncordon · tasks · diag
             settings · unblock · cache-clear
 migrate     plan · check · reindex · verify · cutover
-index       list · optimize · rollover · shrink · open · close
-            aliases · settings · template · ilm (ES) · ism (OS)
+index       list · recovery · segments · optimize · rollover · shrink
+            open · close · aliases · settings · template
+            ilm (ES) · ism (OS)
+datastream  list · get · stats · recovery · segments · optimize
+            rollover · modify · delete
 snapshot    list · create · verify · restore · prune · register · deregister
+pipeline    list · get
 config      use-context · get-contexts · view · validate
 ```
 
@@ -150,9 +155,11 @@ Default mode exits `0` on warnings, `2` on errors; `--strict` treats warnings as
 ## Documentation
 
 - [docs/index.md](docs/index.md) — index management
+- [docs/datastream.md](docs/datastream.md) — data stream management
 - [docs/ops.md](docs/ops.md) — cluster operations
 - [docs/snapshot.md](docs/snapshot.md) — snapshot and repository inspection
 - [docs/pipeline.md](docs/pipeline.md) — ingest pipeline inspection
+- [docs/transform.md](docs/transform.md) — transform inspection
 - [docs/migrate.md](docs/migrate.md) — cross-cluster reindex pre-flight and planning
 - [docs/config.md](docs/config.md) — config schema, contexts, secrets
 - [docs/completion.md](docs/completion.md) — shell completion

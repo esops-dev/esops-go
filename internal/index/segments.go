@@ -13,6 +13,11 @@ import (
 // SegmentSort identifies the column the per-index segments view should
 // be ordered by. Mirrors IndexSort in shape so command flag parsing can
 // share the same pattern.
+//
+// Drift note: internal/datastream.SegmentSort carries the same values
+// and parser vocabulary so `index segments` and `datastream segments`
+// stay in step. When adding a new sort key here, mirror it there (or
+// vice versa) — there is no cross-package import.
 type SegmentSort int
 
 const (

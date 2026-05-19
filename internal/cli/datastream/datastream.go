@@ -11,11 +11,17 @@ import (
 // Command returns the `datastream` command group.
 //
 // Data streams sit next to indices, not inside them, so the verbs
-// mirror `index` where it makes sense (list / get / rollover) and add
-// the data-stream-specific modify / delete on top. `modify` and
-// `delete` are mutating; `delete` removes the stream **and** all of
-// its backing indices in one shot — guarded by --allow-data-loss and
-// a lower blast-radius cap (5 streams) than the index commands use.
+// mirror `index` where it makes sense (list / get / stats / recovery /
+// segments / optimize / rollover) and add the data-stream-specific
+// modify / delete on top. `modify`, `delete`, and `optimize` are
+// mutating; `delete` removes the stream **and** all of its backing
+// indices in one shot — guarded by --allow-data-loss and a lower
+// blast-radius cap (5 streams) than the index commands use.
+//
+// `optimize`, `recovery`, and `segments` resolve --name to the
+// stream's backing indices and forward to the existing index-level
+// capabilities — same wire shape, rendered output mirrors the index
+// verbs row-for-row, so an operator can read the two side-by-side.
 func Command() *cli.Command {
 	return &cli.Command{
 		Name:  "datastream",
@@ -23,6 +29,10 @@ func Command() *cli.Command {
 		Commands: []*cli.Command{
 			listCommand(),
 			getCommand(),
+			statsCommand(),
+			recoveryCommand(),
+			segmentsCommand(),
+			optimizeCommand(),
 			rolloverCommand(),
 			modifyCommand(),
 			deleteCommand(),

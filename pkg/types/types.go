@@ -3867,10 +3867,51 @@ type DataStream struct {
 // is forwarded to the cluster as a comma-joined path segment (both
 // dialects honour patterns there). Empty Names returns every
 // configured data stream — both ES and OS surface hidden streams by
-// default on the bare endpoint, so no separate hidden toggle is
-// needed at the capability layer.
+// default on the bare endpoint; the business layer filters them out
+// client-side using each DataStream.Hidden flag when the operator
+// did not pass --hidden, so the capability stays a thin wire wrapper.
 type DataStreamFilter struct {
 	Names []string
+}
+
+// DataStreamStatsRequest narrows a DataStreamInspector.DataStreamStats
+// call. Names is forwarded to the cluster as a comma-joined path
+// segment on GET /_data_stream/<names>/_stats (both dialects honour
+// patterns there). Empty Names returns aggregate stats for every
+// configured stream.
+type DataStreamStatsRequest struct {
+	Names []string
+}
+
+// DataStreamStatsReport is the neutral view of
+// GET /_data_stream[/<names>]/_stats. The endpoint is the fast path
+// for "how big are my streams" — the cluster returns aggregate counts
+// and per-stream rows without expanding the full backing-index list
+// or joining /_cat/indices.
+//
+// TotalStoreBytes is the sum across every backing index of every
+// matched stream; BackingIndicesCount is the parallel index-cardinality
+// number. DataStreamCount is the number of streams the response
+// covered. Both products report the same shape, so one type covers ES
+// and OS.
+type DataStreamStatsReport struct {
+	DataStreamCount     int               `json:"data_stream_count"     yaml:"data_stream_count"`
+	BackingIndicesCount int               `json:"backing_indices_count" yaml:"backing_indices_count"`
+	TotalStoreBytes     int64             `json:"total_store_bytes"     yaml:"total_store_bytes"`
+	DataStreams         []DataStreamStats `json:"data_streams"          yaml:"data_streams"`
+}
+
+// DataStreamStats is one per-stream row inside DataStreamStatsReport.
+// MaximumTimestampMillis is the epoch-millis of the newest @timestamp
+// the cluster could resolve across the stream's backing indices —
+// zero when the cluster has no docs yet, or did not report a value.
+// StoreBytes and BackingIndicesCount mirror the per-stream aggregates
+// the endpoint returns.
+type DataStreamStats struct {
+	DataStream             string `json:"data_stream"                      yaml:"data_stream"`
+	BackingIndicesCount    int    `json:"backing_indices_count"            yaml:"backing_indices_count"`
+	StoreBytes             int64  `json:"store_bytes"                      yaml:"store_bytes"`
+	MaximumTimestampMillis int64  `json:"maximum_timestamp_millis,omitempty" yaml:"maximum_timestamp_millis,omitempty"`
 }
 
 // DataStreamRolloverRequest is the input to a DataStreamManager.RolloverDataStream
