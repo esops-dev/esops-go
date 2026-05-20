@@ -59,6 +59,16 @@ var FormatsStreaming = []output.Format{
 	output.FormatNDJSON,
 }
 
+// FormatsNoWide is FormatsStandard without wide — for describe
+// commands whose renderer has no meaningful "wide" extension. Better
+// to reject `--output wide` up-front with a clear "not supported"
+// message than to silently treat it as table.
+var FormatsNoWide = []output.Format{
+	output.FormatTable,
+	output.FormatJSON,
+	output.FormatYAML,
+}
+
 // Setup is the outcome of Prepare: everything a command action needs
 // after flag parsing and config resolution.
 type Setup struct {

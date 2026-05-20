@@ -115,6 +115,27 @@ func SuggestSnapshots(ctx context.Context, cmd *cli.Command) []string {
 	})
 }
 
+// SuggestSnapshotSpecs emits fully-qualified `repo/snap` candidates
+// for `snapshot describe`, which takes one combined positional. The
+// underlying capability fans out across every registered repository
+// in one call (`SnapshotFilter{}` with no Repository set); the bash
+// completion templates then filter the returned list against the
+// operator's partial word via `compgen -W`, so typing `myrepo/<TAB>`
+// narrows to the snapshots in `myrepo` for free.
+func SuggestSnapshotSpecs(ctx context.Context, cmd *cli.Command) []string {
+	return clusterSuggest(ctx, cmd, "snapshot-specs", func(ctx context.Context, c *client.Client) ([]string, error) {
+		snaps, err := c.Snapshot.Snapshots(ctx, types.SnapshotFilter{Slim: true})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(snaps))
+		for _, s := range snaps {
+			out = append(out, s.Repository+"/"+s.Name)
+		}
+		return out, nil
+	})
+}
+
 // SuggestPipelines emits configured ingest pipeline IDs.
 func SuggestPipelines(ctx context.Context, cmd *cli.Command) []string {
 	return clusterSuggest(ctx, cmd, "pipelines", func(ctx context.Context, c *client.Client) ([]string, error) {

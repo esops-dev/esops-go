@@ -53,6 +53,35 @@ func TestResolvePolicyBody_missingFile(t *testing.T) {
 	}
 }
 
+func TestValidateRecentLimit(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      int
+		wantErr string
+	}{
+		{name: "zero allowed (means default)", in: 0},
+		{name: "positive allowed", in: 5},
+		{name: "at cap allowed", in: recentLimitMax},
+		{name: "negative rejected", in: -1, wantErr: "must be >= 0"},
+		{name: "above cap rejected", in: recentLimitMax + 1, wantErr: "exceeds the cap"},
+		{name: "wildly above cap rejected", in: 100000, wantErr: "exceeds the cap"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateRecentLimit(c.in)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateRecentLimit(%d) = %v, want nil", c.in, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("validateRecentLimit(%d) err = %v, want substring %q", c.in, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseKeyValueSettings(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -22,6 +22,7 @@ func Command() *cli.Command {
 		Usage: "Inspect, create, verify, restore and prune snapshots, repositories, and policies",
 		Commands: []*cli.Command{
 			listCommand(),
+			describeCommand(),
 			createCommand(),
 			verifyCommand(),
 			restoreCommand(),

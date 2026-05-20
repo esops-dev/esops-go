@@ -8,8 +8,10 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -36,10 +38,112 @@ func ilmCommand() *cli.Command {
 		Commands: []*cli.Command{
 			ilmListCommand(),
 			ilmGetCommand(),
+			ilmDescribeCommand(),
 			ilmPutCommand(),
 			ilmDeleteCommand(),
 			ilmExplainCommand(),
 		},
+	}
+}
+
+func ilmDescribeCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "describe",
+		Usage:     "Show a detailed summary of one ILM policy plus its managed indices",
+		ArgsUsage: "NAME",
+		Description: `Aggregate the policy body, its in_use_by references (indices,
+data streams, composable templates), and the per-managed-index
+ILM explain view (phase, action, step, age, FAILED markers) into
+one sectioned summary.
+
+Explain scoping: when in_use_by.indices is populated, /_ilm/explain
+is narrowed to those names. When the policy attaches only via data
+streams (the modern ES pattern), explain runs cluster-wide and is
+filtered client-side — otherwise data-stream attachments would
+silently report 0 managed indices.
+
+Read-only. ILM is Elasticsearch-only — running this against an
+OpenSearch context fails with exit code 6.
+
+The per-managed-index listing collapses to a one-line summary when
+the policy attaches to more than 25 indices; --show-indices (or
+--output wide) forces the full listing.
+
+--watch repaints the summary on a fixed interval so an operator
+can sit on the output during a phase transition and watch the
+per-index step move.`,
+		Flags: append([]cli.Flag{
+			&cli.BoolFlag{
+				Name:  "show-indices",
+				Usage: "Force the per-managed-index listing even when the policy attaches to many indices",
+			},
+			&cli.BoolFlag{
+				Name:  "no-indices",
+				Usage: "Hide the per-managed-index listing entirely",
+			},
+		}, watch.Flags()...),
+		Action:        runILMDescribe,
+		ShellComplete: completion.ForPositional(1, completion.SuggestILMPolicies),
+	}
+}
+
+func runILMDescribe(ctx context.Context, cmd *cli.Command) error {
+	args := cmd.Args()
+	if args.Len() != 1 {
+		return client.UsageError("describe takes exactly one positional argument (NAME); got %d", args.Len())
+	}
+	name := args.First()
+
+	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+		SupportedFormats: cmdsetup.FormatsStandard,
+	})
+	if err != nil {
+		return err
+	}
+
+	showManaged, err := resolveManagedVisibility(cmd)
+	if err != nil {
+		return err
+	}
+
+	caps := esopsindex.ILMDescribeCapabilities{
+		ILM:     s.Client.ILM,
+		Dialect: string(s.Client.Info.Dialect),
+	}
+
+	return watch.Run(ctx, cmd, "esops index ilm describe", s.Format, func(ctx context.Context) error {
+		desc, err := esopsindex.DescribeILM(ctx, caps, esopsindex.ILMDescribeOptions{Name: name})
+		if err != nil {
+			return err
+		}
+		s.Log("index.ilm.describe",
+			"name", desc.Policy.Name,
+			"managed", desc.ManagedCount,
+			"errors", desc.ErrorCount,
+			"warnings", len(desc.SectionWarnings),
+		)
+		return output.ILMDescribe(os.Stdout, desc, output.PolicyDescribeOptions{ShowManaged: showManaged}, s.Format)
+	})
+}
+
+// resolveManagedVisibility folds the --show-indices and --no-indices
+// flags into the renderer's tri-state. Shared between ilm describe
+// and ism describe — same flag semantics, same refusal message.
+func resolveManagedVisibility(cmd *cli.Command) (*bool, error) {
+	show := cmd.Bool("show-indices")
+	hide := cmd.Bool("no-indices")
+	if show && hide {
+		return nil, client.UsageError("--show-indices and --no-indices are mutually exclusive")
+	}
+	switch {
+	case show:
+		v := true
+		return &v, nil
+	case hide:
+		v := false
+		return &v, nil
+	default:
+		return nil, nil
 	}
 }
 

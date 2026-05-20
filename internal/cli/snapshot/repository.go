@@ -28,10 +28,120 @@ func repositoryCommand() *cli.Command {
 		Usage: "Register, remove, or list snapshot repositories",
 		Commands: []*cli.Command{
 			repositoryListCommand(),
+			repositoryDescribeCommand(),
 			repositoryRegisterCommand(),
 			repositoryRemoveCommand(),
 		},
 	}
+}
+
+func repositoryDescribeCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "describe",
+		Usage:     "Show a detailed summary of one snapshot repository",
+		ArgsUsage: "NAME",
+		Description: `Aggregate the repository's configuration (type, settings), the
+cluster's verify probe (which nodes can reach the backing store),
+a snapshot-state summary (total / success / failed / in-progress
+counts), and the SLM/SM policies that write to this repository.
+
+Read-only against the cluster's catalog (GET /_snapshot/<repo>,
+GET /_snapshot/<repo>/<*>?verbose=false, GET /_slm/policy or
+/_plugins/_sm/policies). Safe against a prod-protected context.
+
+--verify additionally runs POST /_snapshot/<repo>/_verify — a
+cluster-side connectivity probe that can take seconds on a slow
+backing store. Off by default so describe stays cheap; pass it
+when you specifically want to confirm "every data node can talk
+to the bucket". Because the probe fans out across every data
+node, --verify is treated as a destructive op for protection-tier
+purposes and requires --i-know-this-is-prod against a prod
+context.
+
+By default known-credential keys in the settings block (access_key,
+secret_key, client_secret, …) are redacted so the rendered output
+is safe to paste into tickets. Pass --show-secrets when you need
+to see the raw values.`,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "verify",
+				Usage: "Run the cluster-side connectivity probe (POST /_snapshot/<repo>/_verify)",
+			},
+			&cli.BoolFlag{
+				Name:  "show-secrets",
+				Usage: "Render credential keys in settings unredacted",
+			},
+		},
+		Action:        runRepositoryDescribe,
+		ShellComplete: completion.ForPositional(1, completion.SuggestRepositories),
+	}
+}
+
+// effectiveVerify decides whether `snapshot repository describe`
+// actually fires the cluster-side verify probe given the operator's
+// --verify and --dry-run flags. Pulled out as a pure function so the
+// CLI-layer test can lock in the dry-run interaction without
+// constructing a urfave/cli command — the behaviour is load-bearing:
+// CheckProtection bypasses the prod-tier check under --dry-run, so
+// any path that lets verify still run when --dry-run is set would
+// turn dry-run into an unintended protection-bypass.
+func effectiveVerify(verifyRequested, dryRun bool) bool {
+	return verifyRequested && !dryRun
+}
+
+func runRepositoryDescribe(ctx context.Context, cmd *cli.Command) error {
+	args := cmd.Args()
+	if args.Len() != 1 {
+		return client.UsageError("describe takes exactly one positional argument (NAME); got %d", args.Len())
+	}
+	name := args.First()
+
+	// --verify drives POST /_snapshot/<repo>/_verify, a cluster-side
+	// node fan-out that produces real load on the backing store. Gate
+	// it through the protection tier so an operator targeting a
+	// prod-protected context must pass --i-know-this-is-prod. The
+	// no-verify path stays read-only and unencumbered.
+	//
+	// --dry-run is honoured by skipping the verify probe entirely;
+	// otherwise cmdsetup.CheckProtection's dry-run bypass would let
+	// `describe --verify --dry-run` reach prod without acknowledgement
+	// and *still* fire the probe — turning the dry-run flag into an
+	// unintentional protection-bypass for the one mutation describe
+	// can trigger.
+	verifyRequested := cmd.Bool("verify")
+	verify := effectiveVerify(verifyRequested, cmd.Bool("dry-run"))
+	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+		Destructive:      verify,
+		SupportedFormats: cmdsetup.FormatsNoWide,
+	})
+	if err != nil {
+		return err
+	}
+
+	desc, err := esopssnapshot.DescribeRepository(ctx, esopssnapshot.RepositoryDescribeCapabilities{
+		Snapshots: s.Client.Snapshot,
+		Verifier:  s.Client.SnapshotVerify,
+		Policies:  s.Client.SnapshotPolicyRead,
+		Dialect:   string(s.Client.Info.Dialect),
+	}, esopssnapshot.RepositoryDescribeOptions{
+		Name:        name,
+		Verify:      verify,
+		ShowSecrets: cmd.Bool("show-secrets"),
+	})
+	if err != nil {
+		return err
+	}
+
+	s.Log("snapshot.repository.describe",
+		"repository", desc.Info.Name,
+		"type", desc.Info.Type,
+		"snapshots", desc.Summary.SnapshotCount,
+		"policies", len(desc.Policies),
+		"warnings", len(desc.SectionWarnings),
+		"verify_requested", verifyRequested,
+		"verify_ran", verify,
+	)
+	return output.SnapshotRepositoryDescribe(os.Stdout, desc, s.Format)
 }
 
 // repositoryListCommand is `esops snapshot repository list`. Mirrors

@@ -40,11 +40,106 @@ func policyCommand() *cli.Command {
 		Commands: []*cli.Command{
 			policyListCommand(),
 			policyGetCommand(),
+			policyDescribeCommand(),
 			policyPutCommand(),
 			policyDeleteCommand(),
 			policyExecuteCommand(),
 		},
 	}
+}
+
+func policyDescribeCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "describe",
+		Usage:     "Show a detailed summary of one snapshot policy (definition + recent runs)",
+		ArgsUsage: "NAME",
+		Description: `Aggregate the SLM/SM policy body (schedule, retention, enabled
+flag, last/next execution timestamps) with a tail of the most
+recent snapshots that landed in the policy's target repository so
+an operator can answer "is this policy actually running and
+producing snapshots".
+
+The cluster reports no back-reference from a snapshot to the
+policy that produced it, so the recent-snapshots tail is the
+policy's *target repository* sorted most-recent-first — snapshots
+written by another policy in the same repo will show up here.
+Surfaced as "Recent snapshots in repository" to keep the
+interpretation honest.
+
+Read-only and safe against a prod-protected context.`,
+		Flags: []cli.Flag{
+			&cli.IntFlag{
+				Name:        "recent-limit",
+				Usage:       "Maximum number of recent snapshots to render (0 uses the default)",
+				Value:       esopssnapshot.DefaultPolicyRecentLimit,
+				DefaultText: fmt.Sprintf("%d", esopssnapshot.DefaultPolicyRecentLimit),
+			},
+		},
+		Action:        runPolicyDescribe,
+		ShellComplete: completion.ForPositional(1, completion.SuggestSnapshotPolicies),
+	}
+}
+
+// recentLimitMax bounds the operator-supplied --recent-limit so a
+// typo (e.g. `--recent-limit 100000`) can't pull every snapshot out
+// of a long-running repository just to drop all but a tail. The cap
+// is generous — a policy operator who legitimately wants more than
+// 500 historical runs is probably looking for `snapshot list` instead.
+const recentLimitMax = 500
+
+// validateRecentLimit enforces the CLI-side bounds on --recent-limit
+// before any cluster call. Negative is a typo; values above the cap
+// would issue an outsized /_snapshot listing just to drop the tail.
+// Pure function so the CLI-layer test can exercise the guards
+// directly without spinning up urfave/cli.
+func validateRecentLimit(v int) error {
+	if v < 0 {
+		return client.UsageError("--recent-limit must be >= 0 (got %d)", v)
+	}
+	if v > recentLimitMax {
+		return client.UsageError("--recent-limit %d exceeds the cap of %d", v, recentLimitMax)
+	}
+	return nil
+}
+
+func runPolicyDescribe(ctx context.Context, cmd *cli.Command) error {
+	args := cmd.Args()
+	if args.Len() != 1 {
+		return client.UsageError("describe takes exactly one positional argument (NAME); got %d", args.Len())
+	}
+	name := args.First()
+
+	recentLimit := int(cmd.Int("recent-limit"))
+	if err := validateRecentLimit(recentLimit); err != nil {
+		return err
+	}
+
+	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+		SupportedFormats: cmdsetup.FormatsNoWide,
+	})
+	if err != nil {
+		return err
+	}
+
+	desc, err := esopssnapshot.DescribePolicy(ctx, esopssnapshot.PolicyDescribeCapabilities{
+		Policies:  s.Client.SnapshotPolicyRead,
+		Snapshots: s.Client.Snapshot,
+		Dialect:   string(s.Client.Info.Dialect),
+	}, esopssnapshot.PolicyDescribeOptions{
+		Name:        name,
+		RecentLimit: recentLimit,
+	})
+	if err != nil {
+		return err
+	}
+
+	s.Log("snapshot.policy.describe",
+		"name", desc.Policy.Name,
+		"repository", desc.Policy.Repository,
+		"recent", len(desc.RecentSnapshots),
+		"warnings", len(desc.SectionWarnings),
+	)
+	return output.SnapshotPolicyDescribe(os.Stdout, desc, s.Format)
 }
 
 func policyListCommand() *cli.Command {
