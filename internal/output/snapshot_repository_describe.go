@@ -29,13 +29,14 @@ func SnapshotRepositoryDescribe(w io.Writer, d types.SnapshotRepositoryDescripti
 		defer func() { _ = enc.Close() }()
 		return enc.Encode(d)
 	case FormatTable, "":
-		return snapshotRepositoryDescribeText(w, d)
+		snapshotRepositoryDescribeText(w, d)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func snapshotRepositoryDescribeText(w io.Writer, d types.SnapshotRepositoryDescription) error {
+func snapshotRepositoryDescribeText(w io.Writer, d types.SnapshotRepositoryDescription) {
 	r := d.Info
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "Name:\t%s\n", r.Name)
@@ -58,15 +59,14 @@ func snapshotRepositoryDescribeText(w io.Writer, d types.SnapshotRepositoryDescr
 	writeRepoVerify(w, d.Verify)
 	writeRepoPolicies(w, d.Policies)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 func writeRepoSettings(w io.Writer, settings map[string]any) {
 	if len(settings) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Settings:")
+	fprintlnW(w)
+	fprintlnW(w, "Settings:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	keys := make([]string, 0, len(settings))
 	for k := range settings {
@@ -83,8 +83,8 @@ func writeRepoVerify(w io.Writer, v *types.SnapshotVerifyResult) {
 	if v == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Verify:")
+	fprintlnW(w)
+	fprintlnW(w, "Verify:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  Verified nodes:\t%d\n", len(v.VerifiedNodes))
 	if len(v.VerifiedNodes) > 0 {
@@ -99,8 +99,8 @@ func writeRepoPolicies(w io.Writer, policies []types.SnapshotPolicy) {
 	if len(policies) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Policies writing to this repository:")
+	fprintlnW(w)
+	fprintlnW(w, "Policies writing to this repository:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  NAME\tSCHEDULE\tENABLED\n")
 	for _, p := range policies {

@@ -64,15 +64,17 @@ func IndexDescribe(w io.Writer, d types.IndexDescription, opts IndexDescribeOpti
 			force := true
 			opts.ShowShards = &force
 		}
-		return indexDescribeText(w, d, opts)
+		indexDescribeText(w, d, opts)
+		return nil
 	case FormatTable, "":
-		return indexDescribeText(w, d, opts)
+		indexDescribeText(w, d, opts)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func indexDescribeText(w io.Writer, d types.IndexDescription, opts IndexDescribeOptions) error {
+func indexDescribeText(w io.Writer, d types.IndexDescription, opts IndexDescribeOptions) {
 	if opts.AutoShardMax == 0 {
 		opts.AutoShardMax = DefaultDescribeShardListing
 	}
@@ -87,7 +89,6 @@ func indexDescribeText(w io.Writer, d types.IndexDescription, opts IndexDescribe
 	writeSegments(w, d.Segments)
 	writeTasks(w, d.Tasks)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 func writeHeader(w io.Writer, d types.IndexDescription) {
@@ -121,8 +122,8 @@ func writeAliases(w io.Writer, d types.IndexDescription) {
 	if len(d.Aliases) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Aliases:")
+	fprintlnW(w)
+	fprintlnW(w, "Aliases:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, a := range d.Aliases {
 		extras := []string{}
@@ -149,8 +150,8 @@ func writeAliases(w io.Writer, d types.IndexDescription) {
 
 func writeLifecycle(w io.Writer, d types.IndexDescription) {
 	if d.ILM != nil && d.ILM.Managed {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Lifecycle (ILM):")
+		fprintlnW(w)
+		fprintlnW(w, "Lifecycle (ILM):")
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 		ilm := d.ILM
 		if ilm.Policy != "" {
@@ -174,8 +175,8 @@ func writeLifecycle(w io.Writer, d types.IndexDescription) {
 		_ = tw.Flush()
 	}
 	if d.ISM != nil && d.ISM.Managed {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Lifecycle (ISM):")
+		fprintlnW(w)
+		fprintlnW(w, "Lifecycle (ISM):")
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 		ism := d.ISM
 		if ism.PolicyID != "" {
@@ -199,8 +200,8 @@ func writeTemplate(w io.Writer, t *types.IndexTemplate) {
 	if t == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Matched template:")
+	fprintlnW(w)
+	fprintlnW(w, "Matched template:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  Name:\t%s\n", t.Name)
 	if t.Priority != 0 {
@@ -220,11 +221,11 @@ func writeSettings(w io.Writer, s types.IndexSettings, includeDefaults bool) {
 	if len(configured) == 0 && !includeDefaults {
 		return
 	}
-	fmt.Fprintln(w)
+	fprintlnW(w)
 	if includeDefaults {
-		fmt.Fprintln(w, "Settings (configured + defaults):")
+		fprintlnW(w, "Settings (configured + defaults):")
 	} else {
-		fmt.Fprintln(w, "Settings (configured):")
+		fprintlnW(w, "Settings (configured):")
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	keys := make([]string, 0, len(configured))
@@ -256,22 +257,22 @@ func writeMappings(w io.Writer, m *types.IndexMapping, full bool) {
 	if m == nil {
 		return
 	}
-	fmt.Fprintln(w)
+	fprintlnW(w)
 	if full {
-		fmt.Fprintln(w, "Mappings:")
+		fprintlnW(w, "Mappings:")
 		body, err := json.MarshalIndent(m.Properties, "  ", "  ")
 		if err != nil {
-			fmt.Fprintf(w, "  (failed to render mappings: %v)\n", err)
+			fprintfW(w, "  (failed to render mappings: %v)\n", err)
 			return
 		}
-		fmt.Fprintf(w, "  %s\n", body)
+		fprintfW(w, "  %s\n", body)
 		if m.Dynamic != "" {
-			fmt.Fprintf(w, "  dynamic: %s\n", m.Dynamic)
+			fprintfW(w, "  dynamic: %s\n", m.Dynamic)
 		}
 		return
 	}
 	summary := summariseMappings(m.Properties)
-	fmt.Fprintln(w, "Mappings:")
+	fprintlnW(w, "Mappings:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  Fields:\t%d total\n", summary.total)
 	if len(summary.byType) > 0 {
@@ -336,12 +337,12 @@ func writeShards(w io.Writer, shards []types.Shard, opts IndexDescribeOptions) {
 		return
 	}
 	if !force && opts.AutoShardMax > 0 && len(shards) > opts.AutoShardMax {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Shards:  %d total (pass --show-shards or --output wide for the per-shard listing)\n", len(shards))
+		fprintlnW(w)
+		fprintfW(w, "Shards:  %d total (pass --show-shards or --output wide for the per-shard listing)\n", len(shards))
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Shards:")
+	fprintlnW(w)
+	fprintlnW(w, "Shards:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, s := range shards {
 		role := "r"
@@ -366,8 +367,8 @@ func writeRecovery(w io.Writer, r *types.IndexRecovery) {
 	if r == nil || len(r.Shards) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Recovery (in progress):")
+	fprintlnW(w)
+	fprintlnW(w, "Recovery (in progress):")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, s := range r.Shards {
 		role := "r"
@@ -396,8 +397,8 @@ func writeSegments(w io.Writer, s *types.IndexSegments) {
 	if s == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Segments:")
+	fprintlnW(w)
+	fprintlnW(w, "Segments:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  Total:\t%d (primary: %d)\n", s.SegmentsTotal, s.SegmentsPrimary)
 	fprintfTW(tw, "  Docs:\t%d total, %d deleted\n", s.DocsTotal, s.DocsDeleted)
@@ -411,8 +412,8 @@ func writeTasks(w io.Writer, tasks []types.Task) {
 	if len(tasks) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Tasks (in flight, touching this index):")
+	fprintlnW(w)
+	fprintlnW(w, "Tasks (in flight, touching this index):")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, t := range tasks {
 		desc := t.Description
@@ -429,8 +430,8 @@ func writeWarnings(w io.Writer, warns map[string]string) {
 	if len(warns) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Section warnings:")
+	fprintlnW(w)
+	fprintlnW(w, "Section warnings:")
 	keys := make([]string, 0, len(warns))
 	for k := range warns {
 		keys = append(keys, k)
@@ -466,4 +467,20 @@ func humanAge(t time.Time) string {
 
 func fprintfTW(tw *tabwriter.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(tw, format, args...)
+}
+
+// fprintlnW and fprintfW are the bare-writer siblings of fprintfTW
+// — same purpose, same intentional error-swallowing, but for the
+// non-tabwriter sections of describe renderers (headers, blank-line
+// separators, bodies). Stdout / stderr writes can't realistically
+// fail; for everything else, the upstream Format dispatcher already
+// returns error from the JSON/YAML branches where it matters.
+// Centralising the swallow here keeps both errcheck and the
+// codebase noise-free.
+func fprintlnW(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...)
+}
+
+func fprintfW(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
 }

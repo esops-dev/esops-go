@@ -48,15 +48,17 @@ func ILMDescribe(w io.Writer, d types.ILMPolicyDescription, opts PolicyDescribeO
 			force := true
 			opts.ShowManaged = &force
 		}
-		return ilmDescribeText(w, d, opts)
+		ilmDescribeText(w, d, opts)
+		return nil
 	case FormatTable, "":
-		return ilmDescribeText(w, d, opts)
+		ilmDescribeText(w, d, opts)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func ilmDescribeText(w io.Writer, d types.ILMPolicyDescription, opts PolicyDescribeOptions) error {
+func ilmDescribeText(w io.Writer, d types.ILMPolicyDescription, opts PolicyDescribeOptions) {
 	if opts.AutoMax == 0 {
 		opts.AutoMax = DefaultPolicyDescribeIndexListing
 	}
@@ -79,7 +81,6 @@ func ilmDescribeText(w io.Writer, d types.ILMPolicyDescription, opts PolicyDescr
 	writeILMPhases(w, d.Policy.Definition)
 	writeILMManagedIndices(w, d.ManagedIndices, opts)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 // writeILMPhases renders the policy's phases block as a per-phase
@@ -98,7 +99,7 @@ func writeILMPhases(w io.Writer, def map[string]any) {
 		phases, ok = nestedMap(def, "phases")
 	}
 	if !ok {
-		writePolicyDefinition(w, "Policy body", def)
+		writePolicyDefinition(w, def)
 		return
 	}
 	order := []string{"hot", "warm", "cold", "frozen", "delete"}
@@ -111,8 +112,8 @@ func writeILMPhases(w io.Writer, def map[string]any) {
 			order = append(order, k)
 		}
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Phases:")
+	fprintlnW(w)
+	fprintlnW(w, "Phases:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	rendered := false
 	for _, name := range order {
@@ -141,7 +142,7 @@ func writeILMPhases(w io.Writer, def map[string]any) {
 	if !rendered {
 		// Phases key present but empty — surface the raw body so
 		// nothing operator-relevant is silently dropped.
-		writePolicyDefinition(w, "Policy body", def)
+		writePolicyDefinition(w, def)
 	}
 }
 
@@ -177,8 +178,8 @@ func writeILMInUseBy(w io.Writer, u types.ILMInUseBy) {
 	if len(u.Indices) == 0 && len(u.DataStreams) == 0 && len(u.ComposableTemplates) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "In use by:")
+	fprintlnW(w)
+	fprintlnW(w, "In use by:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if len(u.Indices) > 0 {
 		fprintfTW(tw, "  Indices:\t%d  (%s)\n",
@@ -206,18 +207,25 @@ func truncatePolicyRefs(names []string) string {
 	return strings.Join(names[:max], ", ") + fmt.Sprintf(", … %d more", len(names)-max)
 }
 
-func writePolicyDefinition(w io.Writer, label string, def map[string]any) {
+// writePolicyDefinition renders the policy body as an indented JSON
+// dump under a "Policy body:" header. Used as the fallback when the
+// renderer can't parse the dialect-specific structure (ILM phases,
+// ISM states) — and for snapshot-policy bodies which the renderer
+// always dumps as JSON. The header text is hardcoded because every
+// caller has the same label; if a future caller wants a different
+// header, re-introduce a label parameter at that point.
+func writePolicyDefinition(w io.Writer, def map[string]any) {
 	if len(def) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "%s:\n", label)
+	fprintlnW(w)
+	fprintlnW(w, "Policy body:")
 	body, err := json.MarshalIndent(def, "  ", "  ")
 	if err != nil {
-		fmt.Fprintf(w, "  (failed to render: %v)\n", err)
+		fprintfW(w, "  (failed to render: %v)\n", err)
 		return
 	}
-	fmt.Fprintf(w, "  %s\n", body)
+	fprintfW(w, "  %s\n", body)
 }
 
 func writeILMManagedIndices(w io.Writer, entries []types.ILMExplainEntry, opts PolicyDescribeOptions) {
@@ -230,12 +238,12 @@ func writeILMManagedIndices(w io.Writer, entries []types.ILMExplainEntry, opts P
 		return
 	}
 	if !force && opts.AutoMax > 0 && len(entries) > opts.AutoMax {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Managed indices:  %d total (pass --show-indices or --output wide for the per-index listing)\n", len(entries))
+		fprintlnW(w)
+		fprintfW(w, "Managed indices:  %d total (pass --show-indices or --output wide for the per-index listing)\n", len(entries))
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Per-index state:")
+	fprintlnW(w)
+	fprintlnW(w, "Per-index state:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  INDEX\tPHASE\tACTION\tSTEP\tAGE\n")
 	for _, e := range entries {

@@ -28,13 +28,14 @@ func SnapshotPolicyDescribe(w io.Writer, d types.SnapshotPolicyDescription, f Fo
 		defer func() { _ = enc.Close() }()
 		return enc.Encode(d)
 	case FormatTable, "":
-		return snapshotPolicyDescribeText(w, d)
+		snapshotPolicyDescribeText(w, d)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func snapshotPolicyDescribeText(w io.Writer, d types.SnapshotPolicyDescription) error {
+func snapshotPolicyDescribeText(w io.Writer, d types.SnapshotPolicyDescription) {
 	p := d.Policy
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "Name:\t%s\n", p.Name)
@@ -68,11 +69,11 @@ func snapshotPolicyDescribeText(w io.Writer, d types.SnapshotPolicyDescription) 
 	}
 	_ = tw.Flush()
 
-	writePolicyDefinition(w, "Policy body", p.Definition)
+	writePolicyDefinition(w, p.Definition)
 
 	if len(d.RecentSnapshots) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Recent snapshots in repository (limit %d):\n", d.RecentLimit)
+		fprintlnW(w)
+		fprintfW(w, "Recent snapshots in repository (limit %d):\n", d.RecentLimit)
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 		fprintfTW(tw, "  NAME\tSTATE\tSTARTED\tDURATION\n")
 		for _, s := range d.RecentSnapshots {
@@ -90,7 +91,6 @@ func snapshotPolicyDescribeText(w io.Writer, d types.SnapshotPolicyDescription) 
 	}
 
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 // formatMillisUTC renders an epoch-millis as an RFC3339 UTC string.

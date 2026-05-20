@@ -48,15 +48,17 @@ func NodeDescribe(w io.Writer, d types.NodeDescription, opts NodeDescribeOptions
 			force := true
 			opts.ShowShards = &force
 		}
-		return nodeDescribeText(w, d, opts)
+		nodeDescribeText(w, d, opts)
+		return nil
 	case FormatTable, "":
-		return nodeDescribeText(w, d, opts)
+		nodeDescribeText(w, d, opts)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func nodeDescribeText(w io.Writer, d types.NodeDescription, opts NodeDescribeOptions) error {
+func nodeDescribeText(w io.Writer, d types.NodeDescription, opts NodeDescribeOptions) {
 	if opts.AutoShardMax == 0 {
 		opts.AutoShardMax = DefaultNodeDescribeShardListing
 	}
@@ -70,7 +72,6 @@ func nodeDescribeText(w io.Writer, d types.NodeDescription, opts NodeDescribeOpt
 	writeNodeDrain(w, d.Drain)
 	writeNodeShards(w, d.Shards, opts)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 func writeNodeHeader(w io.Writer, d types.NodeDescription) {
@@ -116,8 +117,8 @@ func writeNodeJVMandOS(w io.Writer, d types.NodeDescription) {
 	if d.Stats == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "JVM & host:")
+	fprintlnW(w)
+	fprintlnW(w, "JVM & host:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if d.Stats.JVM.Heap.InitBytes > 0 || d.Stats.JVM.Heap.MaxBytes > 0 {
 		fprintfTW(tw, "  Heap config:\t-Xms %s / -Xmx %s\n",
@@ -133,8 +134,8 @@ func writeNodeBootstrap(w io.Writer, b *types.NodeBootstrap) {
 	if b == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Bootstrap & limits:")
+	fprintlnW(w)
+	fprintlnW(w, "Bootstrap & limits:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  mlockall:\t%t\n", b.MlockallEnabled)
 	if b.MaxFileDescriptors > 0 {
@@ -163,8 +164,8 @@ func writeNodePlugins(w io.Writer, plugins []types.NodePlugin) {
 	if len(plugins) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Plugins:")
+	fprintlnW(w)
+	fprintlnW(w, "Plugins:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, p := range plugins {
 		v := p.Version
@@ -180,8 +181,8 @@ func writeNodeSettings(w io.Writer, s *types.NodeSettings) {
 	if s == nil || len(s.Settings) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Static node settings:")
+	fprintlnW(w)
+	fprintlnW(w, "Static node settings:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	keys := make([]string, 0, len(s.Settings))
 	for k := range s.Settings {
@@ -198,8 +199,8 @@ func writeNodeDrain(w io.Writer, d types.NodeDrainStatus) {
 	if !d.AllocationExcluded && !d.VotingExcluded {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Drain state:")
+	fprintlnW(w)
+	fprintlnW(w, "Drain state:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if d.AllocationExcluded {
 		fprintfTW(tw, "  Allocation exclude:\ttrue  (%s)\n", strings.Join(d.Scopes, ", "))
@@ -220,12 +221,12 @@ func writeNodeShards(w io.Writer, shards []types.Shard, opts NodeDescribeOptions
 		return
 	}
 	if !force && opts.AutoShardMax > 0 && len(shards) > opts.AutoShardMax {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Shards on node:  %d total (pass --show-shards or --output wide for the per-shard listing)\n", len(shards))
+		fprintlnW(w)
+		fprintfW(w, "Shards on node:  %d total (pass --show-shards or --output wide for the per-shard listing)\n", len(shards))
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Shards on node:")
+	fprintlnW(w)
+	fprintlnW(w, "Shards on node:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, s := range shards {
 		role := "r"

@@ -29,13 +29,14 @@ func TransformDescribe(w io.Writer, d types.TransformDescription, f Format) erro
 		defer func() { _ = enc.Close() }()
 		return enc.Encode(d)
 	case FormatTable, "":
-		return transformDescribeText(w, d)
+		transformDescribeText(w, d)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func transformDescribeText(w io.Writer, d types.TransformDescription) error {
+func transformDescribeText(w io.Writer, d types.TransformDescription) {
 	t := d.Info
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "Name:\t%s\n", t.Name)
@@ -65,15 +66,14 @@ func transformDescribeText(w io.Writer, d types.TransformDescription) error {
 	writeTransformStats(w, d.Stats)
 	writeTransformDefinition(w, t.Definition)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 func writeTransformStats(w io.Writer, s *types.TransformStats) {
 	if s == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Runtime:")
+	fprintlnW(w)
+	fprintlnW(w, "Runtime:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if s.State != "" {
 		fprintfTW(tw, "  State:\t%s\n", s.State)
@@ -109,12 +109,12 @@ func writeTransformDefinition(w io.Writer, def map[string]any) {
 	if len(def) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Definition:")
+	fprintlnW(w)
+	fprintlnW(w, "Definition:")
 	body, err := json.MarshalIndent(def, "  ", "  ")
 	if err != nil {
-		fmt.Fprintf(w, "  (failed to render: %v)\n", err)
+		fprintfW(w, "  (failed to render: %v)\n", err)
 		return
 	}
-	fmt.Fprintf(w, "  %s\n", body)
+	fprintfW(w, "  %s\n", body)
 }

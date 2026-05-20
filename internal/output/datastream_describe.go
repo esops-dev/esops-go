@@ -41,15 +41,17 @@ func DataStreamDescribe(w io.Writer, d types.DataStreamDescription, opts DataStr
 		return enc.Encode(d)
 	case FormatWide:
 		opts.Wide = true
-		return dataStreamDescribeText(w, d, opts)
+		dataStreamDescribeText(w, d, opts)
+		return nil
 	case FormatTable, "":
-		return dataStreamDescribeText(w, d, opts)
+		dataStreamDescribeText(w, d, opts)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func dataStreamDescribeText(w io.Writer, d types.DataStreamDescription, opts DataStreamDescribeOptions) error {
+func dataStreamDescribeText(w io.Writer, d types.DataStreamDescription, opts DataStreamDescribeOptions) {
 	writeDataStreamHeader(w, d)
 	writeDataStreamLifecycle(w, d)
 	writeDataStreamTemplate(w, d.MatchedTemplate)
@@ -57,7 +59,6 @@ func dataStreamDescribeText(w io.Writer, d types.DataStreamDescription, opts Dat
 	writeDataStreamRecoveries(w, d.Recoveries)
 	writeDataStreamTasks(w, d.Tasks)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 func writeDataStreamHeader(w io.Writer, d types.DataStreamDescription) {
@@ -110,8 +111,8 @@ func writeDataStreamLifecycle(w io.Writer, d types.DataStreamDescription) {
 	if !hasILM && !hasISM && !hasDSL {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Lifecycle:")
+	fprintlnW(w)
+	fprintlnW(w, "Lifecycle:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if hasILM {
 		fprintfTW(tw, "  ILM policy:\t%s\n", s.ILMPolicy)
@@ -132,8 +133,8 @@ func writeDataStreamTemplate(w io.Writer, t *types.IndexTemplate) {
 	if t == nil {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Matched template:")
+	fprintlnW(w)
+	fprintlnW(w, "Matched template:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  Name:\t%s\n", t.Name)
 	if t.Priority != 0 {
@@ -155,8 +156,8 @@ func writeDataStreamBackingIndices(w io.Writer, s types.DataStream, opts DataStr
 	if opts.ShowIndices != nil && !*opts.ShowIndices {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Backing indices (oldest → newest):")
+	fprintlnW(w)
+	fprintlnW(w, "Backing indices (oldest → newest):")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if opts.Wide {
 		fprintfTW(tw, "  NAME\tHEALTH\tDOCS\tSIZE\tUUID\tMANAGED_BY\n")
@@ -190,8 +191,8 @@ func writeDataStreamRecoveries(w io.Writer, recs []types.IndexRecovery) {
 	if len(recs) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Active recoveries (backing indices):")
+	fprintlnW(w)
+	fprintlnW(w, "Active recoveries (backing indices):")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, r := range recs {
 		for _, s := range r.Shards {
@@ -214,8 +215,8 @@ func writeDataStreamTasks(w io.Writer, tasks []types.Task) {
 	if len(tasks) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Tasks (in flight, touching this stream or its backing indices):")
+	fprintlnW(w)
+	fprintlnW(w, "Tasks (in flight, touching this stream or its backing indices):")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, t := range tasks {
 		desc := t.Description

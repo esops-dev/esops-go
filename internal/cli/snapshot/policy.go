@@ -109,7 +109,7 @@ func runPolicyDescribe(ctx context.Context, cmd *cli.Command) error {
 	}
 	name := args.First()
 
-	recentLimit := int(cmd.Int("recent-limit"))
+	recentLimit := cmd.Int("recent-limit")
 	if err := validateRecentLimit(recentLimit); err != nil {
 		return err
 	}

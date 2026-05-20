@@ -35,15 +35,17 @@ func SnapshotDescribe(w io.Writer, d types.SnapshotDescription, f Format) error 
 		defer func() { _ = enc.Close() }()
 		return enc.Encode(d)
 	case FormatWide:
-		return snapshotDescribeText(w, d, true)
+		snapshotDescribeText(w, d, true)
+		return nil
 	case FormatTable, "":
-		return snapshotDescribeText(w, d, false)
+		snapshotDescribeText(w, d, false)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func snapshotDescribeText(w io.Writer, d types.SnapshotDescription, wide bool) error {
+func snapshotDescribeText(w io.Writer, d types.SnapshotDescription, wide bool) {
 	info := d.Info
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "Repository:\t%s\n", d.Repository)
@@ -77,14 +79,13 @@ func snapshotDescribeText(w io.Writer, d types.SnapshotDescription, wide bool) e
 		writeSnapshotStatus(w, *d.Status)
 	}
 	if len(info.Failures) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Failures (%d):\n", len(info.Failures))
+		fprintlnW(w)
+		fprintfW(w, "Failures (%d):\n", len(info.Failures))
 		for _, f := range info.Failures {
-			fmt.Fprintf(w, "  %s\n", string(f))
+			fprintfW(w, "  %s\n", string(f))
 		}
 	}
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 // writeSnapshotIndices renders the per-index listing. Default-mode
@@ -96,20 +97,20 @@ func writeSnapshotIndices(w io.Writer, indices []string, wide bool) {
 	if len(indices) == 0 {
 		return
 	}
-	fmt.Fprintln(w)
+	fprintlnW(w)
 	if !wide && len(indices) > DefaultSnapshotDescribeIndexListing {
-		fmt.Fprintf(w, "Indices:  %d total (pass --output wide for the per-index listing)\n", len(indices))
+		fprintfW(w, "Indices:  %d total (pass --output wide for the per-index listing)\n", len(indices))
 		return
 	}
-	fmt.Fprintln(w, "Indices:")
+	fprintlnW(w, "Indices:")
 	for _, idx := range indices {
-		fmt.Fprintf(w, "  %s\n", idx)
+		fprintfW(w, "  %s\n", idx)
 	}
 }
 
 func writeSnapshotStatus(w io.Writer, s types.SnapshotStatus) {
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Status (live):")
+	fprintlnW(w)
+	fprintlnW(w, "Status (live):")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if s.State != "" {
 		fprintfTW(tw, "  State:\t%s\n", s.State)

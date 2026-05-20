@@ -31,15 +31,17 @@ func ISMDescribe(w io.Writer, d types.ISMPolicyDescription, opts PolicyDescribeO
 			force := true
 			opts.ShowManaged = &force
 		}
-		return ismDescribeText(w, d, opts)
+		ismDescribeText(w, d, opts)
+		return nil
 	case FormatTable, "":
-		return ismDescribeText(w, d, opts)
+		ismDescribeText(w, d, opts)
+		return nil
 	default:
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
 
-func ismDescribeText(w io.Writer, d types.ISMPolicyDescription, opts PolicyDescribeOptions) error {
+func ismDescribeText(w io.Writer, d types.ISMPolicyDescription, opts PolicyDescribeOptions) {
 	if opts.AutoMax == 0 {
 		opts.AutoMax = DefaultPolicyDescribeIndexListing
 	}
@@ -60,7 +62,6 @@ func ismDescribeText(w io.Writer, d types.ISMPolicyDescription, opts PolicyDescr
 	writeISMStates(w, d.Policy.Definition)
 	writeISMManagedIndices(w, d.ManagedIndices, opts)
 	writeWarnings(w, d.SectionWarnings)
-	return nil
 }
 
 // writeISMStates renders the policy's states block as a per-state
@@ -81,16 +82,16 @@ func writeISMStates(w io.Writer, def map[string]any) {
 	}
 	statesRaw, ok := policyBody["states"].([]any)
 	if !ok || len(statesRaw) == 0 {
-		writePolicyDefinition(w, "Policy body", def)
+		writePolicyDefinition(w, def)
 		return
 	}
 	defaultState := stringField(policyBody, "default_state")
 
-	fmt.Fprintln(w)
+	fprintlnW(w)
 	if defaultState != "" {
-		fmt.Fprintf(w, "States (default: %s):\n", defaultState)
+		fprintfW(w, "States (default: %s):\n", defaultState)
 	} else {
-		fmt.Fprintln(w, "States:")
+		fprintlnW(w, "States:")
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, raw := range statesRaw {
@@ -154,12 +155,12 @@ func writeISMManagedIndices(w io.Writer, entries []types.ISMExplainEntry, opts P
 		return
 	}
 	if !force && opts.AutoMax > 0 && len(entries) > opts.AutoMax {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Managed indices:  %d total (pass --show-indices or --output wide for the per-index listing)\n", len(entries))
+		fprintlnW(w)
+		fprintfW(w, "Managed indices:  %d total (pass --show-indices or --output wide for the per-index listing)\n", len(entries))
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Per-index state:")
+	fprintlnW(w)
+	fprintlnW(w, "Per-index state:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintfTW(tw, "  INDEX\tSTATE\tACTION\tSTEP\tENABLED\n")
 	for _, e := range entries {
