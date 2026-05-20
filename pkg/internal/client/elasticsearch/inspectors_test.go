@@ -84,6 +84,10 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 				BootstrapWarnings:  []string{"max_map_count"},
 				GCCollectors:       []string{"G1 Young Generation", "G1 Old Generation"},
 				JVMInputArguments:  []string{"-XX:+UseG1GC", "-Xms2g"},
+				Plugins: []types.NodePlugin{
+					{Name: "repository-s3", Version: "9.0.2"},
+					{Name: "analysis-icu", Version: "9.0.2"},
+				},
 			},
 			want: map[string]json.RawMessage{
 				"name":                 json.RawMessage(`"es01"`),
@@ -93,6 +97,7 @@ func TestPublicTypeJSONTagsArePinned(t *testing.T) {
 				"bootstrap_warnings":   json.RawMessage(`["max_map_count"]`),
 				"gc_collectors":        json.RawMessage(`["G1 Young Generation","G1 Old Generation"]`),
 				"jvm_input_arguments":  json.RawMessage(`["-XX:+UseG1GC","-Xms2g"]`),
+				"plugins":              json.RawMessage(`[{"name":"repository-s3","version":"9.0.2"},{"name":"analysis-icu","version":"9.0.2"}]`),
 			},
 		},
 		{

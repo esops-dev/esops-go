@@ -8,8 +8,10 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/cli/watch"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -35,11 +37,87 @@ func ismCommand() *cli.Command {
 		Commands: []*cli.Command{
 			ismListCommand(),
 			ismGetCommand(),
+			ismDescribeCommand(),
 			ismPutCommand(),
 			ismDeleteCommand(),
 			ismExplainCommand(),
 		},
 	}
+}
+
+func ismDescribeCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "describe",
+		Usage:     "Show a detailed summary of one ISM policy plus its managed indices",
+		ArgsUsage: "ID",
+		Description: `Aggregate the policy body and the per-managed-index ISM explain
+view (state, action, step, enabled flag, error indicators) into
+one sectioned summary. Reads /_plugins/_ism/policies/<id> and
+/_plugins/_ism/explain (cluster-wide, filtered client-side because
+the plugin has no in_use_by reverse-reference).
+
+Read-only. ISM is OpenSearch-only — running this against an
+Elasticsearch context fails with exit code 6.
+
+The per-managed-index listing collapses to a one-line summary when
+the policy attaches to more than 25 indices; --show-indices (or
+--output wide) forces the full listing.
+
+--watch repaints the summary on a fixed interval so an operator
+can sit on the output during a state transition and watch the
+per-index step move.`,
+		Flags: append([]cli.Flag{
+			&cli.BoolFlag{
+				Name:  "show-indices",
+				Usage: "Force the per-managed-index listing even when the policy attaches to many indices",
+			},
+			&cli.BoolFlag{
+				Name:  "no-indices",
+				Usage: "Hide the per-managed-index listing entirely",
+			},
+		}, watch.Flags()...),
+		Action:        runISMDescribe,
+		ShellComplete: completion.ForPositional(1, completion.SuggestISMPolicies),
+	}
+}
+
+func runISMDescribe(ctx context.Context, cmd *cli.Command) error {
+	args := cmd.Args()
+	if args.Len() != 1 {
+		return client.UsageError("describe takes exactly one positional argument (ID); got %d", args.Len())
+	}
+	id := args.First()
+
+	s, err := cmdsetup.Prepare(ctx, cmd, cmdsetup.Spec{
+		SupportedFormats: cmdsetup.FormatsStandard,
+	})
+	if err != nil {
+		return err
+	}
+
+	showManaged, err := resolveManagedVisibility(cmd)
+	if err != nil {
+		return err
+	}
+
+	caps := esopsindex.ISMDescribeCapabilities{
+		ISM:     s.Client.ISM,
+		Dialect: string(s.Client.Info.Dialect),
+	}
+
+	return watch.Run(ctx, cmd, "esops index ism describe", s.Format, func(ctx context.Context) error {
+		desc, err := esopsindex.DescribeISM(ctx, caps, esopsindex.ISMDescribeOptions{ID: id})
+		if err != nil {
+			return err
+		}
+		s.Log("index.ism.describe",
+			"id", desc.Policy.ID,
+			"managed", desc.ManagedCount,
+			"errors", desc.ErrorCount,
+			"warnings", len(desc.SectionWarnings),
+		)
+		return output.ISMDescribe(os.Stdout, desc, output.PolicyDescribeOptions{ShowManaged: showManaged}, s.Format)
+	})
 }
 
 func ismListCommand() *cli.Command {

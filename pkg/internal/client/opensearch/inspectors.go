@@ -39,6 +39,10 @@ type nodesInfoBootstrapWire struct {
 			GCCollectors   []string `json:"gc_collectors"`
 			InputArguments []string `json:"input_arguments"`
 		} `json:"jvm"`
+		Plugins []struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"plugins"`
 	} `json:"nodes"`
 }
 
@@ -62,7 +66,11 @@ type nodesInfoBootstrapWire struct {
 // to G1GC; the rule that consumes these fields flags CMS (deprecated
 // upstream) and manual G1 overrides regardless of dialect.
 func (c *Client) NodeBootstrap(ctx context.Context) ([]types.NodeBootstrap, error) {
-	body, status, err := c.doSecurityGET(ctx, "/_nodes/process,jvm")
+	// /_nodes/process,jvm,plugins folds in the plugin manifest in the
+	// same RTT — the plugins block adds ~150 bytes per plugin per node,
+	// negligible against the JVM input-arguments slice that already
+	// dominates this response.
+	body, status, err := c.doSecurityGET(ctx, "/_nodes/process,jvm,plugins")
 	if err != nil {
 		return nil, err
 	}
@@ -78,12 +86,18 @@ func (c *Client) NodeBootstrap(ctx context.Context) ([]types.NodeBootstrap, erro
 	out := make([]types.NodeBootstrap, 0, len(wire.Nodes))
 	for _, n := range wire.Nodes {
 		mlock := n.Process.Mlockall || n.JVM.Mem.UsingMemoryLock
+		plugins := make([]types.NodePlugin, 0, len(n.Plugins))
+		for _, p := range n.Plugins {
+			plugins = append(plugins, types.NodePlugin{Name: p.Name, Version: p.Version})
+		}
+		sort.Slice(plugins, func(i, j int) bool { return plugins[i].Name < plugins[j].Name })
 		out = append(out, types.NodeBootstrap{
 			Name:               n.Name,
 			MlockallEnabled:    mlock,
 			MaxFileDescriptors: n.Process.MaxFileDescriptors,
 			GCCollectors:       n.JVM.GCCollectors,
 			JVMInputArguments:  n.JVM.InputArguments,
+			Plugins:            plugins,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

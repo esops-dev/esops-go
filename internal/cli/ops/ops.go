@@ -15,6 +15,7 @@ func Command() *cli.Command {
 		Commands: []*cli.Command{
 			healthCommand(),
 			nodesCommand(),
+			nodeCommand(),
 			shardsCommand(),
 			allocationExplainCommand(),
 			auditCommand(),

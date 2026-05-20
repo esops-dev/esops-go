@@ -3104,13 +3104,26 @@ type MigrationCutoverResult struct {
 // (-XX:MaxGCPauseMillis, -XX:G1HeapRegionSize, …). Empty when the
 // cluster did not surface the field — never inferred from defaults.
 type NodeBootstrap struct {
-	Name               string   `json:"name"                            yaml:"name"`
-	MlockallEnabled    bool     `json:"mlockall_enabled"                yaml:"mlockall_enabled"`
-	MaxFileDescriptors int64    `json:"max_file_descriptors,omitempty"  yaml:"max_file_descriptors,omitempty"`
-	MaxMapCount        int64    `json:"max_map_count,omitempty"         yaml:"max_map_count,omitempty"`
-	BootstrapWarnings  []string `json:"bootstrap_warnings,omitempty"    yaml:"bootstrap_warnings,omitempty"`
-	GCCollectors       []string `json:"gc_collectors,omitempty"         yaml:"gc_collectors,omitempty"`
-	JVMInputArguments  []string `json:"jvm_input_arguments,omitempty"   yaml:"jvm_input_arguments,omitempty"`
+	Name               string       `json:"name"                            yaml:"name"`
+	MlockallEnabled    bool         `json:"mlockall_enabled"                yaml:"mlockall_enabled"`
+	MaxFileDescriptors int64        `json:"max_file_descriptors,omitempty"  yaml:"max_file_descriptors,omitempty"`
+	MaxMapCount        int64        `json:"max_map_count,omitempty"         yaml:"max_map_count,omitempty"`
+	BootstrapWarnings  []string     `json:"bootstrap_warnings,omitempty"    yaml:"bootstrap_warnings,omitempty"`
+	GCCollectors       []string     `json:"gc_collectors,omitempty"         yaml:"gc_collectors,omitempty"`
+	JVMInputArguments  []string     `json:"jvm_input_arguments,omitempty"   yaml:"jvm_input_arguments,omitempty"`
+	Plugins            []NodePlugin `json:"plugins,omitempty"               yaml:"plugins,omitempty"`
+}
+
+// NodePlugin is the per-plugin row reported by /_nodes/<id>/plugins on
+// both Elasticsearch and OpenSearch. Name is the cluster's registered
+// plugin name (e.g. "repository-s3", "opensearch-security",
+// "analysis-icu"); Version is the plugin's version string, blank when
+// the cluster did not report one. Description is intentionally omitted
+// — the cluster's free-text description is long, version-specific,
+// and never the bit operators are looking up.
+type NodePlugin struct {
+	Name    string `json:"name"              yaml:"name"`
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
 }
 
 // NodeSettings is the per-node static-settings view from
@@ -4234,4 +4247,302 @@ type TransformPreviewRequest struct {
 type TransformPreviewResult struct {
 	Documents []map[string]any `json:"documents,omitempty" yaml:"documents,omitempty"`
 	Mappings  map[string]any   `json:"mappings,omitempty"  yaml:"mappings,omitempty"`
+}
+
+// IndexDescription is the aggregated single-index view returned by
+// `esops index describe`. The shape composes existing neutral types
+// (Index, IndexSettings, IndexMapping, Alias, Shard, IndexRecovery,
+// IndexSegments, ILMExplainEntry, ISMExplainEntry, Task) rather than
+// inventing new ones — describe is pure aggregation over the
+// read-only inspector capabilities, not a new endpoint.
+//
+// Sections that the cluster does not (or cannot) report are simply
+// absent: ILM is always nil on OpenSearch, ISM always nil on
+// Elasticsearch, Recovery only populated when the index has shards
+// still recovering, Aliases empty when nothing points at the index.
+// SectionWarnings carries per-section collector failures (e.g.
+// /_segments returning a 4xx on a corner-case index state) so the
+// JSON/YAML form stays faithful — a working section never emits an
+// entry there.
+//
+// ResolvedFrom is set when the operator named an alias on the CLI
+// and the aggregator resolved it to a concrete index name. Keeps the
+// captured JSON self-describing without relying on the operator to
+// remember which alias they typed.
+//
+// Dialect is echoed so a structured consumer (e.g. esops-doctor or a
+// future commercial layer) can tell "ILM empty because OpenSearch"
+// apart from "ILM empty because no policy attached" without
+// re-probing.
+type IndexDescription struct {
+	Name         string `json:"name"                    yaml:"name"`
+	ResolvedFrom string `json:"resolved_from,omitempty" yaml:"resolved_from,omitempty"`
+	Dialect      string `json:"dialect,omitempty"       yaml:"dialect,omitempty"`
+
+	Info     Index         `json:"info"               yaml:"info"`
+	Settings IndexSettings `json:"settings"           yaml:"settings"`
+	Mappings *IndexMapping `json:"mappings,omitempty" yaml:"mappings,omitempty"`
+
+	Aliases  []Alias        `json:"aliases,omitempty"  yaml:"aliases,omitempty"`
+	Shards   []Shard        `json:"shards,omitempty"   yaml:"shards,omitempty"`
+	Recovery *IndexRecovery `json:"recovery,omitempty" yaml:"recovery,omitempty"`
+	Segments *IndexSegments `json:"segments,omitempty" yaml:"segments,omitempty"`
+
+	ILM *ILMExplainEntry `json:"ilm,omitempty" yaml:"ilm,omitempty"`
+	ISM *ISMExplainEntry `json:"ism,omitempty" yaml:"ism,omitempty"`
+
+	Tasks []Task `json:"tasks,omitempty" yaml:"tasks,omitempty"`
+
+	// MatchedTemplate is the highest-priority composable index
+	// template whose `index_patterns` glob the index name. Best-effort
+	// — the cluster does not record which template was applied at
+	// creation, so this reports the template the cluster *would* pick
+	// for a new index of this name today. A template added after the
+	// index will show up here even though it did not shape the index;
+	// surfaced loudly enough for an operator to spot the divergence.
+	MatchedTemplate *IndexTemplate `json:"matched_template,omitempty" yaml:"matched_template,omitempty"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// NodeDescription is the aggregated single-node view returned by
+// `esops ops node describe`. Composes existing neutral types (Node,
+// NodeStats, NodeBootstrap, NodeSettings, Shard) plus a small
+// drain/voting summary so a downstream consumer can answer "what is
+// this node doing right now, and is anything preventing it from
+// hosting shards" without re-querying.
+//
+// Fields absent from the cluster's response are nil/zero rather than
+// fabricated. SectionWarnings carries any per-collector failures —
+// partial-but-loud rather than aborting the whole view.
+type NodeDescription struct {
+	Name    string `json:"name"              yaml:"name"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Info      Node           `json:"info"                yaml:"info"`
+	Stats     *NodeStats     `json:"stats,omitempty"     yaml:"stats,omitempty"`
+	Bootstrap *NodeBootstrap `json:"bootstrap,omitempty" yaml:"bootstrap,omitempty"`
+	Settings  *NodeSettings  `json:"settings,omitempty"  yaml:"settings,omitempty"`
+
+	// Drain summarises whether the node is currently excluded from
+	// shard allocation (persistent or transient) and whether it sits
+	// in the cluster's voting-config exclusion list. Both signals
+	// matter at incident time: a "missing" data node is often a node
+	// the operator drained yesterday and forgot to uncordon.
+	Drain NodeDrainStatus `json:"drain" yaml:"drain"`
+
+	// Shards is the list of shard copies currently allocated to this
+	// node, sourced from /_cat/shards filtered by the node name.
+	// ShardSummary aggregates primary/replica counts and total store
+	// bytes for the kubectl-style header line.
+	Shards       []Shard          `json:"shards,omitempty"  yaml:"shards,omitempty"`
+	ShardSummary NodeShardSummary `json:"shard_summary"     yaml:"shard_summary"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// NodeDrainStatus carries the operator-facing drain state of one node.
+// AllocationExcluded is true when the node's name appears in
+// cluster.routing.allocation.exclude._name (persistent or transient).
+// VotingExcluded is true when the node's name is in the cluster's
+// voting_config_exclusions list. Scopes is a short slice naming where
+// the exclusion was set ("persistent", "transient", or both) — useful
+// for an operator deciding whether `ops uncordon` will clear it.
+type NodeDrainStatus struct {
+	AllocationExcluded bool     `json:"allocation_excluded"           yaml:"allocation_excluded"`
+	VotingExcluded     bool     `json:"voting_excluded"               yaml:"voting_excluded"`
+	Scopes             []string `json:"scopes,omitempty"              yaml:"scopes,omitempty"`
+}
+
+// NodeShardSummary is the per-node shard aggregate that drives the
+// describe header. Primaries and Replicas count shard copies (not
+// distinct shard IDs); StoreBytes sums the on-disk size across both.
+// A node holding zero shards reports zeros, not absent.
+type NodeShardSummary struct {
+	Primaries  int   `json:"primaries"   yaml:"primaries"`
+	Replicas   int   `json:"replicas"    yaml:"replicas"`
+	StoreBytes int64 `json:"store_bytes" yaml:"store_bytes"`
+}
+
+// DataStreamDescription is the aggregated single-data-stream view
+// returned by `esops datastream describe`. Composes the cluster's
+// DataStream envelope (already enriched with backing-index health
+// and size by the business layer's Get helper) with the matched
+// composable template, any in-flight recovery on the backing indices,
+// and tasks touching the stream.
+//
+// Stream is the load-bearing payload; sub-sections are populated
+// when the cluster has something to report. SectionWarnings captures
+// non-fatal collector failures.
+type DataStreamDescription struct {
+	Name    string `json:"name"              yaml:"name"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Stream DataStream `json:"stream" yaml:"stream"`
+
+	MatchedTemplate *IndexTemplate `json:"matched_template,omitempty" yaml:"matched_template,omitempty"`
+	Recoveries      []IndexRecovery `json:"recoveries,omitempty"       yaml:"recoveries,omitempty"`
+	Tasks           []Task          `json:"tasks,omitempty"            yaml:"tasks,omitempty"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// ILMPolicyDescription is the aggregated view of a single ILM policy
+// returned by `esops index ilm describe`. The policy body itself comes
+// from /_ilm/policy/<name>; ManagedIndices is the per-index explain
+// view (phase, action, step, age) for every index the policy is
+// currently attached to, which is what an operator wants when
+// triaging "is anything stuck on this policy".
+//
+// ErrorCount and ManagedCount are summary counters surfaced in the
+// header so the renderer doesn't have to walk ManagedIndices to
+// answer "how many indices are managed, and are any of them stuck".
+type ILMPolicyDescription struct {
+	Name    string `json:"name"              yaml:"name"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Policy ILMPolicy `json:"policy" yaml:"policy"`
+
+	ManagedIndices []ILMExplainEntry `json:"managed_indices,omitempty" yaml:"managed_indices,omitempty"`
+	ManagedCount   int               `json:"managed_count"             yaml:"managed_count"`
+	ErrorCount     int               `json:"error_count"               yaml:"error_count"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// ISMPolicyDescription is the OpenSearch sibling of
+// ILMPolicyDescription. Mirrors the shape so a single-source-of-truth
+// renderer can switch on a top-level key, while keeping the
+// dialect-specific policy bodies (ISM has states/transitions; ILM has
+// phases/actions) as opaque maps the renderer treats as a JSON dump.
+//
+// ISM has no `in_use_by` analogue, so ManagedIndices is sourced from
+// /_plugins/_ism/explain rather than a reverse-reference structure
+// embedded in the policy.
+type ISMPolicyDescription struct {
+	ID      string `json:"id"                yaml:"id"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Policy ISMPolicy `json:"policy" yaml:"policy"`
+
+	ManagedIndices []ISMExplainEntry `json:"managed_indices,omitempty" yaml:"managed_indices,omitempty"`
+	ManagedCount   int               `json:"managed_count"             yaml:"managed_count"`
+	ErrorCount     int               `json:"error_count"               yaml:"error_count"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// DisplayName returns the operator-facing identifier of an ILM
+// policy description. ILM keys policies by `name`; the helper exists
+// purely so renderers and downstream consumers (e.g. esops-doctor)
+// can stay dialect-agnostic alongside ISMPolicyDescription.DisplayName,
+// whose underlying field is `id`. The asymmetry is inherited from
+// the upstream cluster APIs, not invented here.
+func (d ILMPolicyDescription) DisplayName() string { return d.Name }
+
+// DisplayName returns the operator-facing identifier of an ISM
+// policy description. The OpenSearch plugin keys policies by `id`
+// rather than `name`; see ILMPolicyDescription.DisplayName for the
+// motivation behind the helper pair.
+func (d ISMPolicyDescription) DisplayName() string { return d.ID }
+
+// SnapshotDescription is the aggregated single-snapshot view returned
+// by `esops snapshot describe REPO/NAME`. Composes the Snapshot
+// record (state, indices, duration, shard totals) with the live
+// SnapshotStatus block (per-shard init/started/done/failed). Status
+// is a pointer so a captured JSON shape can distinguish "the cluster
+// didn't have a status to report" (nil) from "status is all-zero
+// because the snapshot is brand-new" (non-nil, all-zero counters).
+type SnapshotDescription struct {
+	Repository string `json:"repository"        yaml:"repository"`
+	Name       string `json:"name"              yaml:"name"`
+	Dialect    string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Info   Snapshot        `json:"info"             yaml:"info"`
+	Status *SnapshotStatus `json:"status,omitempty" yaml:"status,omitempty"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// SnapshotPolicyDescription is the aggregated single-policy view
+// returned by `esops snapshot policy describe`. Composes the
+// SnapshotPolicy record (schedule, next/last run, definition) with
+// recent snapshots produced by that policy. SnapshotInspector
+// reports no back-reference to the policy that created a snapshot,
+// so RecentSnapshots is sourced by listing the policy's target
+// repository and trimming to the most recent N — best-effort and
+// renderer-honest about that.
+type SnapshotPolicyDescription struct {
+	Name    string `json:"name"              yaml:"name"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Policy SnapshotPolicy `json:"policy" yaml:"policy"`
+
+	RecentSnapshots []Snapshot `json:"recent_snapshots,omitempty" yaml:"recent_snapshots,omitempty"`
+	RecentLimit     int        `json:"recent_limit,omitempty"     yaml:"recent_limit,omitempty"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// SnapshotRepositoryDescription is the aggregated single-repo view
+// returned by `esops snapshot repository describe`. Composes the
+// SnapshotRepository config with the cluster's verify result (which
+// nodes can talk to the backing store), a summary count of stored
+// snapshots, and the SLM/SM policies that target the repo.
+//
+// Verify is a pointer so callers can tell "verify was not run" from
+// "verify succeeded with an empty node list" (the latter is a real
+// state on a fresh repo nobody has snapshotted against yet).
+type SnapshotRepositoryDescription struct {
+	Name    string `json:"name"              yaml:"name"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Info     SnapshotRepository       `json:"info"             yaml:"info"`
+	Verify   *SnapshotVerifyResult    `json:"verify,omitempty" yaml:"verify,omitempty"`
+	Summary  SnapshotRepositorySummary `json:"summary"         yaml:"summary"`
+	Policies []SnapshotPolicy         `json:"policies,omitempty" yaml:"policies,omitempty"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
+}
+
+// SnapshotRepositorySummary is the per-repo aggregate the describe
+// header carries: how many snapshots are stored, how many succeeded,
+// how many are still in progress / failed. The cluster does not
+// publish a single summary endpoint — this is computed client-side
+// from the snapshot listing for the repo.
+//
+// SuccessCount + FailedCount + InProgressCount + OtherCount is
+// guaranteed to equal SnapshotCount — every snapshot lands in
+// exactly one bucket. OtherCount catches states the explicit
+// buckets don't (ABORTED, MISSING, future cluster-introduced
+// states) so the math an operator does on the header line always
+// adds up.
+type SnapshotRepositorySummary struct {
+	SnapshotCount   int `json:"snapshot_count"    yaml:"snapshot_count"`
+	SuccessCount    int `json:"success_count"     yaml:"success_count"`
+	FailedCount     int `json:"failed_count"      yaml:"failed_count"`
+	InProgressCount int `json:"in_progress_count" yaml:"in_progress_count"`
+	OtherCount      int `json:"other_count"       yaml:"other_count"`
+}
+
+// TransformDescription is the aggregated single-transform view
+// returned by `esops transform describe`. Composes the configured
+// definition (Transform.Definition: source/dest/pivot/sync) with
+// runtime Stats (state, doc counts, checkpoint age, failure reason)
+// so an operator triaging a stalled transform sees both halves in
+// one screen.
+//
+// Stats is a pointer so the captured JSON distinguishes "stats fetch
+// failed or was skipped" (nil — see SectionWarnings) from "stats
+// returned an all-zero record" (non-nil) — the latter is a real
+// transient state on a freshly-created transform that hasn't ticked
+// yet.
+type TransformDescription struct {
+	Name    string `json:"name"              yaml:"name"`
+	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
+
+	Info  Transform       `json:"info"             yaml:"info"`
+	Stats *TransformStats `json:"stats,omitempty"  yaml:"stats,omitempty"`
+
+	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
 }

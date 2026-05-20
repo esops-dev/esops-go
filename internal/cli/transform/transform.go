@@ -24,6 +24,7 @@ func Command() *cli.Command {
 		Commands: []*cli.Command{
 			listCommand(),
 			getCommand(),
+			describeCommand(),
 			statsCommand(),
 			previewCommand(),
 			applyCommand(),
