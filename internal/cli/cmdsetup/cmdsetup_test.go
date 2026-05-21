@@ -9,7 +9,9 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // cmdWith runs a stub urfave/cli app just long enough to parse the
@@ -206,5 +208,92 @@ func TestResolveFormat_unknownFormat(t *testing.T) {
 	_, err := resolveFormat(cmd, "", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown format")
+	}
+}
+
+// cmdWithOnError extends cmdWith with the --on-error / --verbose flags
+// so OnErrorPolicy / Verbose can be exercised the same way the
+// production code reads them.
+func cmdWithOnError(t *testing.T, args ...string) *cli.Command {
+	t.Helper()
+	var captured *cli.Command
+	app := &cli.Command{
+		Name: "test",
+		Flags: append(
+			[]cli.Flag{
+				&cli.BoolFlag{Name: "dry-run"},
+				&cli.BoolFlag{Name: "no-prompt"},
+				&cli.BoolFlag{Name: "i-know-this-is-prod"},
+				&cli.StringFlag{Name: "output"},
+			},
+			OnErrorFlags()...,
+		),
+		Action: func(_ context.Context, c *cli.Command) error {
+			captured = c
+			return nil
+		},
+	}
+	if err := app.Run(context.Background(), append([]string{"test"}, args...)); err != nil {
+		t.Fatalf("app.Run: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("test stub did not capture cmd")
+	}
+	return captured
+}
+
+func TestOnErrorPolicy_defaultIsAbort(t *testing.T) {
+	cmd := cmdWithOnError(t)
+	got, err := OnErrorPolicy(cmd)
+	if err != nil {
+		t.Fatalf("OnErrorPolicy: %v", err)
+	}
+	if got != types.OnErrorAbort {
+		t.Errorf("default policy = %q, want abort", got)
+	}
+}
+
+func TestOnErrorPolicy_acceptsValidValues(t *testing.T) {
+	cases := []struct {
+		flag string
+		want types.OnErrorPolicy
+	}{
+		{"abort", types.OnErrorAbort},
+		{"skip", types.OnErrorSkip},
+		{"rollback", types.OnErrorRollback},
+	}
+	for _, c := range cases {
+		cmd := cmdWithOnError(t, "--on-error", c.flag)
+		got, err := OnErrorPolicy(cmd)
+		if err != nil {
+			t.Errorf("OnErrorPolicy(%q): %v", c.flag, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("OnErrorPolicy(%q) = %q, want %q", c.flag, got, c.want)
+		}
+	}
+}
+
+func TestOnErrorPolicy_rejectsUnknownAsUsageError(t *testing.T) {
+	cmd := cmdWithOnError(t, "--on-error", "continue")
+	_, err := OnErrorPolicy(cmd)
+	if err == nil {
+		t.Fatal("expected usage error for unknown --on-error value")
+	}
+	if !errors.Is(err, client.ErrUsage) {
+		t.Errorf("err should wrap ErrUsage (exit 2), got %v", err)
+	}
+}
+
+func TestVerbose_defaultsFalse(t *testing.T) {
+	if Verbose(cmdWithOnError(t)) {
+		t.Error("--verbose default = true, want false")
+	}
+}
+
+func TestVerbose_setExplicit(t *testing.T) {
+	if !Verbose(cmdWithOnError(t, "--verbose")) {
+		t.Error("--verbose set: Verbose() returned false")
 	}
 }

@@ -203,6 +203,11 @@ type IndexStateChange struct {
 	ShardsAcknowledged bool             `json:"shards_acknowledged"   yaml:"shards_acknowledged"`
 	Indices            []string         `json:"indices"               yaml:"indices"`
 	Skipped            []string         `json:"skipped,omitempty"     yaml:"skipped,omitempty"`
+	// OnError is populated when the operator passed --on-error
+	// {skip,rollback}; nil otherwise (the field is omitted from JSON /
+	// YAML output under the default abort policy). Each item maps to
+	// the index the command attempted to transition.
+	OnError *OnErrorSummary `json:"on_error,omitempty"    yaml:"on_error,omitempty"`
 }
 
 // IndexOptimizeRequest is the input to an IndexOptimizer.ForceMerge call.
@@ -259,6 +264,11 @@ type IndexOptimizeResult struct {
 	ShardsSuccess  int      `json:"shards_successful"       yaml:"shards_successful"`
 	ShardsFailed   int      `json:"shards_failed"           yaml:"shards_failed"`
 	Failures       []string `json:"failures,omitempty"      yaml:"failures,omitempty"`
+	// OnError is populated when the operator passed --on-error skip and
+	// the business layer dispatched per-index. Rollback is not
+	// supported for force-merge (irreversible); the CLI refuses it
+	// with a usage error before dispatch.
+	OnError *OnErrorSummary `json:"on_error,omitempty"   yaml:"on_error,omitempty"`
 }
 
 // IndexRolloverConditions are the rollover triggers the cluster
@@ -451,6 +461,11 @@ type IndexSettingsUpdateResult struct {
 	Indices      []string `json:"indices"       yaml:"indices"`
 	Acknowledged bool     `json:"acknowledged"  yaml:"acknowledged"`
 	Body         string   `json:"body,omitempty" yaml:"body,omitempty"`
+	// OnError is populated when the operator passed --on-error skip and
+	// the business layer dispatched per-index. Rollback would require
+	// capturing prior values per index; the CLI refuses --on-error
+	// rollback for this command pending that capability.
+	OnError *OnErrorSummary `json:"on_error,omitempty" yaml:"on_error,omitempty"`
 }
 
 // IndexTemplate is the neutral view of one index template from
@@ -2146,6 +2161,11 @@ type SnapshotPruneResult struct {
 	// remaining names are retried individually and the missing ones land
 	// here so the operator's audit log records what was already gone.
 	MissingSkipped []string `json:"missing_skipped,omitempty"     yaml:"missing_skipped,omitempty"`
+	// OnError is populated when the operator passed --on-error skip and
+	// the business layer dispatched per-snapshot. Rollback is not
+	// supported for prune (irreversible); the CLI refuses it with a
+	// usage error before dispatch.
+	OnError *OnErrorSummary `json:"on_error,omitempty" yaml:"on_error,omitempty"`
 }
 
 // RecoveryRequest narrows a RecoveryInspector.Recovery call. Indices is a

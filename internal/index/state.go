@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -38,6 +39,13 @@ type StateChangeOptions struct {
 	DryRun              bool
 	IgnoreUnavailable   bool
 	WaitForActiveShards string
+	// OnError is the operator's --on-error selection. The default
+	// (empty / "abort") keeps the single bulk OpenIndex/CloseIndex call.
+	// "skip" issues a per-index request so a closed-locked index
+	// doesn't drop the whole sweep; "rollback" applies the inverse
+	// verb (open ↔ close) to previously-transitioned indices when a
+	// later one fails.
+	OnError types.OnErrorPolicy
 }
 
 // ChangeState is the business-layer entry point for `esops index open`
@@ -105,6 +113,10 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 		return result, nil
 	}
 
+	if opts.OnError == types.OnErrorSkip || opts.OnError == types.OnErrorRollback {
+		return runStateChangePerIndex(ctx, changer, target, opts, result)
+	}
+
 	// Send the resolved name list to the cluster, not the original
 	// pattern. The pattern may also include closed indices we'd skip;
 	// passing the explicit list keeps the cluster's view aligned with
@@ -130,6 +142,80 @@ func ChangeState(ctx context.Context, inspector client.IndexInspector, changer c
 	result.Acknowledged = changed.Acknowledged
 	result.ShardsAcknowledged = changed.ShardsAcknowledged
 	return result, nil
+}
+
+// runStateChangePerIndex dispatches one OpenIndex/CloseIndex request
+// per resolved index. Skip records failures and continues; rollback
+// applies the inverse verb to indices already transitioned in this
+// invocation when a later one fails.
+//
+// The bulk path stays the default — it's one cluster-state update
+// vs N for a per-index sweep, which matters on a busy master. The
+// per-index path is only entered under --on-error skip / rollback.
+func runStateChangePerIndex(ctx context.Context, changer client.IndexStateChanger, target []string, opts StateChangeOptions, result types.IndexStateChange) (types.IndexStateChange, error) {
+	inverse := inverseStateAction(opts.Action)
+
+	step := func(ctx context.Context, name string) error {
+		return dispatchStateAction(ctx, changer, opts.Action, types.IndexStateChangeRequest{
+			Indices:             []string{name},
+			IgnoreUnavailable:   opts.IgnoreUnavailable,
+			WaitForActiveShards: opts.WaitForActiveShards,
+		})
+	}
+
+	var rollback onerror.Rollback[string]
+	if opts.OnError == types.OnErrorRollback {
+		rollback = func(ctx context.Context, name string) error {
+			return dispatchStateAction(ctx, changer, inverse, types.IndexStateChangeRequest{
+				Indices:             []string{name},
+				IgnoreUnavailable:   opts.IgnoreUnavailable,
+				WaitForActiveShards: opts.WaitForActiveShards,
+			})
+		}
+	}
+
+	sum, err := onerror.Run(ctx, target, identityString, step, rollback, opts.OnError)
+	result.OnError = &sum
+	// In per-item mode the cluster never returns an aggregate ack;
+	// surface "acknowledged" as true when at least one item succeeded
+	// (and was not rolled back), so the renderer's header reads
+	// sensibly. Operators looking for the precise picture read the
+	// per-item Items[].
+	if sum.Succeeded > 0 {
+		result.Acknowledged = true
+		result.ShardsAcknowledged = true
+	}
+	if err != nil {
+		// Rollback path: triggering error from Run. The summary already
+		// captured the per-item record and the rollback outcomes, so
+		// surface the error through to the caller — the CLI exit
+		// mapper picks up the non-zero exit.
+		return result, err
+	}
+	return result, nil
+}
+
+func dispatchStateAction(ctx context.Context, changer client.IndexStateChanger, action types.IndexStateAction, req types.IndexStateChangeRequest) error {
+	switch action {
+	case types.IndexStateOpen:
+		_, err := changer.OpenIndex(ctx, req)
+		return err
+	case types.IndexStateClose:
+		_, err := changer.CloseIndex(ctx, req)
+		return err
+	default:
+		return client.UsageError("unsupported action %q", action)
+	}
+}
+
+func inverseStateAction(a types.IndexStateAction) types.IndexStateAction {
+	switch a {
+	case types.IndexStateOpen:
+		return types.IndexStateClose
+	case types.IndexStateClose:
+		return types.IndexStateOpen
+	}
+	return ""
 }
 
 // validateStateChangeOptions guards against the two foot-guns scripts

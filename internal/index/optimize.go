@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -32,6 +33,13 @@ type OptimizeOptions struct {
 	OnlyExpungeDeletes bool
 	Flush              *bool
 	IgnoreUnavailable  bool
+	// OnError is the operator's --on-error selection. The default
+	// (empty / "abort") preserves the pre-flag behaviour: a single
+	// bulk ForceMerge call over the resolved set. "skip" switches to
+	// per-index dispatch so a closed-mid-run index doesn't take the
+	// whole sweep down with it; "rollback" is rejected up-front by
+	// the CLI layer (force-merge is irreversible).
+	OnError types.OnErrorPolicy
 }
 
 // Optimize is the business-layer entry point for `esops index optimize`.
@@ -95,6 +103,10 @@ func Optimize(ctx context.Context, inspector client.IndexInspector, opt client.I
 		return result, nil
 	}
 
+	if opts.OnError == types.OnErrorSkip {
+		return runOptimizePerIndex(ctx, opt, target, opts, result)
+	}
+
 	cReq := types.IndexOptimizeRequest{
 		Indices:            target,
 		MaxNumSegments:     opts.MaxNumSegments,
@@ -112,6 +124,41 @@ func Optimize(ctx context.Context, inspector client.IndexInspector, opt client.I
 	result.Failures = append(result.Failures, resp.Failures...)
 	return result, nil
 }
+
+// runOptimizePerIndex implements --on-error skip for force-merge by
+// dispatching one ForceMerge request per index and aggregating the
+// per-shard counts. The bulk path is preferred when policy=abort
+// because the cluster's all-or-nothing semantics is faster and matches
+// what operators have come to expect; skip mode pays the request-count
+// premium for the guarantee that a 400 from one closed-mid-run index
+// doesn't drop the whole sweep.
+func runOptimizePerIndex(ctx context.Context, opt client.IndexOptimizer, target []string, opts OptimizeOptions, result types.IndexOptimizeResult) (types.IndexOptimizeResult, error) {
+	step := func(ctx context.Context, name string) error {
+		resp, err := opt.ForceMerge(ctx, types.IndexOptimizeRequest{
+			Indices:            []string{name},
+			MaxNumSegments:     opts.MaxNumSegments,
+			OnlyExpungeDeletes: opts.OnlyExpungeDeletes,
+			Flush:              opts.Flush,
+			IgnoreUnavailable:  opts.IgnoreUnavailable,
+		})
+		if err != nil {
+			return err
+		}
+		result.ShardsTotal += resp.ShardsTotal
+		result.ShardsSuccess += resp.ShardsSuccess
+		result.ShardsFailed += resp.ShardsFailed
+		result.Failures = append(result.Failures, resp.Failures...)
+		return nil
+	}
+	sum, _ := onerror.Run(ctx, target, identityString, step, nil, opts.OnError)
+	result.OnError = &sum
+	return result, nil
+}
+
+// identityString is the shared `name` extractor for onerror.Run when
+// items are already plain strings. Declared once in this package so the
+// generic instantiation reuses a single type-parameterised function.
+func identityString(s string) string { return s }
 
 // validateOptimizeOptions guards against the common foot-guns: an
 // empty --index, a wildcard so broad it would touch every index in

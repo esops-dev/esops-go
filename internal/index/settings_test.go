@@ -310,3 +310,46 @@ func TestUpdateSettings_propagatesAdapterError(t *testing.T) {
 		t.Errorf("err = %v, want sentinel", err)
 	}
 }
+
+// onErrorSettingsUpdater records every PutSettings call and fails the
+// names listed in failNames. Used to drive the per-index dispatch
+// under --on-error skip.
+type onErrorSettingsUpdater struct {
+	calls     []types.IndexSettingsUpdateRequest
+	failNames map[string]error
+}
+
+func (s *onErrorSettingsUpdater) PutSettings(_ context.Context, req types.IndexSettingsUpdateRequest) (types.IndexSettingsUpdateResult, error) {
+	s.calls = append(s.calls, req)
+	if len(req.Indices) == 1 {
+		if err, bad := s.failNames[req.Indices[0]]; bad {
+			return types.IndexSettingsUpdateResult{}, err
+		}
+	}
+	return types.IndexSettingsUpdateResult{Action: "settings-update", Acknowledged: true}, nil
+}
+
+func TestUpdateSettings_onErrorSkip_dispatchesPerIndex(t *testing.T) {
+	bad := errors.New("immutable setting")
+	su := &onErrorSettingsUpdater{failNames: map[string]error{
+		"logs-b": bad,
+	}}
+	got, err := index.UpdateSettings(context.Background(), su, index.SettingsUpdateOptions{
+		Index:     "logs-a,logs-b,logs-c",
+		KeyValues: map[string]string{"number_of_replicas": "2"},
+		OnError:   types.OnErrorSkip,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings skip: %v", err)
+	}
+	if got.OnError == nil {
+		t.Fatal("expected OnError summary, got nil")
+	}
+	if got.OnError.Succeeded != 2 || got.OnError.Failed != 1 {
+		t.Errorf("counts succeeded=%d failed=%d, want 2/1",
+			got.OnError.Succeeded, got.OnError.Failed)
+	}
+	if len(su.calls) != 3 {
+		t.Errorf("expected 3 per-index PUTs, got %d", len(su.calls))
+	}
+}

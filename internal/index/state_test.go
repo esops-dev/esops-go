@@ -328,6 +328,98 @@ func TestChangeState_passesIgnoreUnavailableThrough(t *testing.T) {
 	}
 }
 
+// onErrorStateChanger lets the test mark individual indices as
+// "the cluster rejected this one" via failNames. Used for the per-index
+// dispatch path under --on-error skip and rollback.
+type onErrorStateChanger struct {
+	failNames  map[string]error // keyed by index name; verb-agnostic
+	openCalls  []types.IndexStateChangeRequest
+	closeCalls []types.IndexStateChangeRequest
+}
+
+func (s *onErrorStateChanger) OpenIndex(_ context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
+	s.openCalls = append(s.openCalls, req)
+	if len(req.Indices) == 1 {
+		if err, bad := s.failNames[req.Indices[0]]; bad {
+			return types.IndexStateChange{}, err
+		}
+	}
+	return types.IndexStateChange{Action: types.IndexStateOpen, Acknowledged: true, ShardsAcknowledged: true}, nil
+}
+
+func (s *onErrorStateChanger) CloseIndex(_ context.Context, req types.IndexStateChangeRequest) (types.IndexStateChange, error) {
+	s.closeCalls = append(s.closeCalls, req)
+	if len(req.Indices) == 1 {
+		if err, bad := s.failNames[req.Indices[0]]; bad {
+			return types.IndexStateChange{}, err
+		}
+	}
+	return types.IndexStateChange{Action: types.IndexStateClose, Acknowledged: true, ShardsAcknowledged: true}, nil
+}
+
+func TestChangeState_onErrorSkip_continuesPastFailure(t *testing.T) {
+	insp := &fakeIndexInspector{indices: []types.Index{
+		{Name: "logs-a", Status: "open"},
+		{Name: "logs-b", Status: "open"},
+		{Name: "logs-c", Status: "open"},
+	}}
+	chg := &onErrorStateChanger{failNames: map[string]error{
+		"logs-b": errors.New("cluster rejected logs-b"),
+	}}
+	got, err := index.ChangeState(context.Background(), insp, chg, index.StateChangeOptions{
+		Action:  types.IndexStateClose,
+		Pattern: "logs-*",
+		OnError: types.OnErrorSkip,
+	})
+	if err != nil {
+		t.Fatalf("ChangeState skip: %v", err)
+	}
+	if got.OnError == nil {
+		t.Fatal("expected OnError summary, got nil")
+	}
+	if got.OnError.Succeeded != 2 || got.OnError.Failed != 1 {
+		t.Errorf("OnError counts succeeded=%d failed=%d, want 2/1",
+			got.OnError.Succeeded, got.OnError.Failed)
+	}
+	if len(chg.closeCalls) != 3 {
+		t.Errorf("expected 3 per-index close calls, got %d", len(chg.closeCalls))
+	}
+}
+
+func TestChangeState_onErrorRollback_undoesPriorClosesWithOpens(t *testing.T) {
+	// Three indices, "logs-c" rejects close → rollback re-opens logs-a, logs-b.
+	insp := &fakeIndexInspector{indices: []types.Index{
+		{Name: "logs-a", Status: "open"},
+		{Name: "logs-b", Status: "open"},
+		{Name: "logs-c", Status: "open"},
+	}}
+	chg := &onErrorStateChanger{failNames: map[string]error{
+		"logs-c": errors.New("cluster rejected logs-c"),
+	}}
+	got, err := index.ChangeState(context.Background(), insp, chg, index.StateChangeOptions{
+		Action:  types.IndexStateClose,
+		Pattern: "logs-*",
+		OnError: types.OnErrorRollback,
+	})
+	if err == nil {
+		t.Fatal("expected triggering error from ChangeState rollback, got nil")
+	}
+	if got.OnError == nil {
+		t.Fatal("expected OnError summary populated, got nil")
+	}
+	if got.OnError.Failed != 1 || got.OnError.RolledBack != 2 || got.OnError.Succeeded != 0 {
+		t.Errorf("OnError counts succeeded=%d failed=%d rolled-back=%d, want 0/1/2",
+			got.OnError.Succeeded, got.OnError.Failed, got.OnError.RolledBack)
+	}
+	// Two opens (rollback) and three closes (attempted) — c's close fails.
+	if len(chg.openCalls) != 2 {
+		t.Errorf("expected 2 open calls during rollback, got %d", len(chg.openCalls))
+	}
+	if len(chg.closeCalls) != 3 {
+		t.Errorf("expected 3 close attempts, got %d", len(chg.closeCalls))
+	}
+}
+
 func indexName(i int) string {
 	return "rotated-" + intToBase10(i)
 }
