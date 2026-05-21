@@ -115,11 +115,17 @@ func APIKeyCreated(w io.Writer, created types.APIKeyCreated, f Format) error {
 	case FormatJSON:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
+		// #nosec G117 -- APIKeyCreated.Key is *meant* to be emitted to
+		// stdout: this is the one renderer that prints the cluster's
+		// one-shot secret so the operator can capture it via
+		// `--output json > key.json`. TTY-guard + redaction-keyset
+		// keep it out of every other sink.
 		return enc.Encode(created)
 	case FormatYAML:
 		enc := yaml.NewEncoder(w)
 		enc.SetIndent(2)
 		defer func() { _ = enc.Close() }()
+		// #nosec G117 -- intentional secret emission; see the JSON arm above.
 		return enc.Encode(created)
 	case FormatTable, FormatWide, "":
 		if created.DryRun {
