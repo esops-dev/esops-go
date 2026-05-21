@@ -101,6 +101,20 @@ func TestUnsupportedServiceTokens_ReturnsUnsupported(t *testing.T) {
 	}
 }
 
+func TestUnsupportedAPIKeyManager_ReturnsUnsupported(t *testing.T) {
+	stub := unsupportedAPIKeyManager{}
+	ctx := context.Background()
+
+	if _, err := stub.CreateAPIKey(ctx, types.APIKeyCreateRequest{Name: "k"}); !errors.Is(err, client.ErrUnsupported) {
+		t.Errorf("CreateAPIKey err = %v, want ErrUnsupported", err)
+	} else if !strings.Contains(err.Error(), "Elasticsearch-only") {
+		t.Errorf("CreateAPIKey err = %q, want hint mentioning 'Elasticsearch-only'", err.Error())
+	}
+	if _, err := stub.InvalidateAPIKey(ctx, types.APIKeyInvalidateRequest{IDs: []string{"id"}}); !errors.Is(err, client.ErrUnsupported) {
+		t.Errorf("InvalidateAPIKey err = %v, want ErrUnsupported", err)
+	}
+}
+
 // Compile-time guarantees that the stubs satisfy the capability
 // interfaces. A future capability addition that breaks the contract
 // will fail here, not deep in the factory call site.
@@ -109,5 +123,6 @@ var (
 	_ client.ISMManager            = unsupportedISM{}
 	_ client.DeprecationInspector  = unsupportedDeprecations{}
 	_ client.APIKeyInspector       = unsupportedAPIKeys{}
+	_ client.APIKeyManager         = unsupportedAPIKeyManager{}
 	_ client.ServiceTokenInspector = unsupportedServiceTokens{}
 )

@@ -33,6 +33,7 @@ func Command() *cli.Command {
 			realmsCommand(),
 			remoteCommand(),
 			licenseCommand(),
+			apikeyCommand(),
 		},
 	}
 }

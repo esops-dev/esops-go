@@ -18,6 +18,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/client"
@@ -90,7 +91,7 @@ func Run(ctx context.Context, cmd *cli.Command, opts Options, tick Tick) error {
 	if !cmd.Bool("watch") {
 		return tick(ctx)
 	}
-	cfg, err := parseConfig(cmd, opts.Format, isTTY(os.Stdout), inCI())
+	cfg, err := parseConfig(cmd, opts.Format, cmdsetup.IsTTY(os.Stdout), inCI())
 	if err != nil {
 		return err
 	}
@@ -229,22 +230,6 @@ func isTerminal(err error) bool {
 // all honor it; only emitted when stdout is a real terminal so pipes,
 // tee, and file redirects don't end up with literal escape bytes.
 const clearScreenSeq = "\x1b[2J\x1b[H"
-
-// isTTY reports whether w is a *os.File wrapping a character device. A
-// non-File writer (bytes.Buffer in tests, anything custom) is treated
-// as non-TTY, which is the safe default — never emit ANSI to something
-// we can't confirm is a terminal.
-func isTTY(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
-}
 
 // header renders the kubectl-style banner: "Every 2s — esops ops
 // health — context: prod-eu — 2026-05-13T19:14:02Z". The em dash

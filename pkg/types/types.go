@@ -3478,6 +3478,79 @@ type APIKey struct {
 	RoleTemplates []string   `json:"role_templates,omitempty" yaml:"role_templates,omitempty"`
 }
 
+// APIKeyCreateRequest narrows a POST /_security/api_key call. Name is
+// required; the cluster rejects a missing name. Expiration is the
+// optional duration string the cluster accepts ("1d", "30m", …);
+// empty means "never expires". RoleDescriptors is the raw JSON object
+// the cluster's body expects under role_descriptors — passed through
+// verbatim from a file so the operator can express the full ES role
+// shape without esops re-implementing the schema. OS does not accept
+// this field; the adapter returns ErrUnsupported when it is set.
+type APIKeyCreateRequest struct {
+	Name            string          `json:"name"                       yaml:"name"`
+	Expiration      string          `json:"expiration,omitempty"       yaml:"expiration,omitempty"`
+	RoleDescriptors json.RawMessage `json:"role_descriptors,omitempty" yaml:"role_descriptors,omitempty"`
+}
+
+// APIKeyCreated is the result of CreateAPIKey. The Key field carries
+// the raw secret the cluster returned — visible exactly once. Callers
+// must keep it out of any log sink (the slog redaction denylist
+// already covers `api_key` keys, but a captured JSON record of the
+// whole struct also leaks; renderers must not pretty-print this for
+// `--log-file`). Encoded is the base64 `<id>:<api_key>` form the ES
+// docs recommend pasting into an Authorization header.
+//
+// Owner is the cluster-reported username the key is bound to. Empty
+// on the immediate create response (the cluster doesn't echo it
+// there); the business layer fills it in via a best-effort follow-up
+// GET so the audit-log summary records who the key belongs to.
+//
+// Expiration is the cluster-reported expiry as a time.Time; nil when
+// the request did not set one (the key never expires).
+//
+// DryRun is true when the business layer short-circuited the create
+// without contacting the cluster (`--dry-run`). In that case Key and
+// Encoded are empty by construction — the cluster never saw the
+// request, no secret exists yet.
+type APIKeyCreated struct {
+	ID         string     `json:"id,omitempty"         yaml:"id,omitempty"`
+	Name       string     `json:"name"                 yaml:"name"`
+	Owner      string     `json:"owner,omitempty"      yaml:"owner,omitempty"`
+	Key        string     `json:"api_key,omitempty"    yaml:"api_key,omitempty"`
+	Encoded    string     `json:"encoded,omitempty"    yaml:"encoded,omitempty"`
+	Expiration *time.Time `json:"expiration,omitempty" yaml:"expiration,omitempty"`
+	DryRun     bool       `json:"dry_run,omitempty"    yaml:"dry_run,omitempty"`
+}
+
+// APIKeyInvalidateRequest narrows a DELETE /_security/api_key call.
+// IDs lists the keys to invalidate; the cluster accepts the bulk
+// shape even for a single id. The business layer enforces the
+// blast-radius cap before this request lands.
+type APIKeyInvalidateRequest struct {
+	IDs []string `json:"ids" yaml:"ids"`
+}
+
+// APIKeyInvalidated is the cluster's response, normalised. Invalidated
+// lists the ids the cluster acted on; PreviouslyInvalidated lists ids
+// that were already invalidated (no-op outcome the operator probably
+// still wants to see); ErrorCount and ErrorDetails surface per-id
+// failures verbatim so a partial invalidate is visible in the output
+// rather than masked by an aggregate "ok".
+//
+// DryRun is true when the business layer short-circuited without
+// contacting the cluster. Requested echoes the resolved id list back
+// for the captured-JSON case (the dry-run renderer otherwise has
+// nothing to show because the cluster never produced an Invalidated
+// slice).
+type APIKeyInvalidated struct {
+	Invalidated           []string         `json:"invalidated_api_keys"             yaml:"invalidated_api_keys"`
+	PreviouslyInvalidated []string         `json:"previously_invalidated_api_keys"  yaml:"previously_invalidated_api_keys"`
+	ErrorCount            int              `json:"error_count"                      yaml:"error_count"`
+	ErrorDetails          []map[string]any `json:"error_details,omitempty"          yaml:"error_details,omitempty"`
+	Requested             []string         `json:"requested,omitempty"              yaml:"requested,omitempty"`
+	DryRun                bool             `json:"dry_run,omitempty"                yaml:"dry_run,omitempty"`
+}
+
 // ServiceToken is the ES-only view of one credential issued for a
 // service account, returned by ServiceTokenInspector. ES lets a service
 // account hold both index-stored tokens (mutable, listed via

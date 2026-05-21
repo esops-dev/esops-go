@@ -1,10 +1,12 @@
 package elasticsearch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -104,6 +106,200 @@ func (c *Client) APIKeys(ctx context.Context) ([]types.APIKey, error) {
 		return out[i].ID < out[j].ID
 	})
 	return out, nil
+}
+
+// GetAPIKey returns the metadata of a single key by id. Same wire
+// endpoint as APIKeys, narrowed via ?id=. ErrNotFound when the cluster
+// returns an empty list — caller-visible signal so the CLI can render
+// a precise "no such key" message rather than scanning a list.
+func (c *Client) GetAPIKey(ctx context.Context, id string) (types.APIKey, error) {
+	if strings.TrimSpace(id) == "" {
+		return types.APIKey{}, esopsclient.UsageError("api key id is required")
+	}
+	body, status, err := c.doRawGET(ctx, "/_security/api_key?id="+id)
+	if err != nil {
+		return types.APIKey{}, err
+	}
+	switch status {
+	case http.StatusUnauthorized:
+		return types.APIKey{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.APIKey{}, esopsclient.ErrForbidden
+	case http.StatusNotFound:
+		return types.APIKey{}, fmt.Errorf("%w: api key %q", esopsclient.ErrNotFound, id)
+	}
+	if status >= 400 {
+		if isSecurityDisabledBody(body) {
+			return types.APIKey{}, fmt.Errorf("%w: security is disabled on this cluster", esopsclient.ErrUnsupported)
+		}
+		return types.APIKey{}, clientutil.ClassifyStatus("api_key get", status, body)
+	}
+	var wrap struct {
+		APIKeys []esAPIKeyWire `json:"api_keys"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return types.APIKey{}, errors.Join(errors.New("decoding api_key response"), err)
+	}
+	for _, k := range wrap.APIKeys {
+		if k.ID == id {
+			return types.APIKey{
+				ID:            k.ID,
+				Name:          k.Name,
+				Username:      k.Username,
+				Realm:         k.Realm,
+				Creation:      epochMillisTime(k.CreationMS),
+				Expiration:    epochMillisTimePtr(k.ExpirationMS),
+				LastAuth:      epochMillisTimePtr(k.LastAuthMS),
+				Invalidated:   k.Invalidated,
+				RoleTemplates: append([]string(nil), k.RoleTemplates...),
+			}, nil
+		}
+	}
+	return types.APIKey{}, fmt.Errorf("%w: api key %q", esopsclient.ErrNotFound, id)
+}
+
+// esCreateAPIKeyWire mirrors the POST /_security/api_key request body
+// the way ES accepts it. role_descriptors is a free-form JSON object;
+// expiration is a duration string (the cluster parses "1d", "30m", …).
+type esCreateAPIKeyWire struct {
+	Name            string          `json:"name"`
+	Expiration      string          `json:"expiration,omitempty"`
+	RoleDescriptors json.RawMessage `json:"role_descriptors,omitempty"`
+}
+
+// esCreateAPIKeyResponseWire mirrors the cluster's response. The
+// secret is in `api_key`; the base64 form ES recommends pasting into
+// Authorization headers is in `encoded`.
+type esCreateAPIKeyResponseWire struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	APIKey     string `json:"api_key"`
+	Encoded    string `json:"encoded"`
+	Expiration *int64 `json:"expiration"`
+}
+
+// CreateAPIKey implements client.APIKeyManager via POST /_security/api_key.
+// The response contains the raw key value — callers must keep it out
+// of any log sink; see the capability docs.
+func (c *Client) CreateAPIKey(ctx context.Context, req types.APIKeyCreateRequest) (types.APIKeyCreated, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return types.APIKeyCreated{}, esopsclient.UsageError("api key name is required")
+	}
+	wire := esCreateAPIKeyWire{
+		Name:            req.Name,
+		Expiration:      req.Expiration,
+		RoleDescriptors: req.RoleDescriptors,
+	}
+	body, err := json.Marshal(wire)
+	if err != nil {
+		return types.APIKeyCreated{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "/_security/api_key", bytes.NewReader(body))
+	if err != nil {
+		return types.APIKeyCreated{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.api.Perform(httpReq)
+	if err != nil {
+		return types.APIKeyCreated{}, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := readAPIKeyResponseBody(resp)
+	if err != nil {
+		return types.APIKeyCreated{}, err
+	}
+	status := resp.StatusCode
+	switch status {
+	case http.StatusUnauthorized:
+		return types.APIKeyCreated{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.APIKeyCreated{}, esopsclient.ErrForbidden
+	case http.StatusNotFound:
+		return types.APIKeyCreated{}, fmt.Errorf("%w: /_security/api_key not exposed by this cluster build", esopsclient.ErrUnsupported)
+	}
+	if status >= 400 {
+		if isSecurityDisabledBody(respBody) {
+			return types.APIKeyCreated{}, fmt.Errorf("%w: security is disabled on this cluster", esopsclient.ErrUnsupported)
+		}
+		return types.APIKeyCreated{}, clientutil.ClassifyStatus("api_key create", status, respBody)
+	}
+	var wireResp esCreateAPIKeyResponseWire
+	if err := json.Unmarshal(respBody, &wireResp); err != nil {
+		return types.APIKeyCreated{}, errors.Join(errors.New("decoding api_key create response"), err)
+	}
+	return types.APIKeyCreated{
+		ID:         wireResp.ID,
+		Name:       wireResp.Name,
+		Key:        wireResp.APIKey,
+		Encoded:    wireResp.Encoded,
+		Expiration: epochMillisTimePtr(wireResp.Expiration),
+	}, nil
+}
+
+// esInvalidateAPIKeyResponseWire mirrors the cluster's response for
+// DELETE /_security/api_key. The cluster echoes the ids it acted on
+// and surfaces per-id failures verbatim — we pass them through
+// unchanged so the CLI renders a faithful "partial outcome" without
+// re-interpreting the failure shape.
+type esInvalidateAPIKeyResponseWire struct {
+	InvalidatedAPIKeys           []string         `json:"invalidated_api_keys"`
+	PreviouslyInvalidatedAPIKeys []string         `json:"previously_invalidated_api_keys"`
+	ErrorCount                   int              `json:"error_count"`
+	ErrorDetails                 []map[string]any `json:"error_details"`
+}
+
+// InvalidateAPIKey implements client.APIKeyManager via DELETE
+// /_security/api_key. The bulk shape is the only one ES accepts;
+// a single-id invalidate uses the same body.
+func (c *Client) InvalidateAPIKey(ctx context.Context, req types.APIKeyInvalidateRequest) (types.APIKeyInvalidated, error) {
+	if len(req.IDs) == 0 {
+		return types.APIKeyInvalidated{}, esopsclient.UsageError("at least one api key id is required")
+	}
+	payload, err := json.Marshal(map[string]any{"ids": req.IDs})
+	if err != nil {
+		return types.APIKeyInvalidated{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, "/_security/api_key", bytes.NewReader(payload))
+	if err != nil {
+		return types.APIKeyInvalidated{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.api.Perform(httpReq)
+	if err != nil {
+		return types.APIKeyInvalidated{}, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := readAPIKeyResponseBody(resp)
+	if err != nil {
+		return types.APIKeyInvalidated{}, err
+	}
+	status := resp.StatusCode
+	switch status {
+	case http.StatusUnauthorized:
+		return types.APIKeyInvalidated{}, esopsclient.ErrAuth
+	case http.StatusForbidden:
+		return types.APIKeyInvalidated{}, esopsclient.ErrForbidden
+	case http.StatusNotFound:
+		return types.APIKeyInvalidated{}, fmt.Errorf("%w: /_security/api_key not exposed by this cluster build", esopsclient.ErrUnsupported)
+	}
+	if status >= 400 {
+		if isSecurityDisabledBody(respBody) {
+			return types.APIKeyInvalidated{}, fmt.Errorf("%w: security is disabled on this cluster", esopsclient.ErrUnsupported)
+		}
+		return types.APIKeyInvalidated{}, clientutil.ClassifyStatus("api_key invalidate", status, respBody)
+	}
+	var wireResp esInvalidateAPIKeyResponseWire
+	if err := json.Unmarshal(respBody, &wireResp); err != nil {
+		return types.APIKeyInvalidated{}, errors.Join(errors.New("decoding api_key invalidate response"), err)
+	}
+	return types.APIKeyInvalidated{
+		Invalidated:           wireResp.InvalidatedAPIKeys,
+		PreviouslyInvalidated: wireResp.PreviouslyInvalidatedAPIKeys,
+		ErrorCount:            wireResp.ErrorCount,
+		ErrorDetails:          wireResp.ErrorDetails,
+	}, nil
 }
 
 // esServiceAccountListWire mirrors GET /_security/service. The response
@@ -339,3 +535,23 @@ func epochMillisTimePtr(ms *int64) *time.Time {
 	t := time.UnixMilli(*ms).UTC()
 	return &t
 }
+
+// readAPIKeyResponseBody reads the cluster's response under a bounded
+// reader. The create response carries a secret — capping the size
+// keeps a misbehaving cluster (or a man-in-the-middle returning a
+// gigabyte of HTML) from spending the CLI's heap on a one-shot read.
+func readAPIKeyResponseBody(resp *http.Response) ([]byte, error) {
+	body := clientutil.NewBoundedReader(resp.Body, clientutil.DefaultMaxResponseBytes, "api_key")
+	out, err := io.ReadAll(body)
+	if err != nil {
+		return nil, errors.Join(errors.New("reading api_key response body"), err)
+	}
+	return out, nil
+}
+
+// Compile-time guarantees that this Client satisfies the API-key
+// capability surface (read + mutate).
+var (
+	_ esopsclient.APIKeyInspector = (*Client)(nil)
+	_ esopsclient.APIKeyManager   = (*Client)(nil)
+)
