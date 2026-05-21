@@ -65,9 +65,9 @@ type esAuditSettingsBlock struct {
 	Outputs []string `json:"outputs"`
 	Logfile struct {
 		Events struct {
-			Include       []string                              `json:"include"`
-			Exclude       []string                              `json:"exclude"`
-			IgnoreFilters map[string]esAuditIgnoreFilterEntry   `json:"ignore_filters"`
+			Include       []string                            `json:"include"`
+			Exclude       []string                            `json:"exclude"`
+			IgnoreFilters map[string]esAuditIgnoreFilterEntry `json:"ignore_filters"`
 		} `json:"events"`
 	} `json:"logfile"`
 }

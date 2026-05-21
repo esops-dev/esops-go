@@ -283,10 +283,10 @@ func dataStreamStatsPath(names []string) string {
 // envelope. Both ES and OS use the same shape — top-level aggregates
 // plus a per-stream array.
 type dataStreamStatsWire struct {
-	DataStreamCount     int                       `json:"data_stream_count"`
-	BackingIndices      int                       `json:"backing_indices"`
-	TotalStoreSizeBytes int64                     `json:"total_store_size_bytes"`
-	DataStreams         []dataStreamStatsRowWire  `json:"data_streams"`
+	DataStreamCount     int                      `json:"data_stream_count"`
+	BackingIndices      int                      `json:"backing_indices"`
+	TotalStoreSizeBytes int64                    `json:"total_store_size_bytes"`
+	DataStreams         []dataStreamStatsRowWire `json:"data_streams"`
 }
 
 type dataStreamStatsRowWire struct {

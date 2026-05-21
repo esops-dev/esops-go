@@ -83,7 +83,7 @@ func runSegments(ctx context.Context, cmd *cli.Command) error {
 		Hidden:      hidden,
 		Sort:        sortKey,
 	}
-	return watch.Run(ctx, cmd, "esops index segments", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops index segments", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		report, err := esopsindex.Segments(ctx, s.Client.Segments, opts)
 		if err != nil {
 			return err

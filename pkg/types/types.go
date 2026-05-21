@@ -3763,16 +3763,16 @@ type SegmentsReport struct {
 // /_cat/indices reports under `docs.deleted`). Bytes is the on-disk
 // size summed across primaries.
 type IndexSegments struct {
-	Index             string `json:"index"               yaml:"index"`
-	Shards            int    `json:"shards"              yaml:"shards"`
-	SegmentsTotal     int    `json:"segments_total"      yaml:"segments_total"`
-	SegmentsPrimary   int    `json:"segments_primary"    yaml:"segments_primary"`
-	DocsTotal         int64  `json:"docs_total"          yaml:"docs_total"`
-	DocsDeleted       int64  `json:"docs_deleted"        yaml:"docs_deleted"`
-	Bytes             int64  `json:"bytes"               yaml:"bytes"`
-	MaxSegmentsShard  int    `json:"max_segments_shard"  yaml:"max_segments_shard"`
-	Committed         int    `json:"committed,omitempty" yaml:"committed,omitempty"`
-	Searchable        int    `json:"searchable,omitempty" yaml:"searchable,omitempty"`
+	Index            string `json:"index"               yaml:"index"`
+	Shards           int    `json:"shards"              yaml:"shards"`
+	SegmentsTotal    int    `json:"segments_total"      yaml:"segments_total"`
+	SegmentsPrimary  int    `json:"segments_primary"    yaml:"segments_primary"`
+	DocsTotal        int64  `json:"docs_total"          yaml:"docs_total"`
+	DocsDeleted      int64  `json:"docs_deleted"        yaml:"docs_deleted"`
+	Bytes            int64  `json:"bytes"               yaml:"bytes"`
+	MaxSegmentsShard int    `json:"max_segments_shard"  yaml:"max_segments_shard"`
+	Committed        int    `json:"committed,omitempty" yaml:"committed,omitempty"`
+	Searchable       int    `json:"searchable,omitempty" yaml:"searchable,omitempty"`
 }
 
 // IngestPipeline is the neutral view of an ingest pipeline as reported
@@ -3850,22 +3850,22 @@ type DataStreamBackingIndex struct {
 // operator can see the lifecycle shape without expanding the full
 // index list.
 type DataStream struct {
-	Name                string                   `json:"name"                            yaml:"name"`
-	Status              string                   `json:"status,omitempty"                yaml:"status,omitempty"`
-	Generation          int64                    `json:"generation,omitempty"            yaml:"generation,omitempty"`
-	Template            string                   `json:"template,omitempty"              yaml:"template,omitempty"`
-	ILMPolicy           string                   `json:"ilm_policy,omitempty"            yaml:"ilm_policy,omitempty"`
-	ISMTemplate         string                   `json:"ism_template,omitempty"          yaml:"ism_template,omitempty"`
-	Lifecycle           map[string]any           `json:"lifecycle,omitempty"             yaml:"lifecycle,omitempty"`
-	Hidden              bool                     `json:"hidden,omitempty"                yaml:"hidden,omitempty"`
-	System              bool                     `json:"system,omitempty"                yaml:"system,omitempty"`
-	Replicated          bool                     `json:"replicated,omitempty"            yaml:"replicated,omitempty"`
-	AllowCustomRouting  bool                     `json:"allow_custom_routing,omitempty"  yaml:"allow_custom_routing,omitempty"`
-	WriteIndex          string                   `json:"write_index,omitempty"           yaml:"write_index,omitempty"`
-	IndexCount          int                      `json:"index_count,omitempty"           yaml:"index_count,omitempty"`
-	BackingIndexOldest  string                   `json:"backing_index_oldest,omitempty"  yaml:"backing_index_oldest,omitempty"`
-	BackingIndexNewest  string                   `json:"backing_index_newest,omitempty"  yaml:"backing_index_newest,omitempty"`
-	Indices             []DataStreamBackingIndex `json:"indices,omitempty"               yaml:"indices,omitempty"`
+	Name               string                   `json:"name"                            yaml:"name"`
+	Status             string                   `json:"status,omitempty"                yaml:"status,omitempty"`
+	Generation         int64                    `json:"generation,omitempty"            yaml:"generation,omitempty"`
+	Template           string                   `json:"template,omitempty"              yaml:"template,omitempty"`
+	ILMPolicy          string                   `json:"ilm_policy,omitempty"            yaml:"ilm_policy,omitempty"`
+	ISMTemplate        string                   `json:"ism_template,omitempty"          yaml:"ism_template,omitempty"`
+	Lifecycle          map[string]any           `json:"lifecycle,omitempty"             yaml:"lifecycle,omitempty"`
+	Hidden             bool                     `json:"hidden,omitempty"                yaml:"hidden,omitempty"`
+	System             bool                     `json:"system,omitempty"                yaml:"system,omitempty"`
+	Replicated         bool                     `json:"replicated,omitempty"            yaml:"replicated,omitempty"`
+	AllowCustomRouting bool                     `json:"allow_custom_routing,omitempty"  yaml:"allow_custom_routing,omitempty"`
+	WriteIndex         string                   `json:"write_index,omitempty"           yaml:"write_index,omitempty"`
+	IndexCount         int                      `json:"index_count,omitempty"           yaml:"index_count,omitempty"`
+	BackingIndexOldest string                   `json:"backing_index_oldest,omitempty"  yaml:"backing_index_oldest,omitempty"`
+	BackingIndexNewest string                   `json:"backing_index_newest,omitempty"  yaml:"backing_index_newest,omitempty"`
+	Indices            []DataStreamBackingIndex `json:"indices,omitempty"               yaml:"indices,omitempty"`
 
 	// StoreBytes and DocsCount aggregate the per-backing-index store
 	// size and doc count after the business layer enriches the stream
@@ -4380,7 +4380,7 @@ type DataStreamDescription struct {
 
 	Stream DataStream `json:"stream" yaml:"stream"`
 
-	MatchedTemplate *IndexTemplate `json:"matched_template,omitempty" yaml:"matched_template,omitempty"`
+	MatchedTemplate *IndexTemplate  `json:"matched_template,omitempty" yaml:"matched_template,omitempty"`
 	Recoveries      []IndexRecovery `json:"recoveries,omitempty"       yaml:"recoveries,omitempty"`
 	Tasks           []Task          `json:"tasks,omitempty"            yaml:"tasks,omitempty"`
 
@@ -4497,10 +4497,10 @@ type SnapshotRepositoryDescription struct {
 	Name    string `json:"name"              yaml:"name"`
 	Dialect string `json:"dialect,omitempty" yaml:"dialect,omitempty"`
 
-	Info     SnapshotRepository       `json:"info"             yaml:"info"`
-	Verify   *SnapshotVerifyResult    `json:"verify,omitempty" yaml:"verify,omitempty"`
+	Info     SnapshotRepository        `json:"info"             yaml:"info"`
+	Verify   *SnapshotVerifyResult     `json:"verify,omitempty" yaml:"verify,omitempty"`
 	Summary  SnapshotRepositorySummary `json:"summary"         yaml:"summary"`
-	Policies []SnapshotPolicy         `json:"policies,omitempty" yaml:"policies,omitempty"`
+	Policies []SnapshotPolicy          `json:"policies,omitempty" yaml:"policies,omitempty"`
 
 	SectionWarnings map[string]string `json:"section_warnings,omitempty" yaml:"section_warnings,omitempty"`
 }

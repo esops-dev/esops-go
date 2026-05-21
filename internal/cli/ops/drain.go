@@ -11,9 +11,9 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
-	"github.com/esops-dev/esops-go/pkg/client"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

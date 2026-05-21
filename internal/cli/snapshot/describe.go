@@ -9,8 +9,8 @@ import (
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/cli/watch"
-	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 	"github.com/esops-dev/esops-go/internal/output"
+	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 	"github.com/esops-dev/esops-go/pkg/client"
 )
 
@@ -60,7 +60,7 @@ func runDescribe(ctx context.Context, cmd *cli.Command) error {
 		Dialect:  string(s.Client.Info.Dialect),
 	}
 
-	return watch.Run(ctx, cmd, "esops snapshot describe", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops snapshot describe", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		desc, err := esopssnapshot.Describe(ctx, caps, esopssnapshot.DescribeOptions{Spec: spec})
 		if err != nil {
 			return err

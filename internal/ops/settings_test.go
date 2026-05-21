@@ -71,13 +71,13 @@ func TestGetClusterSettings_filtersByPrefix(t *testing.T) {
 	gi := &fakeClusterSettingsFull{
 		full: types.ClusterSettingsFull{
 			Persistent: map[string]any{
-				"cluster.routing.allocation.enable":               "all",
-				"cluster.routing.allocation.disk.watermark.high":  "85%",
-				"action.destructive_requires_name":                "true",
+				"cluster.routing.allocation.enable":              "all",
+				"cluster.routing.allocation.disk.watermark.high": "85%",
+				"action.destructive_requires_name":               "true",
 			},
 			Transient: map[string]any{
-				"cluster.routing.allocation.enable":               "primaries",
-				"action.destructive_requires_name":                "false",
+				"cluster.routing.allocation.enable": "primaries",
+				"action.destructive_requires_name":  "false",
 			},
 		},
 	}

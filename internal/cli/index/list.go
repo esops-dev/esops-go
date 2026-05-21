@@ -92,7 +92,7 @@ func runList(ctx context.Context, cmd *cli.Command) error {
 		Sort:           sortKey,
 	}
 
-	return watch.Run(ctx, cmd, "esops index list", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops index list", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		// NDJSON takes the streaming path: rows reach stdout as the
 		// cluster sends them, so a 20k-index cluster doesn't have to
 		// be buffered into memory before the first row prints. Other

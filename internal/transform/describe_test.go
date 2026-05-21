@@ -11,10 +11,10 @@ import (
 )
 
 type descTransformInspector struct {
-	def       types.Transform
-	defErr    error
-	stats     types.TransformStats
-	statsErr  error
+	def      types.Transform
+	defErr   error
+	stats    types.TransformStats
+	statsErr error
 }
 
 func (f *descTransformInspector) ListTransforms(_ context.Context, _ []string) ([]types.Transform, error) {

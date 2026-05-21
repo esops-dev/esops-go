@@ -89,7 +89,7 @@ func runShards(ctx context.Context, cmd *cli.Command) error {
 		filter.Role = types.ShardRoleReplica
 	}
 
-	return watch.Run(ctx, cmd, "esops ops shards", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops ops shards", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		shards, err := esopsops.Shards(ctx, s.Client.Shards, filter)
 		if err != nil {
 			return err

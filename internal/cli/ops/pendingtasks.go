@@ -41,7 +41,7 @@ func runPendingTasks(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	return watch.Run(ctx, cmd, "esops ops pending-tasks", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops ops pending-tasks", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		tasks, err := esopsops.ListPendingTasks(ctx, s.Client.PendingTasks)
 		if err != nil {
 			return err

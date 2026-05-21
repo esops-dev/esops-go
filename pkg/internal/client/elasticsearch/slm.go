@@ -22,15 +22,15 @@ import (
 // surfaces operator-facing metadata, the cluster's per-execution
 // counters belong in `_slm/stats` if a future command exposes them.
 type slmPolicyEntryWire struct {
-	Version          int64                       `json:"version"`
-	ModifiedDate     string                      `json:"modified_date"`
-	ModifiedDateMS   int64                       `json:"modified_date_millis"`
-	Policy           slmPolicyDefinitionWire     `json:"policy"`
-	LastSuccess      *slmPolicyExecutionWire     `json:"last_success,omitempty"`
-	LastFailure      *slmPolicyExecutionWire     `json:"last_failure,omitempty"`
-	NextExecutionMS  int64                       `json:"next_execution_millis"`
-	NextExecutionISO string                      `json:"next_execution"`
-	InProgress       *slmPolicyInProgressWire    `json:"in_progress,omitempty"`
+	Version          int64                    `json:"version"`
+	ModifiedDate     string                   `json:"modified_date"`
+	ModifiedDateMS   int64                    `json:"modified_date_millis"`
+	Policy           slmPolicyDefinitionWire  `json:"policy"`
+	LastSuccess      *slmPolicyExecutionWire  `json:"last_success,omitempty"`
+	LastFailure      *slmPolicyExecutionWire  `json:"last_failure,omitempty"`
+	NextExecutionMS  int64                    `json:"next_execution_millis"`
+	NextExecutionISO string                   `json:"next_execution"`
+	InProgress       *slmPolicyInProgressWire `json:"in_progress,omitempty"`
 }
 
 // slmPolicyDefinitionWire is the inner `policy` block. We carry a

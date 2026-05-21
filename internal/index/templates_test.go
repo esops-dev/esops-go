@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -179,9 +179,9 @@ func TestPutTemplate_rejectsPatternName(t *testing.T) {
 func TestPutTemplate_validatesBody(t *testing.T) {
 	tu := &fakeTemplateUpdater{}
 	cases := []struct {
-		name      string
-		body      []byte
-		wantErr   string
+		name    string
+		body    []byte
+		wantErr string
 	}{
 		{"empty body", nil, "body is required"},
 		{"non-JSON", []byte(`{ broken`), "valid JSON"},

@@ -63,7 +63,7 @@ func runRecovery(ctx context.Context, cmd *cli.Command) error {
 		Pattern:    cmd.String("index"),
 		ActiveOnly: cmd.Bool("active-only"),
 	}
-	return watch.Run(ctx, cmd, "esops index recovery", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops index recovery", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		report, err := esopsindex.Recovery(ctx, s.Client.Recovery, opts)
 		if err != nil {
 			return err

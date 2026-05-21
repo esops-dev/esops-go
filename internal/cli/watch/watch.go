@@ -36,6 +36,31 @@ const (
 // its own output to stdout (or wherever the command normally writes).
 type Tick func(ctx context.Context) error
 
+// Options carries the per-command inputs to Run. Grouped into a struct
+// so the call site stays readable as the watch surface grows — a flat
+// positional arg list would otherwise bury the tick closure behind a
+// handful of strings.
+type Options struct {
+	// Label is the kubectl-style banner text (e.g. "esops ops health").
+	// Keep it short and stable across releases — operators read it to
+	// disambiguate stacked panes.
+	Label string
+
+	// ContextName is the resolved cluster context (from
+	// cmdsetup.Setup.ContextName). It's surfaced in the table/wide
+	// header inline and emitted as a watch.start structured log on
+	// entry so NDJSON pipelines — which can't take an inline banner
+	// without breaking parsers — still leave a stderr trace of which
+	// cluster the loop is hitting. The watch loop holds the connection
+	// it was given; `esops config use-context` elsewhere does not
+	// retarget a running watch.
+	ContextName string
+
+	// Format gates the rendering style: table/wide clear and repaint,
+	// NDJSON appends, JSON/YAML are refused up front.
+	Format output.Format
+}
+
 // Flags returns the CLI flag set every watch-capable command appends to
 // its own flags. Kept in one place so the help text, defaults, and
 // behaviour stay consistent across commands.
@@ -59,23 +84,28 @@ func Flags() []cli.Flag {
 }
 
 // Run executes tick once, or repeatedly under watch mode. Commands call
-// it after cmdsetup.Prepare has resolved --output, so the format here
-// has already been allowlisted by the command. The format argument
-// gates the watch rendering style: table/wide clear and repaint, NDJSON
-// streams, JSON/YAML refuse.
-//
-// The label is shown verbatim in the watch header (e.g. "esops ops
-// health"). Keep it short and stable across releases — operators read
-// it to disambiguate stacked panes.
-func Run(ctx context.Context, cmd *cli.Command, label string, format output.Format, tick Tick) error {
+// it after cmdsetup.Prepare has resolved --output, so opts.Format has
+// already been allowlisted by the command.
+func Run(ctx context.Context, cmd *cli.Command, opts Options, tick Tick) error {
 	if !cmd.Bool("watch") {
 		return tick(ctx)
 	}
-	cfg, err := parseConfig(cmd, format, isTTY(os.Stdout), inCI())
+	cfg, err := parseConfig(cmd, opts.Format, isTTY(os.Stdout), inCI())
 	if err != nil {
 		return err
 	}
-	return loop(ctx, os.Stdout, label, cfg, tick)
+	// One stderr-bound structured log on entry so NDJSON pipelines (and
+	// any log-archival tail) record which cluster this watch is hitting.
+	// Table/wide also get this in addition to the in-band header — cheap,
+	// and useful for post-incident review when the terminal scrollback
+	// is gone.
+	logging.Logger().Info("watch.start",
+		"label", opts.Label,
+		"context", opts.ContextName,
+		"format", string(opts.Format),
+		"interval", cfg.Interval.String(),
+	)
+	return loop(ctx, os.Stdout, opts.Label, opts.ContextName, cfg, tick)
 }
 
 // config carries validated watch state. Internal so callers stay on the
@@ -127,7 +157,7 @@ func parseConfig(cmd *cli.Command, format output.Format, stdoutIsTTY, ci bool) (
 // loop is the watch driver. Kept package-private so tests can drive it
 // with a fake writer and a synthetic tick without going through cli
 // flag plumbing.
-func loop(ctx context.Context, w io.Writer, label string, cfg config, tick Tick) error {
+func loop(ctx context.Context, w io.Writer, label, contextName string, cfg config, tick Tick) error {
 	for iteration := 0; ; iteration++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -139,7 +169,7 @@ func loop(ctx context.Context, w io.Writer, label string, cfg config, tick Tick)
 					return err
 				}
 			}
-			if _, err := fmt.Fprintln(w, header(label, cfg.Interval, time.Now().UTC())); err != nil {
+			if _, err := fmt.Fprintln(w, header(label, contextName, cfg.Interval, time.Now().UTC())); err != nil {
 				return err
 			}
 			if _, err := fmt.Fprintln(w); err != nil {
@@ -217,10 +247,13 @@ func isTTY(w io.Writer) bool {
 }
 
 // header renders the kubectl-style banner: "Every 2s — esops ops
-// health — 2026-05-13T19:14:02Z". The em dash separator matches the
-// rest of the CLI's help text style.
-func header(label string, interval time.Duration, now time.Time) string {
-	return fmt.Sprintf("Every %s — %s — %s", interval, label, now.Format(time.RFC3339))
+// health — context: prod-eu — 2026-05-13T19:14:02Z". The em dash
+// separator matches the rest of the CLI's help text style. The context
+// segment is mandatory — cmdsetup.Prepare always resolves a non-empty
+// name (config.ResolveContext errors otherwise), so the production
+// callers can never legitimately reach here with an empty string.
+func header(label, contextName string, interval time.Duration, now time.Time) string {
+	return fmt.Sprintf("Every %s — %s — context: %s — %s", interval, label, contextName, now.Format(time.RFC3339))
 }
 
 // inCI mirrors internal/cli.inCI. Kept local to avoid pulling the

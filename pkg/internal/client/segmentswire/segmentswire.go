@@ -31,9 +31,9 @@ type ShardEntry struct {
 		Primary bool   `json:"primary"`
 		Node    string `json:"node"`
 	} `json:"routing"`
-	NumCommittedSegments int                      `json:"num_committed_segments"`
-	NumSearchSegments    int                      `json:"num_search_segments"`
-	Segments             map[string]SegmentEntry  `json:"segments"`
+	NumCommittedSegments int                     `json:"num_committed_segments"`
+	NumSearchSegments    int                     `json:"num_search_segments"`
+	Segments             map[string]SegmentEntry `json:"segments"`
 }
 
 // SegmentEntry is one segment record. NumDocs and DeletedDocs combine

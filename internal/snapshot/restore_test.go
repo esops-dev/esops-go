@@ -90,8 +90,8 @@ func TestRestore_rejectsHalfRenamePair(t *testing.T) {
 	// The cluster's own error on a missing rename half is a terse 500 that
 	// doesn't say which half is missing; intercept it client-side.
 	cases := []struct {
-		name              string
-		pattern, replace  string
+		name             string
+		pattern, replace string
 	}{
 		{"pattern without replacement", "(.+)", ""},
 		{"replacement without pattern", "", "restored-$1"},

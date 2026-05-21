@@ -25,15 +25,15 @@ import (
 // reindex per (source, target, suffix) tuple at a time, the same
 // constraint the cluster itself imposes on the destination indices.
 type ReindexState struct {
-	Schema         int                 `json:"schema"`
-	Action         string              `json:"action"`
-	SourceContext  string              `json:"source_context"`
-	TargetContext  string              `json:"target_context"`
-	TargetSuffix   string              `json:"target_suffix,omitempty"`
-	TargetLiteral  string              `json:"target_literal,omitempty"`
-	StartedAt      time.Time           `json:"started_at"`
-	UpdatedAt      time.Time           `json:"updated_at"`
-	Entries        []ReindexStateEntry `json:"entries"`
+	Schema        int                 `json:"schema"`
+	Action        string              `json:"action"`
+	SourceContext string              `json:"source_context"`
+	TargetContext string              `json:"target_context"`
+	TargetSuffix  string              `json:"target_suffix,omitempty"`
+	TargetLiteral string              `json:"target_literal,omitempty"`
+	StartedAt     time.Time           `json:"started_at"`
+	UpdatedAt     time.Time           `json:"updated_at"`
+	Entries       []ReindexStateEntry `json:"entries"`
 }
 
 // ReindexStateEntry is the per-source-index record. TaskID is empty

@@ -105,9 +105,9 @@ func TestUnsupportedServiceTokens_ReturnsUnsupported(t *testing.T) {
 // interfaces. A future capability addition that breaks the contract
 // will fail here, not deep in the factory call site.
 var (
-	_ client.ILMManager           = unsupportedILM{}
-	_ client.ISMManager           = unsupportedISM{}
-	_ client.DeprecationInspector = unsupportedDeprecations{}
-	_ client.APIKeyInspector      = unsupportedAPIKeys{}
+	_ client.ILMManager            = unsupportedILM{}
+	_ client.ISMManager            = unsupportedISM{}
+	_ client.DeprecationInspector  = unsupportedDeprecations{}
+	_ client.APIKeyInspector       = unsupportedAPIKeys{}
 	_ client.ServiceTokenInspector = unsupportedServiceTokens{}
 )

@@ -62,7 +62,7 @@ func runRecovery(ctx context.Context, cmd *cli.Command) error {
 		Pattern:    cmd.String("name"),
 		ActiveOnly: cmd.Bool("active-only"),
 	}
-	return watch.Run(ctx, cmd, "esops datastream recovery", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops datastream recovery", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		report, err := esopsdatastream.Recovery(ctx, s.Client.DataStream, s.Client.Recovery, opts)
 		if err != nil {
 			return err

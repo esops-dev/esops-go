@@ -344,4 +344,3 @@ func Delete(ctx context.Context, inspector client.DataStreamInspector, manager c
 	result.DryRun = opts.DryRun
 	return result, nil
 }
-

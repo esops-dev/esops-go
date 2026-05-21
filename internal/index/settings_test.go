@@ -182,7 +182,7 @@ func TestUpdateSettings_buildsEnvelopeFromKVs(t *testing.T) {
 	_, err := index.UpdateSettings(context.Background(), su, index.SettingsUpdateOptions{
 		Index: "logs",
 		KeyValues: map[string]string{
-			"number_of_replicas": "2",
+			"number_of_replicas":     "2",
 			"index.refresh_interval": "30s",
 		},
 	})

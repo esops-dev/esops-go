@@ -45,7 +45,7 @@ func cmdWith(t *testing.T, args ...string) *cli.Command {
 func TestRun_watchDisabled_runsTickOnce(t *testing.T) {
 	cmd := cmdWith(t)
 	var calls int
-	err := Run(context.Background(), cmd, "test", output.FormatTable, func(ctx context.Context) error {
+	err := Run(context.Background(), cmd, Options{Label: "test", ContextName: "ctx-a", Format: output.FormatTable}, func(ctx context.Context) error {
 		calls++
 		return nil
 	})
@@ -60,7 +60,7 @@ func TestRun_watchDisabled_runsTickOnce(t *testing.T) {
 func TestRun_watchDisabled_propagatesError(t *testing.T) {
 	cmd := cmdWith(t)
 	sentinel := errors.New("boom")
-	err := Run(context.Background(), cmd, "test", output.FormatTable, func(ctx context.Context) error {
+	err := Run(context.Background(), cmd, Options{Label: "test", ContextName: "ctx-a", Format: output.FormatTable}, func(ctx context.Context) error {
 		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
@@ -196,7 +196,7 @@ func TestLoop_iterationsCap(t *testing.T) {
 		Format:     output.FormatTable,
 	}
 	var calls int32
-	err := loop(context.Background(), io.Discard, "lbl", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), io.Discard, "lbl", "ctx-a", cfg, func(ctx context.Context) error {
 		atomic.AddInt32(&calls, 1)
 		return nil
 	})
@@ -218,7 +218,7 @@ func TestLoop_contextCancelExits(t *testing.T) {
 	var calls int32
 	done := make(chan error, 1)
 	go func() {
-		done <- loop(ctx, io.Discard, "lbl", cfg, func(ctx context.Context) error {
+		done <- loop(ctx, io.Discard, "lbl", "ctx-a", cfg, func(ctx context.Context) error {
 			atomic.AddInt32(&calls, 1)
 			return nil
 		})
@@ -246,7 +246,7 @@ func TestLoop_terminalErrorStops(t *testing.T) {
 		Format:     output.FormatTable,
 	}
 	var calls int32
-	err := loop(context.Background(), io.Discard, "lbl", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), io.Discard, "lbl", "ctx-a", cfg, func(ctx context.Context) error {
 		atomic.AddInt32(&calls, 1)
 		return client.ErrAuth
 	})
@@ -266,7 +266,7 @@ func TestLoop_transientErrorContinues(t *testing.T) {
 	}
 	var calls int32
 	transient := errors.New("transient blip")
-	err := loop(context.Background(), io.Discard, "lbl", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), io.Discard, "lbl", "ctx-a", cfg, func(ctx context.Context) error {
 		atomic.AddInt32(&calls, 1)
 		return transient
 	})
@@ -288,7 +288,7 @@ func TestLoop_unreachableIsTransient(t *testing.T) {
 		Format:     output.FormatTable,
 	}
 	var calls int32
-	err := loop(context.Background(), io.Discard, "lbl", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), io.Discard, "lbl", "ctx-a", cfg, func(ctx context.Context) error {
 		atomic.AddInt32(&calls, 1)
 		return fmt.Errorf("wrap: %w", client.ErrUnreachable)
 	})
@@ -309,7 +309,7 @@ func TestLoop_rendersHeaderAndClearForTTY(t *testing.T) {
 		ClearScreen: true,
 	}
 	var buf bytes.Buffer
-	err := loop(context.Background(), &buf, "esops ops health", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), &buf, "esops ops health", "prod-eu", cfg, func(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
@@ -321,6 +321,9 @@ func TestLoop_rendersHeaderAndClearForTTY(t *testing.T) {
 	}
 	if !strings.Contains(out, "esops ops health") {
 		t.Errorf("header missing label: %q", out)
+	}
+	if !strings.Contains(out, "context: prod-eu") {
+		t.Errorf("header missing context segment: %q", out)
 	}
 	if !strings.Contains(out, clearScreenSeq) {
 		t.Errorf("ClearScreen=true should emit ANSI clear: %q", out)
@@ -336,7 +339,7 @@ func TestLoop_headerWithoutClearForNonTTY(t *testing.T) {
 		ClearScreen: false,
 	}
 	var buf bytes.Buffer
-	err := loop(context.Background(), &buf, "esops ops health", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), &buf, "esops ops health", "prod-eu", cfg, func(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
@@ -345,6 +348,9 @@ func TestLoop_headerWithoutClearForNonTTY(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "esops ops health") {
 		t.Errorf("non-TTY table should still show the header: %q", out)
+	}
+	if !strings.Contains(out, "context: prod-eu") {
+		t.Errorf("non-TTY header should still carry context: %q", out)
 	}
 	if strings.Contains(out, clearScreenSeq) {
 		t.Errorf("ClearScreen=false must not write ANSI to the writer: %q", out)
@@ -358,7 +364,7 @@ func TestLoop_noHeaderForNDJSON(t *testing.T) {
 		Format:     output.FormatNDJSON,
 	}
 	var buf bytes.Buffer
-	err := loop(context.Background(), &buf, "esops ops health", cfg, func(ctx context.Context) error {
+	err := loop(context.Background(), &buf, "esops ops health", "prod-eu", cfg, func(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
@@ -371,8 +377,8 @@ func TestLoop_noHeaderForNDJSON(t *testing.T) {
 
 func TestHeader_format(t *testing.T) {
 	now := time.Date(2026, 5, 13, 19, 14, 2, 0, time.UTC)
-	got := header("esops ops health", 2*time.Second, now)
-	want := "Every 2s — esops ops health — 2026-05-13T19:14:02Z"
+	got := header("esops ops health", "prod-eu", 2*time.Second, now)
+	want := "Every 2s — esops ops health — context: prod-eu — 2026-05-13T19:14:02Z"
 	if got != want {
 		t.Errorf("header = %q, want %q", got, want)
 	}

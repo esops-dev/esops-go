@@ -15,8 +15,8 @@ import (
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
 	esopsclient "github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/pkg/internal/clientutil"
 	"github.com/esops-dev/esops-go/pkg/internal/client/snapshotwire"
+	"github.com/esops-dev/esops-go/pkg/internal/clientutil"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

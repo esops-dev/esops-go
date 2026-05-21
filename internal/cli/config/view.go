@@ -12,8 +12,8 @@ import (
 	"github.com/urfave/cli/v3"
 	"go.yaml.in/yaml/v3"
 
-	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/output"
+	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 )
 
 // redactionPlaceholder replaces inline plaintext secrets when

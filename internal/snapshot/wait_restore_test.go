@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	esopsclient "github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/snapshot"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

@@ -20,8 +20,8 @@ import (
 
 	"github.com/zalando/go-keyring"
 
-	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
 )
 
 // writeConfig drops body at a temp path with the requested mode and
@@ -543,12 +543,12 @@ func makeCertPEM(t *testing.T) (certPath, keyPath string) {
 		t.Fatalf("genkey: %v", err)
 	}
 	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "esops-validate"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "esops-validate"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)

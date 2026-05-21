@@ -63,10 +63,10 @@ func ParseSegmentSort(s string) (SegmentSort, error) {
 // already-merged indices when triaging fragmentation. Sort selects
 // the rendered order.
 type SegmentsOptions struct {
-	Pattern      string
-	MinSegments  int
-	Sort         SegmentSort
-	Hidden       bool
+	Pattern     string
+	MinSegments int
+	Sort        SegmentSort
+	Hidden      bool
 }
 
 // Segments is the business-layer entry point for `esops index

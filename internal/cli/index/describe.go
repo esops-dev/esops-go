@@ -116,7 +116,7 @@ func runDescribe(ctx context.Context, cmd *cli.Command) error {
 		IncludeDefaults: cmd.Bool("include-defaults"),
 	}
 
-	return watch.Run(ctx, cmd, "esops index describe", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops index describe", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		desc, err := esopsindex.Describe(ctx, caps, aggOpts)
 		if err != nil {
 			return err

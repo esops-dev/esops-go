@@ -8,8 +8,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 // cmdWith runs a stub urfave/cli app just long enough to parse the
@@ -44,10 +44,10 @@ func cmdWith(t *testing.T, args ...string) *cli.Command {
 
 func TestResolveHiddenFlags_table(t *testing.T) {
 	cases := []struct {
-		name           string
+		name            string
 		hidden, exclude bool
-		want           bool
-		wantErr        bool
+		want            bool
+		wantErr         bool
 	}{
 		{name: "neither", hidden: false, exclude: false, want: false},
 		{name: "hidden", hidden: true, exclude: false, want: true},

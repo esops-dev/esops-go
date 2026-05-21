@@ -135,14 +135,14 @@ func Reindex(ctx context.Context, src, tgt Endpoint, req types.MigrationReindexR
 		}
 
 		submit, err := tgt.Reindex.SubmitReindex(ctx, types.ReindexSubmitRequest{
-			SourceIndex:      ix.Name,
-			SourceRemoteHost: src.URL,
-			SourceUsername:   src.Auth.Username,
-			SourcePassword:   src.Auth.Password,
-			SourceHeaders:    src.Auth.remoteHeaders(),
-			TargetIndex:      entry.TargetIndex,
-			Conflicts:        req.Conflicts,
-			SizeLimit:        req.SizeLimit,
+			SourceIndex:         ix.Name,
+			SourceRemoteHost:    src.URL,
+			SourceUsername:      src.Auth.Username,
+			SourcePassword:      src.Auth.Password,
+			SourceHeaders:       src.Auth.remoteHeaders(),
+			TargetIndex:         entry.TargetIndex,
+			Conflicts:           req.Conflicts,
+			SizeLimit:           req.SizeLimit,
 			RequestsPerSecond:   req.RequestsPerSecond,
 			Slices:              req.Slices,
 			WaitForActiveShards: req.WaitForActiveShards,
