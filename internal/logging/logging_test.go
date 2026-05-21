@@ -26,16 +26,17 @@ func TestRedact_topLevelSensitiveKeys(t *testing.T) {
 		"api_key", "abcd-1234",
 		"token", "secret-jwt",
 		"authorization", "Bearer xyz",
+		"encoded", "VnVhQ2ZHY0JDZGJrUW0=", // base64(id:api_key) — equivalent to the secret
 	)
 	got := buf.String()
 
-	for _, leak := range []string{"hunter2", "abcd-1234", "secret-jwt", "Bearer xyz"} {
+	for _, leak := range []string{"hunter2", "abcd-1234", "secret-jwt", "Bearer xyz", "VnVhQ2ZHY0JDZGJrUW0="} {
 		if strings.Contains(got, leak) {
 			t.Errorf("log output leaked %q: %s", leak, got)
 		}
 	}
-	if count := strings.Count(got, redactedValue); count < 4 {
-		t.Errorf("expected at least 4 %q placeholders, got %d: %s", redactedValue, count, got)
+	if count := strings.Count(got, redactedValue); count < 5 {
+		t.Errorf("expected at least 5 %q placeholders, got %d: %s", redactedValue, count, got)
 	}
 }
 

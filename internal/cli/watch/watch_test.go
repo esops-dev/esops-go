@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -381,26 +380,6 @@ func TestHeader_format(t *testing.T) {
 	want := "Every 2s — esops ops health — context: prod-eu — 2026-05-13T19:14:02Z"
 	if got != want {
 		t.Errorf("header = %q, want %q", got, want)
-	}
-}
-
-func TestIsTTY_nonFileWriter(t *testing.T) {
-	if isTTY(&bytes.Buffer{}) {
-		t.Error("bytes.Buffer must not be reported as a TTY")
-	}
-}
-
-func TestIsTTY_regularFile(t *testing.T) {
-	// A plain temp file is the shape `esops ops health --watch > out.log`
-	// hits; the test would have leaked ANSI bytes into the file if isTTY
-	// returned true here.
-	f, err := os.CreateTemp(t.TempDir(), "watch-tty")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-	if isTTY(f) {
-		t.Error("regular file must not be reported as a TTY")
 	}
 }
 

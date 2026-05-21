@@ -137,6 +137,11 @@ const redactedValue = "<redacted>"
 // redactKeys is the lowercase set of attribute keys whose values are
 // replaced before reaching the underlying handler. Second line of
 // defence behind "never log a secret in the first place".
+//
+// `encoded` is the base64(id:api_key) form ES returns from
+// /_security/api_key — equivalent to the secret for impersonation
+// purposes, so it's redacted under its own attribute name in case a
+// future caller logs the field directly.
 var redactKeys = map[string]struct{}{
 	"authorization": {},
 	"password":      {},
@@ -145,6 +150,7 @@ var redactKeys = map[string]struct{}{
 	"token":         {},
 	"secret":        {},
 	"client_key":    {},
+	"encoded":       {},
 }
 
 // redactingHandler wraps a slog.Handler and replaces values of

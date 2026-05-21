@@ -55,7 +55,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		// so business code can call s.Client.ISM.* without nil-checks
 		// and get ErrUnsupported with a clear message when the
 		// operator targeted an ES context by mistake.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, SnapshotPolicy: impl, SnapshotPolicyRead: impl, Recovery: impl, Segments: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, NodeSettings: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: impl, ServiceTokens: impl, FieldCaps: impl, FieldCardinality: impl, RestoreHistory: impl, RemoteClusters: impl, License: impl, IngestPipeline: impl, DataStream: impl, DataStreamManage: impl, Transform: impl, TransformManage: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: impl, ISM: unsupportedISM{}, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, SnapshotPolicy: impl, SnapshotPolicyRead: impl, Recovery: impl, Segments: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: impl, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, NodeSettings: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: impl, APIKeysManage: impl, ServiceTokens: impl, FieldCaps: impl, FieldCardinality: impl, RestoreHistory: impl, RemoteClusters: impl, License: impl, IngestPipeline: impl, DataStream: impl, DataStreamManage: impl, Transform: impl, TransformManage: impl}, nil
 	case types.DialectOpenSearch:
 		impl, err := osadapter.New(addrs, provider, transport, osadapter.Options{
 			MaxRetries:          cc.MaxRetries,
@@ -67,7 +67,7 @@ func New(ctx context.Context, cc config.Context) (*client.Client, error) {
 		}
 		// ILM is Elasticsearch-only — same stubbing pattern as the ES
 		// branch above for ISM.
-		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, SnapshotPolicy: impl, SnapshotPolicyRead: impl, Recovery: impl, Segments: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, NodeSettings: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: unsupportedAPIKeys{}, ServiceTokens: unsupportedServiceTokens{}, FieldCaps: impl, FieldCardinality: impl, RestoreHistory: impl, RemoteClusters: impl, License: unsupportedLicense{}, IngestPipeline: impl, DataStream: impl, DataStreamManage: impl, Transform: impl, TransformManage: impl}, nil
+		return &client.Client{Info: info, Health: impl, Shards: impl, Nodes: impl, NodeStats: impl, Indices: impl, IndexState: impl, IndexOptimize: impl, IndexRollover: impl, IndexShrink: impl, IndexSettings: impl, IndexSettingsSet: impl, IndexTemplateGet: impl, IndexTemplateSet: impl, AliasInspect: impl, AliasUpdate: impl, AllocationExplain: impl, Security: impl, Diag: impl, HotThreads: impl, Reroute: impl, ILM: unsupportedILM{}, ISM: impl, Snapshot: impl, SnapshotCreate: impl, SnapshotVerify: impl, SnapshotRestore: impl, SnapshotPrune: impl, SnapshotRepoMgr: impl, SnapshotPolicy: impl, SnapshotPolicyRead: impl, Recovery: impl, Segments: impl, ClusterSettings: impl, ClusterSettingsRead: impl, VotingExclusion: impl, Tasks: impl, TasksCancel: impl, PendingTasks: impl, Deprecations: unsupportedDeprecations{}, Documents: impl, Mappings: impl, RemoteReindex: impl, DocCount: impl, Reindex: impl, NodeBootstrap: impl, NodeSettings: impl, ClusterSettingsAll: impl, ClusterSettingsPut: impl, Allocation: impl, TransportTLS: impl, HTTPTLS: impl, IndexCacheClear: impl, AuditLog: impl, Realms: impl, APIKeys: unsupportedAPIKeys{}, APIKeysManage: unsupportedAPIKeyManager{}, ServiceTokens: unsupportedServiceTokens{}, FieldCaps: impl, FieldCardinality: impl, RestoreHistory: impl, RemoteClusters: impl, License: unsupportedLicense{}, IngestPipeline: impl, DataStream: impl, DataStreamManage: impl, Transform: impl, TransformManage: impl}, nil
 	default:
 		return nil, fmt.Errorf("%w: dialect=%q", client.ErrUnknownProduct, info.Dialect)
 	}
@@ -142,6 +142,23 @@ type unsupportedAPIKeys struct{}
 
 func (unsupportedAPIKeys) APIKeys(context.Context) ([]types.APIKey, error) {
 	return nil, fmt.Errorf("%w: API keys are Elasticsearch-only; OpenSearch has no equivalent first-class surface", client.ErrUnsupported)
+}
+
+func (unsupportedAPIKeys) GetAPIKey(context.Context, string) (types.APIKey, error) {
+	return types.APIKey{}, fmt.Errorf("%w: API keys are Elasticsearch-only; OpenSearch has no equivalent first-class surface", client.ErrUnsupported)
+}
+
+// unsupportedAPIKeyManager is the mutating-side stub installed on
+// OpenSearch clients. Same dialect-only rationale as unsupportedAPIKeys —
+// /_security/api_key is Elasticsearch-native; OS has no equivalent.
+type unsupportedAPIKeyManager struct{}
+
+func (unsupportedAPIKeyManager) CreateAPIKey(context.Context, types.APIKeyCreateRequest) (types.APIKeyCreated, error) {
+	return types.APIKeyCreated{}, fmt.Errorf("%w: API keys are Elasticsearch-only; OpenSearch has no equivalent first-class surface", client.ErrUnsupported)
+}
+
+func (unsupportedAPIKeyManager) InvalidateAPIKey(context.Context, types.APIKeyInvalidateRequest) (types.APIKeyInvalidated, error) {
+	return types.APIKeyInvalidated{}, fmt.Errorf("%w: API keys are Elasticsearch-only; OpenSearch has no equivalent first-class surface", client.ErrUnsupported)
 }
 
 // unsupportedServiceTokens mirrors unsupportedAPIKeys for service

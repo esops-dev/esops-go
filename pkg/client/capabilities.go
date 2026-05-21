@@ -1245,6 +1245,49 @@ type RealmsInspector interface {
 //     in the message
 type APIKeyInspector interface {
 	APIKeys(ctx context.Context) ([]types.APIKey, error)
+	// GetAPIKey returns the metadata of a single key by id. Same wire
+	// endpoint as APIKeys, narrowed via ?id=. ErrNotFound when the
+	// cluster reports no matching key — the create/invalidate flows
+	// rely on the precise mapping so `ops apikey get` can distinguish
+	// "no such key" from "the cluster is angry at me".
+	GetAPIKey(ctx context.Context, id string) (types.APIKey, error)
+}
+
+// APIKeyManager is the ES-only mutating companion to APIKeyInspector —
+// the surface that wraps POST /_security/api_key (create) and
+// DELETE /_security/api_key (invalidate). Kept deliberately separate
+// from the read side so esops-doctor and other read-only consumers
+// can depend on the inspector without dragging in the mutating
+// methods. The OS adapter returns ErrUnsupported on every method (no
+// equivalent first-class surface); per-field rules like "role
+// descriptors are ES-only" are absorbed by that blanket refusal.
+//
+// CreateAPIKey is special: the cluster's response is the only place
+// the raw secret is ever surfaced. The adapter returns it as part of
+// types.APIKeyCreated; the business and CLI layers must keep it out
+// of any log sink (audit log, --log-file, slog handler) before
+// printing it to stdout. Redaction tests cover the standard slog
+// path; new callers must not invent field names that bypass the
+// denylist.
+//
+// InvalidateAPIKey accepts one or more ids and surfaces the cluster's
+// per-id outcome: which were invalidated, which were already
+// invalidated, and which the cluster could not act on. The business
+// layer enforces the blast-radius cap before the call lands. ES
+// returns 200 even when none of the requested ids exist — the
+// operator inspects ErrorCount/ErrorDetails to see what failed;
+// there is no synthesised ErrNotFound at the adapter level.
+//
+// Errors:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the adapter is the OS one (or ES with
+//     security disabled)
+//   - generic wrapped error on other 4xx/5xx with the cluster's body
+//     in the message
+type APIKeyManager interface {
+	CreateAPIKey(ctx context.Context, req types.APIKeyCreateRequest) (types.APIKeyCreated, error)
+	InvalidateAPIKey(ctx context.Context, req types.APIKeyInvalidateRequest) (types.APIKeyInvalidated, error)
 }
 
 // ServiceTokenInspector reports the credentials issued for the
@@ -1684,6 +1727,7 @@ type Client struct {
 	AuditLog            AuditLogInspector
 	Realms              RealmsInspector
 	APIKeys             APIKeyInspector
+	APIKeysManage       APIKeyManager
 	ServiceTokens       ServiceTokenInspector
 	FieldCaps           FieldCapsInspector
 	FieldCardinality    FieldCardinalityInspector
