@@ -253,3 +253,76 @@ func TestOptimize_propagatesShardFailures(t *testing.T) {
 		t.Errorf("Failures = %v, want 1 entry", got.Failures)
 	}
 }
+
+// onErrorOptimizer fails for the names listed in failNames and
+// succeeds otherwise. Used to drive the per-index dispatch path
+// under --on-error skip.
+type onErrorOptimizer struct {
+	failNames map[string]error
+	calls     []types.IndexOptimizeRequest
+}
+
+func (o *onErrorOptimizer) ForceMerge(_ context.Context, req types.IndexOptimizeRequest) (types.IndexOptimizeResult, error) {
+	o.calls = append(o.calls, req)
+	if len(req.Indices) == 1 {
+		if err, bad := o.failNames[req.Indices[0]]; bad {
+			return types.IndexOptimizeResult{}, err
+		}
+	}
+	return types.IndexOptimizeResult{
+		Action: "optimize", ShardsTotal: 1, ShardsSuccess: 1,
+	}, nil
+}
+
+func TestOptimize_onErrorSkip_doesNotBypassBlastRadius(t *testing.T) {
+	// 21 indices, default cap of 20 — skip must NOT let the operator past
+	// the limit. The story is explicit: the cap applies to the resolved
+	// set, not the survival set.
+	rows := make([]types.Index, 21)
+	for i := range rows {
+		rows[i] = types.Index{Name: indexName(i), Status: "open"}
+	}
+	insp := &fakeIndexInspector{indices: rows}
+	opt := &onErrorOptimizer{}
+	_, err := index.Optimize(context.Background(), insp, opt, index.OptimizeOptions{
+		Pattern: "rotated-*",
+		OnError: types.OnErrorSkip,
+	})
+	if !errors.Is(err, esopsclient.ErrBlastRadius) {
+		t.Errorf("err = %v, want ErrBlastRadius even under skip", err)
+	}
+	if len(opt.calls) != 0 {
+		t.Errorf("cluster contacted past blast-radius limit under skip: %+v", opt.calls)
+	}
+}
+
+func TestOptimize_onErrorSkip_dispatchesPerIndex(t *testing.T) {
+	insp := &fakeIndexInspector{indices: []types.Index{
+		{Name: "logs-a", Status: "open"},
+		{Name: "logs-b", Status: "open"},
+		{Name: "logs-c", Status: "open"},
+	}}
+	bad := errors.New("forcemerge rejected")
+	opt := &onErrorOptimizer{failNames: map[string]error{"logs-b": bad}}
+	got, err := index.Optimize(context.Background(), insp, opt, index.OptimizeOptions{
+		Pattern: "logs-*",
+		OnError: types.OnErrorSkip,
+	})
+	if err != nil {
+		t.Fatalf("Optimize skip: %v", err)
+	}
+	if got.OnError == nil {
+		t.Fatal("expected OnError summary, got nil")
+	}
+	if got.OnError.Succeeded != 2 || got.OnError.Failed != 1 {
+		t.Errorf("OnError counts succeeded=%d failed=%d, want 2/1",
+			got.OnError.Succeeded, got.OnError.Failed)
+	}
+	if len(opt.calls) != 3 {
+		t.Errorf("expected 3 per-index calls under skip, got %d", len(opt.calls))
+	}
+	// Aggregated shards: 2 successes × {Total:1, Success:1}, 1 failure ignored.
+	if got.ShardsSuccess != 2 || got.ShardsFailed != 0 {
+		t.Errorf("shards aggregate succ=%d failed=%d, want 2/0", got.ShardsSuccess, got.ShardsFailed)
+	}
+}

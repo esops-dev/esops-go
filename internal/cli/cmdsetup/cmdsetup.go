@@ -15,10 +15,12 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/esops-dev/esops-go/internal/logging"
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/cluster"
 	"github.com/esops-dev/esops-go/pkg/config"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 // ErrProtected is returned when a destructive operation targets a
@@ -187,6 +189,36 @@ func resolveFormat(cmd *cli.Command, configDefault string, supported []output.Fo
 		names[i] = string(s)
 	}
 	return "", fmt.Errorf("output format %q is not supported for this command (accepted: %s)", f, strings.Join(names, ", "))
+}
+
+// OnErrorFlags is the canonical flag set every multi-item destructive
+// command surfaces for the --on-error / --verbose policy. Hoisting it
+// here keeps the wording uniform — drift between commands on flag
+// usage text is the kind of bug that shows up in `--help` only.
+func OnErrorFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:  "on-error",
+			Usage: "Per-item failure policy: abort (default) | skip | rollback",
+			Value: string(types.OnErrorAbort),
+		},
+		&cli.BoolFlag{
+			Name:  "verbose",
+			Usage: "Show per-item status in table output (default summary-only)",
+		},
+	}
+}
+
+// OnErrorPolicy parses the --on-error flag value and returns the
+// normalised policy. Empty or default resolves to OnErrorAbort.
+func OnErrorPolicy(cmd *cli.Command) (types.OnErrorPolicy, error) {
+	return onerror.Parse(cmd.String("on-error"))
+}
+
+// Verbose returns the --verbose flag value, defaulted to false when the
+// command did not opt into per-item rendering.
+func Verbose(cmd *cli.Command) bool {
+	return cmd.Bool("verbose")
 }
 
 // ResolveHiddenFlags reconciles --hidden and --exclude-hidden into the

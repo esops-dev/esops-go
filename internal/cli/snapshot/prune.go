@@ -8,9 +8,11 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
 	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/types"
 )
 
 func pruneCommand() *cli.Command {
@@ -29,8 +31,12 @@ a prune that would delete more than 50% of the candidate set in one run
 unless --allow-large-prune is set — the verbose flag is the audit trail.
 
 Mutates cluster state. Against a prod-protected context,
---i-know-this-is-prod is required.`,
-		Flags: []cli.Flag{
+--i-know-this-is-prod is required.
+
+--on-error abort (default) issues a single bulk DELETE; skip
+dispatches one DELETE per resolved snapshot and continues past
+failures. Rollback is refused — snapshot deletion is irreversible.`,
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:     "repository",
 				Required: true,
@@ -60,7 +66,7 @@ Mutates cluster state. Against a prod-protected context,
 				Name:  "continue-on-missing",
 				Usage: "When the bulk DELETE 404s on one or more names (concurrent operator), retry remaining names individually and report the missing ones in the audit trail",
 			},
-		},
+		}, cmdsetup.OnErrorFlags()...),
 		Action:        runPrune,
 		ShellComplete: completion.ForFlags(snapshotFlagSuggesters),
 	}
@@ -73,6 +79,14 @@ func runPrune(ctx context.Context, cmd *cli.Command) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	policy, err := cmdsetup.OnErrorPolicy(cmd)
+	if err != nil {
+		return err
+	}
+	if policy == types.OnErrorRollback {
+		return onerror.RefuseRollback("snapshot prune")
 	}
 
 	olderThanRaw := cmd.String("older-than")
@@ -90,6 +104,7 @@ func runPrune(ctx context.Context, cmd *cli.Command) error {
 		AllowLargePrune:   cmd.Bool("allow-large-prune"),
 		ContinueOnMissing: cmd.Bool("continue-on-missing"),
 		DryRun:            cmd.Bool("dry-run"),
+		OnError:           policy,
 	}
 
 	result, err := esopssnapshot.Prune(ctx, s.Client.Snapshot, s.Client.SnapshotPrune, opts)
@@ -111,5 +126,12 @@ func runPrune(ctx context.Context, cmd *cli.Command) error {
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,
 	)
-	return output.SnapshotPrune(os.Stdout, result, s.Format)
+	if err := output.SnapshotPrune(os.Stdout, result, s.Format); err != nil {
+		return err
+	}
+	output.OnErrorSummaryFooter(os.Stdout, result.OnError, s.Format, cmdsetup.Verbose(cmd))
+	if result.OnError != nil {
+		return onerror.SummaryError(*result.OnError)
+	}
+	return nil
 }

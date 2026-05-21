@@ -297,6 +297,59 @@ func TestParseRetentionDuration(t *testing.T) {
 	}
 }
 
+// onErrorPruner mirrors fakePruner but fails the per-snapshot DELETE
+// for the names in failNames. Used by the --on-error skip dispatch
+// path which invokes one DELETE per resolved snapshot.
+type onErrorPruner struct {
+	calls     []types.SnapshotDeleteRequest
+	failNames map[string]error
+}
+
+func (p *onErrorPruner) DeleteSnapshots(_ context.Context, req types.SnapshotDeleteRequest) (types.SnapshotDeleteResult, error) {
+	p.calls = append(p.calls, req)
+	if len(req.Snapshots) == 1 {
+		if err, bad := p.failNames[req.Snapshots[0]]; bad {
+			return types.SnapshotDeleteResult{}, err
+		}
+	}
+	return types.SnapshotDeleteResult{Repository: req.Repository, Snapshots: append([]string(nil), req.Snapshots...), Acknowledged: true}, nil
+}
+
+func TestPrune_onErrorSkip_dispatchesPerSnapshot(t *testing.T) {
+	now := time.Now()
+	ins := &fakeSnapshotInspector{snaps: pruneFleet(now)}
+	// keep-last 1 → delete every successful snap past the most recent
+	// (3 SUCCESS deletions: 04-29, 04-27, 04-26) plus the FAILED/PARTIAL
+	// being kept by the keep-last window mechanics.
+	bad := errors.New("repository locked")
+	pr := &onErrorPruner{failNames: map[string]error{
+		"nightly-2026-04-27": bad,
+	}}
+	got, err := snapshot.Prune(context.Background(), ins, pr, snapshot.PruneOptions{
+		Repository:      "fs",
+		KeepLast:        1,
+		AllowLargePrune: true,
+		OnError:         types.OnErrorSkip,
+	})
+	if err != nil {
+		t.Fatalf("Prune skip: %v", err)
+	}
+	if got.OnError == nil {
+		t.Fatal("expected OnError summary, got nil")
+	}
+	if got.OnError.Failed != 1 {
+		t.Errorf("expected 1 failure, got %d (items=%v)", got.OnError.Failed, got.OnError.Items)
+	}
+	if got.OnError.Succeeded < 1 {
+		t.Errorf("expected at least 1 success, got %d", got.OnError.Succeeded)
+	}
+	// Cluster must have been contacted once per resolved snapshot.
+	if len(pr.calls) != len(got.OnError.Items) {
+		t.Errorf("calls=%d items=%d, expected one DELETE per item",
+			len(pr.calls), len(got.OnError.Items))
+	}
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

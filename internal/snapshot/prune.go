@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -55,6 +56,12 @@ type PruneOptions struct {
 	AllowLargePrune   bool
 	ContinueOnMissing bool
 	DryRun            bool
+	// OnError is the operator's --on-error selection. The default
+	// (abort) issues one bulk DELETE for the whole resolved set; "skip"
+	// switches to per-snapshot DELETE so a transient 4xx on one entry
+	// doesn't drop the rest of the prune. "rollback" is rejected by
+	// the CLI layer — snapshot deletion is irreversible.
+	OnError types.OnErrorPolicy
 }
 
 // Prune is the business-layer entry point for `esops snapshot prune`. It
@@ -133,6 +140,10 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 		return out, nil
 	}
 
+	if opts.OnError == types.OnErrorSkip {
+		return runPrunePerSnapshot(ctx, pr, repo, out, opts.OnError)
+	}
+
 	res, err := pr.DeleteSnapshots(ctx, types.SnapshotDeleteRequest{
 		Repository: repo,
 		Snapshots:  out.Deleted,
@@ -173,6 +184,46 @@ func Prune(ctx context.Context, ins client.SnapshotInspector, pr client.Snapshot
 	out.Acknowledged = true
 	return out, nil
 }
+
+// runPrunePerSnapshot implements --on-error skip for prune by
+// issuing one DELETE per resolved snapshot. Failures are recorded
+// per-item; the rest of the run continues. Operators reaching for
+// skip on prune typically want "best effort, see what stuck" — the
+// per-item summary is the audit trail.
+//
+// Compared to ContinueOnMissing (which retries the bulk-failed names
+// individually only on 404), skip dispatches per-snapshot from the
+// start and records every per-item outcome. The two are independent
+// modes — when both are set, skip wins because it implies the
+// per-snapshot dispatch ContinueOnMissing would otherwise add.
+func runPrunePerSnapshot(ctx context.Context, pr client.SnapshotPruner, repo string, out types.SnapshotPruneResult, policy types.OnErrorPolicy) (types.SnapshotPruneResult, error) {
+	step := func(ctx context.Context, name string) error {
+		_, err := pr.DeleteSnapshots(ctx, types.SnapshotDeleteRequest{
+			Repository: repo,
+			Snapshots:  []string{name},
+		})
+		return err
+	}
+	sum, _ := onerror.Run(ctx, out.Deleted, identitySnapshot, step, nil, policy)
+	out.OnError = &sum
+	// Trim Deleted to the names the cluster actually acked so a captured
+	// JSON record matches the cluster state after the run.
+	if sum.Failed > 0 {
+		ok := make([]string, 0, len(out.Deleted))
+		for _, item := range sum.Items {
+			if item.Status == types.OnErrorStatusSucceeded {
+				ok = append(ok, item.Name)
+			}
+		}
+		out.Deleted = ok
+	}
+	out.Acknowledged = sum.Succeeded > 0
+	return out, nil
+}
+
+// identitySnapshot is the shared name extractor for onerror.Run when
+// items are plain snapshot-name strings.
+func identitySnapshot(s string) string { return s }
 
 // pruneIndividually issues a per-name DELETE for each snapshot the bulk
 // call refused. ErrNotFound becomes a "missing, skipped" entry; any

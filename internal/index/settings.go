@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -105,6 +106,13 @@ type SettingsUpdateOptions struct {
 	PreserveExisting  bool
 	IgnoreUnavailable bool
 	DryRun            bool
+	// OnError is the operator's --on-error selection. The default
+	// (abort) issues a single bulk PutSettings; "skip" dispatches one
+	// PUT per resolved index so one rejected setting on a single index
+	// doesn't take the whole sweep down. "rollback" is rejected by the
+	// CLI layer (settings rollback needs prior-values capture, which
+	// is tracked as a follow-up).
+	OnError types.OnErrorPolicy
 }
 
 // UpdateSettings is the business-layer entry point for `esops index
@@ -141,6 +149,10 @@ func UpdateSettings(ctx context.Context, su client.IndexSettingsUpdater, opts Se
 		}, nil
 	}
 
+	if opts.OnError == types.OnErrorSkip {
+		return runSettingsSetPerIndex(ctx, su, indices, body, opts)
+	}
+
 	res, err := su.PutSettings(ctx, types.IndexSettingsUpdateRequest{
 		Indices:           indices,
 		Body:              body,
@@ -157,6 +169,33 @@ func UpdateSettings(ctx context.Context, su client.IndexSettingsUpdater, opts Se
 		res.Indices = indices
 	}
 	return res, nil
+}
+
+// runSettingsSetPerIndex implements --on-error skip for settings
+// updates by issuing one PUT per resolved index. Result.Acknowledged
+// flips to true when at least one index succeeded; the precise picture
+// is in the per-item OnError.Items slice.
+func runSettingsSetPerIndex(ctx context.Context, su client.IndexSettingsUpdater, indices []string, body []byte, opts SettingsUpdateOptions) (types.IndexSettingsUpdateResult, error) {
+	step := func(ctx context.Context, name string) error {
+		_, err := su.PutSettings(ctx, types.IndexSettingsUpdateRequest{
+			Indices:           []string{name},
+			Body:              body,
+			PreserveExisting:  opts.PreserveExisting,
+			IgnoreUnavailable: opts.IgnoreUnavailable,
+		})
+		return err
+	}
+	sum, _ := onerror.Run(ctx, indices, identityString, step, nil, opts.OnError)
+	// Mirror the bulk live path's result shape — Body is only echoed
+	// back on dry-run (where the operator is verifying the body that
+	// would have been sent). Emitting it here too would diverge from
+	// the abort-path output for the same call.
+	return types.IndexSettingsUpdateResult{
+		Action:       "settings-update",
+		Indices:      indices,
+		Acknowledged: sum.Succeeded > 0,
+		OnError:      &sum,
+	}, nil
 }
 
 // buildSettingsBody resolves Body / KeyValues into the JSON body the

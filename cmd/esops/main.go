@@ -10,6 +10,7 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli"
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/pkg/client"
 )
 
@@ -23,7 +24,12 @@ func main() {
 	if err == nil {
 		return
 	}
-	fmt.Fprintln(os.Stderr, err)
+	// onerror.ExitError signals "command rendered its summary on stdout,
+	// just exit non-zero" — printing the wrapper message to stderr on
+	// top of the rendered summary would be noise.
+	if !onerror.IsExitError(err) {
+		fmt.Fprintln(os.Stderr, err)
+	}
 	os.Exit(exitCode(err))
 }
 

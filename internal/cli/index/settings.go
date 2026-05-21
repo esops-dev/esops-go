@@ -10,6 +10,7 @@ import (
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
 	esopsindex "github.com/esops-dev/esops-go/internal/index"
+	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/internal/output"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -142,8 +143,13 @@ that echoes the body that would have been sent. Against a prod-
 protected context, --i-know-this-is-prod is required.
 
 The match-everything shortcuts ('*' and '_all') are refused outright;
-name a pattern that matches the indices you intend to mutate.`,
-		Flags: []cli.Flag{
+name a pattern that matches the indices you intend to mutate.
+
+--on-error abort (default) issues a single bulk PUT; skip dispatches
+one PUT per resolved index and continues past failures. Rollback
+isn't supported here yet — undo would require capturing prior values
+per index up-front, tracked as a follow-up.`,
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:     "index",
 				Required: true,
@@ -169,7 +175,7 @@ name a pattern that matches the indices you intend to mutate.`,
 				Name:  "ignore-unavailable",
 				Usage: "Treat missing indices as a no-op instead of a 404 error",
 			},
-		},
+		}, cmdsetup.OnErrorFlags()...),
 		Action: runSettingsSet,
 		ShellComplete: completion.ForFlags(map[string]completion.Suggester{
 			"index": completion.SuggestIndices,
@@ -184,6 +190,19 @@ func runSettingsSet(ctx context.Context, cmd *cli.Command) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	policy, err := cmdsetup.OnErrorPolicy(cmd)
+	if err != nil {
+		return err
+	}
+	if policy == types.OnErrorRollback {
+		// settings rollback would require capturing prior values per
+		// index up-front, which the IndexSettingsInspector capability
+		// supports but the business layer doesn't yet thread through.
+		// Refused here so the operator gets a clear "not yet" error
+		// instead of silently falling back to abort.
+		return onerror.RefuseRollback("index settings set")
 	}
 
 	body, err := resolveBody(cmd.String("body"), cmd.String("from-file"))
@@ -202,6 +221,7 @@ func runSettingsSet(ctx context.Context, cmd *cli.Command) error {
 		PreserveExisting:  cmd.Bool("preserve-existing"),
 		IgnoreUnavailable: cmd.Bool("ignore-unavailable"),
 		DryRun:            cmd.Bool("dry-run"),
+		OnError:           policy,
 	}
 	result, err := esopsindex.UpdateSettings(ctx, s.Client.IndexSettingsSet, opts)
 	if err != nil {
@@ -213,7 +233,14 @@ func runSettingsSet(ctx context.Context, cmd *cli.Command) error {
 		"dry_run", result.DryRun,
 		"acknowledged", result.Acknowledged,
 	)
-	return output.IndexSettingsUpdate(os.Stdout, result, s.Format)
+	if err := output.IndexSettingsUpdate(os.Stdout, result, s.Format); err != nil {
+		return err
+	}
+	output.OnErrorSummaryFooter(os.Stdout, result.OnError, s.Format, cmdsetup.Verbose(cmd))
+	if result.OnError != nil {
+		return onerror.SummaryError(*result.OnError)
+	}
+	return nil
 }
 
 // resolveBody reads the settings body from --body (literal) or
