@@ -9,9 +9,9 @@ import "testing"
 
 func TestHostPortFromURL(t *testing.T) {
 	cases := []struct {
-		in       string
-		want     string
-		wantOK   bool
+		in     string
+		want   string
+		wantOK bool
 	}{
 		{in: "", want: "", wantOK: false},
 		{in: "http://host:9200", want: "host:9200", wantOK: true},

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/ops"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

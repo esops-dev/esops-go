@@ -49,7 +49,7 @@ var alwaysSecretKeys = []string{
 // nested `password` field can extend this list, but the default leans
 // toward not lying about non-secret data.
 var topLevelSecretKeys = []string{
-	"key",        // azure plugin (inline)
+	"key", // azure plugin (inline)
 	"password",
 	"token",
 	"credential",

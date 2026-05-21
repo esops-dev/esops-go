@@ -19,10 +19,10 @@ type fakePolicyManager struct {
 	listOut   []types.SnapshotPolicy
 	listErr   error
 
-	gotPut       types.SnapshotPolicyPutRequest
-	putOut       types.SnapshotPolicyPutResult
-	putErr       error
-	putCalled    bool
+	gotPut    types.SnapshotPolicyPutRequest
+	putOut    types.SnapshotPolicyPutResult
+	putErr    error
+	putCalled bool
 
 	gotDelete    types.SnapshotPolicyDeleteRequest
 	deleteOut    types.SnapshotPolicyDeleteResult
@@ -149,10 +149,10 @@ func TestPutPolicy_emptyBodyRejected(t *testing.T) {
 func TestPutPolicy_nonJSONObjectRejected(t *testing.T) {
 	fake := &fakePolicyManager{}
 	cases := []string{
-		`[]`,        // array, not object
-		`"hello"`,   // string
-		`not json`,  // not parseable
-		`123`,       // number
+		`[]`,       // array, not object
+		`"hello"`,  // string
+		`not json`, // not parseable
+		`123`,      // number
 	}
 	for _, body := range cases {
 		_, err := snapshot.PutPolicy(context.Background(), fake, snapshot.PolicyPutOptions{

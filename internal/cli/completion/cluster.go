@@ -33,7 +33,7 @@ import (
 // roadmap entry and surfaced on the flag definitions in
 // internal/cli/root.go.
 const (
-	DefaultCompleteTimeout = 500 * time.Millisecond
+	DefaultCompleteTimeout  = 500 * time.Millisecond
 	DefaultCompleteCacheTTL = 30 * time.Second
 )
 
@@ -490,4 +490,3 @@ func writeCache(contextName, kind string, names []string, ttl time.Duration) {
 		_ = os.Remove(tmpPath)
 	}
 }
-

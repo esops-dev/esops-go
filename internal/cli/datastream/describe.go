@@ -79,7 +79,7 @@ func runDescribe(ctx context.Context, cmd *cli.Command) error {
 		showIndices = &v
 	}
 
-	return watch.Run(ctx, cmd, "esops datastream describe", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops datastream describe", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		desc, err := esopsdatastream.Describe(ctx, caps, esopsdatastream.DescribeOptions{Name: name})
 		if err != nil {
 			return err

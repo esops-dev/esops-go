@@ -81,8 +81,8 @@ type Endpoint struct {
 type EndpointAuth struct {
 	Username string
 	Password string
-	Token    string  // bearer token; rendered as Authorization: Bearer <t>
-	APIKey   string  // ES api key; rendered as Authorization: ApiKey <k>
+	Token    string // bearer token; rendered as Authorization: Bearer <t>
+	APIKey   string // ES api key; rendered as Authorization: ApiKey <k>
 }
 
 // remoteHeaders renders an EndpointAuth into the `headers` map the

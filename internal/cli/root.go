@@ -21,10 +21,10 @@ import (
 	pipelinecmd "github.com/esops-dev/esops-go/internal/cli/pipeline"
 	snapshotcmd "github.com/esops-dev/esops-go/internal/cli/snapshot"
 	transformcmd "github.com/esops-dev/esops-go/internal/cli/transform"
-	"github.com/esops-dev/esops-go/pkg/client"
-	"github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/internal/version"
+	"github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/config"
 )
 
 // Run builds and executes the root command. Errors bubble up to main,
@@ -102,11 +102,11 @@ func wrapUsageError(err error) error {
 	}
 	msg := err.Error()
 	for _, prefix := range []string{
-		"Required flag ",            // single missing required flag
-		"Required flags ",           // multiple missing required flags
-		"flag provided but not defined", // unknown flag
-		"flag needs an argument",        // bare --foo with a string flag
-		"option ",                       // mutually-exclusive flag groups
+		"Required flag ",                          // single missing required flag
+		"Required flags ",                         // multiple missing required flags
+		"flag provided but not defined",           // unknown flag
+		"flag needs an argument",                  // bare --foo with a string flag
+		"option ",                                 // mutually-exclusive flag groups
 		"one of these flags needs to be provided", // exclusive-required group
 	} {
 		if strings.Contains(msg, prefix) {

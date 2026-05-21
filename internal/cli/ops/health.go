@@ -29,7 +29,7 @@ func runHealth(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	return watch.Run(ctx, cmd, "esops ops health", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops ops health", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		h, err := esopsops.Health(ctx, s.Client.Health)
 		if err != nil {
 			return err

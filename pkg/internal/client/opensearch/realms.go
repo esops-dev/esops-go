@@ -73,12 +73,12 @@ type osSecurityDynamicWire struct {
 // on the plugin version, and a missing key is distinct from
 // "explicitly false / zero".
 type osAuthcDomainWire struct {
-	Order               *json.RawMessage          `json:"order"`
-	HTTPEnabled         *json.RawMessage          `json:"http_enabled"`
-	TransportEnabled    *json.RawMessage          `json:"transport_enabled"`
-	HTTPAuthenticator   osAuthnComponentWire      `json:"http_authenticator"`
-	AuthenticationBack  osAuthnComponentWire      `json:"authentication_backend"`
-	Description         string                    `json:"description"`
+	Order              *json.RawMessage     `json:"order"`
+	HTTPEnabled        *json.RawMessage     `json:"http_enabled"`
+	TransportEnabled   *json.RawMessage     `json:"transport_enabled"`
+	HTTPAuthenticator  osAuthnComponentWire `json:"http_authenticator"`
+	AuthenticationBack osAuthnComponentWire `json:"authentication_backend"`
+	Description        string               `json:"description"`
 }
 
 // osAuthnComponentWire is the {type, ...} envelope shared by

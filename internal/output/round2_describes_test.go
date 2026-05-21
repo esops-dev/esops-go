@@ -304,8 +304,8 @@ func TestTransformDescribe_textHasSections(t *testing.T) {
 
 func TestTransformDescribe_jsonRoundTrips(t *testing.T) {
 	d := types.TransformDescription{
-		Name: "agg-1",
-		Info: types.Transform{Name: "agg-1", Source: "logs"},
+		Name:  "agg-1",
+		Info:  types.Transform{Name: "agg-1", Source: "logs"},
 		Stats: &types.TransformStats{Name: "agg-1", State: "started"},
 	}
 	var buf bytes.Buffer

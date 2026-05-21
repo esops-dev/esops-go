@@ -38,7 +38,7 @@ func runNodes(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	return watch.Run(ctx, cmd, "esops ops nodes", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops ops nodes", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		nodes, err := esopsops.Nodes(ctx, s.Client.Nodes)
 		if err != nil {
 			return err

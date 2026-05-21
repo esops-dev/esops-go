@@ -21,8 +21,8 @@ import (
 	es "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
-	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	esopsclient "github.com/esops-dev/esops-go/pkg/client"
+	"github.com/esops-dev/esops-go/pkg/internal/auth"
 	"github.com/esops-dev/esops-go/pkg/internal/clientutil"
 	"github.com/esops-dev/esops-go/pkg/types"
 )

@@ -118,4 +118,3 @@ func validateShrinkOptions(opts ShrinkOptions) error {
 	}
 	return nil
 }
-

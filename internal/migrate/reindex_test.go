@@ -541,4 +541,3 @@ func TestReindex_ResumeWithNoStateIsUsageError(t *testing.T) {
 		t.Fatalf("expected ErrUsage on missing state, got %v", err)
 	}
 }
-

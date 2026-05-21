@@ -111,7 +111,7 @@ func runILMDescribe(ctx context.Context, cmd *cli.Command) error {
 		Dialect: string(s.Client.Info.Dialect),
 	}
 
-	return watch.Run(ctx, cmd, "esops index ilm describe", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops index ilm describe", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		desc, err := esopsindex.DescribeILM(ctx, caps, esopsindex.ILMDescribeOptions{Name: name})
 		if err != nil {
 			return err

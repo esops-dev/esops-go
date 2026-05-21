@@ -11,12 +11,12 @@ import (
 )
 
 type descSnapshotInspector struct {
-	rows   []types.Snapshot
-	repos  []types.SnapshotRepository
-	status types.SnapshotStatus
-	listErr     error
-	statusErr   error
-	repoErr     error
+	rows      []types.Snapshot
+	repos     []types.SnapshotRepository
+	status    types.SnapshotStatus
+	listErr   error
+	statusErr error
+	repoErr   error
 }
 
 func (f *descSnapshotInspector) Repositories(_ context.Context, _ types.SnapshotRepositoryFilter) ([]types.SnapshotRepository, error) {

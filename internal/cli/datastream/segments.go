@@ -76,7 +76,7 @@ func runSegments(ctx context.Context, cmd *cli.Command) error {
 		MinSegments: cmd.Int("min-segments"),
 		Sort:        sortKey,
 	}
-	return watch.Run(ctx, cmd, "esops datastream segments", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops datastream segments", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		report, err := esopsdatastream.Segments(ctx, s.Client.DataStream, s.Client.Indices, s.Client.Segments, opts)
 		if err != nil {
 			return err

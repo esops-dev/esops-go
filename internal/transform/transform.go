@@ -308,10 +308,10 @@ func validateBodyShape(body map[string]any, dialect types.Dialect) error {
 // removing it — without this flag the cluster refuses to delete a
 // started one.
 type DeleteOptions struct {
-	Pattern        string
-	MaxTransforms  int
-	ForceStop      bool
-	DryRun         bool
+	Pattern       string
+	MaxTransforms int
+	ForceStop     bool
+	DryRun        bool
 }
 
 // Delete removes one or more transforms by id or pattern.

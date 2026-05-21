@@ -12,9 +12,9 @@ import (
 
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
-	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/output"
 	esopssnapshot "github.com/esops-dev/esops-go/internal/snapshot"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 

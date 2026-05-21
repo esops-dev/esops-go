@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 	"github.com/esops-dev/esops-go/internal/output"
+	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 )
 
 func sampleConfig() esopsconfig.Config {

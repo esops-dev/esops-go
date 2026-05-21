@@ -7,9 +7,9 @@ import (
 // Shared ShellComplete maps for `ops *` subcommands. The flag-name
 // conventions are stable across the ops tree:
 //
-//   --index  → SuggestIndices (single or comma-joined patterns)
-//   --node   → SuggestNodes   (a single node name)
-//   --nodes  → SuggestNodes   (comma-joined; same source set)
+//	--index  → SuggestIndices (single or comma-joined patterns)
+//	--node   → SuggestNodes   (a single node name)
+//	--nodes  → SuggestNodes   (comma-joined; same source set)
 //
 // Hoisted because the same flags appear on a dozen call sites and
 // drift between them would be a real maintenance trap.

@@ -10,9 +10,9 @@ import (
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/cli/watch"
-	"github.com/esops-dev/esops-go/pkg/client"
 	esopsops "github.com/esops-dev/esops-go/internal/ops"
 	"github.com/esops-dev/esops-go/internal/output"
+	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -84,7 +84,7 @@ func runTasksList(ctx context.Context, cmd *cli.Command) error {
 		Detailed:     cmd.Bool("detailed"),
 	}
 
-	return watch.Run(ctx, cmd, "esops ops tasks list", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops ops tasks list", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		// NDJSON takes the streaming path: rows reach stdout as the
 		// cluster's response is decoded so a fleet running thousands
 		// of concurrent tasks doesn't have to be buffered before the

@@ -125,7 +125,7 @@ func TestRedactRepositorySettings_nestedAmbiguousNamesAreNotRedacted(t *testing.
 		Name: "x", Type: "custom",
 		Settings: map[string]any{
 			"oauth": map[string]any{
-				"token": "issuer-alias",  // public
+				"token": "issuer-alias", // public
 				"scope": "snapshots:read",
 			},
 		},

@@ -71,7 +71,7 @@ func sampleSnapshots() []types.Snapshot {
 
 func TestParseSort(t *testing.T) {
 	cases := map[string]types.SnapshotSort{
-		"":          types.SnapshotSortStartTime,
+		"":           types.SnapshotSortStartTime,
 		"start_time": types.SnapshotSortStartTime,
 		"NAME":       types.SnapshotSortName,
 		"duration":   types.SnapshotSortDuration,

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	esopsclient "github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/internal/snapshot"
+	esopsclient "github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
 
@@ -274,11 +274,11 @@ func TestPrune_inProgressSnapshotIsAlwaysKept(t *testing.T) {
 
 func TestParseRetentionDuration(t *testing.T) {
 	cases := map[string]time.Duration{
-		"30d":   30 * 24 * time.Hour,
-		"2w":    14 * 24 * time.Hour,
-		"1y":    365 * 24 * time.Hour,
-		"720h":  720 * time.Hour,
-		"":      0,
+		"30d":  30 * 24 * time.Hour,
+		"2w":   14 * 24 * time.Hour,
+		"1y":   365 * 24 * time.Hour,
+		"720h": 720 * time.Hour,
+		"":     0,
 	}
 	for in, want := range cases {
 		got, err := snapshot.ParseRetentionDuration(in)

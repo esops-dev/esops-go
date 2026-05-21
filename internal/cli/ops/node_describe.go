@@ -94,7 +94,7 @@ func runNodeDescribe(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	return watch.Run(ctx, cmd, "esops ops node describe", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops ops node describe", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		desc, err := esopsops.NodeDescribe(ctx, caps, esopsops.NodeDescribeOptions{Name: name})
 		if err != nil {
 			return err

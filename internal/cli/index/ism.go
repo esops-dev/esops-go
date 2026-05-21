@@ -105,7 +105,7 @@ func runISMDescribe(ctx context.Context, cmd *cli.Command) error {
 		Dialect: string(s.Client.Info.Dialect),
 	}
 
-	return watch.Run(ctx, cmd, "esops index ism describe", s.Format, func(ctx context.Context) error {
+	return watch.Run(ctx, cmd, watch.Options{Label: "esops index ism describe", ContextName: s.ContextName, Format: s.Format}, func(ctx context.Context) error {
 		desc, err := esopsindex.DescribeISM(ctx, caps, esopsindex.ISMDescribeOptions{ID: id})
 		if err != nil {
 			return err

@@ -355,11 +355,11 @@ func TestSecretScheme_appliesToAllSecretFields(t *testing.T) {
 	}
 
 	cases := []struct {
-		name     string
-		field    string
-		ref      string
-		want     string
-		extract  func(config.Context) string
+		name    string
+		field   string
+		ref     string
+		want    string
+		extract func(config.Context) string
 	}{
 		{"password file", "password", "${file:" + pwFile + "}", "pw-from-file", func(c config.Context) string { return c.Auth.Password }},
 		{"api_key file", "api_key", "${file:" + keyFile + "}", "key-from-file", func(c config.Context) string { return c.Auth.APIKey }},

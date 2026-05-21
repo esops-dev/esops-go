@@ -4805,4 +4805,3 @@ func DataStreamDelete(w io.Writer, r types.DataStreamDeleteResult, f Format) err
 		return fmt.Errorf("unsupported output format %q", f)
 	}
 }
-
