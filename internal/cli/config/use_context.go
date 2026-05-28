@@ -9,6 +9,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/esops-dev/esops-go/internal/audit"
 	esopsconfig "github.com/esops-dev/esops-go/pkg/config"
 )
 
@@ -45,6 +46,13 @@ func runUseContext(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("expected 1 argument (context name), got %d", args.Len())
 	}
 	name := args.First()
+
+	// use-context mutates the on-disk config file and so changes the
+	// next esops invocation's cluster target. It does not go through
+	// cmdsetup.Prepare (no cluster involved), so audit.Begin has to
+	// be called explicitly. cluster_url stays empty — there's no
+	// cluster touched here, only a local file write.
+	audit.Begin("config use-context", os.Args, name, "", false)
 
 	cfg, path, err := esopsconfig.LoadDefault(cmd.String("config"))
 	if err != nil {

@@ -2,10 +2,14 @@ package onerror
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/esops-dev/esops-go/internal/audit"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
 )
@@ -228,3 +232,55 @@ func TestExitErrorWrapsSummary(t *testing.T) {
 }
 
 func identity(s string) string { return s }
+
+// TestRunWritesAuditSummary verifies that onerror.Run pushes the
+// final per-item tallies into the audit record on every exit path —
+// here exercised by a mixed succeed/fail run under --on-error skip.
+// The spec requires multi-item commands to record
+// succeeded/failed/rolled-back counts in the audit summary; this is
+// the single-point assertion that the deferred audit.Summary call
+// actually fires.
+func TestRunWritesAuditSummary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	audit.Reset()
+	audit.Init(path)
+	audit.Begin("index optimize", []string{"esops", "index", "optimize", "logs-*"}, "local-es", "http://localhost:9200", false)
+	defer audit.Reset()
+
+	step := func(_ context.Context, item string) error {
+		if item == "fail" {
+			return fmt.Errorf("boom")
+		}
+		return nil
+	}
+	_, err := Run(context.Background(), []string{"ok-1", "fail", "ok-2"}, identity, step, nil, types.OnErrorSkip)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	audit.Finish(1, "on-error-policy")
+
+	data, err := os.ReadFile(path) // #nosec G304 -- test-local path under TempDir
+	if err != nil {
+		t.Fatalf("read audit file: %v", err)
+	}
+	var rec struct {
+		Summary map[string]any `json:"summary"`
+	}
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("unmarshal audit record: %v", err)
+	}
+	if rec.Summary == nil {
+		t.Fatal("audit record carried no summary")
+	}
+	if rec.Summary["policy"] != "skip" {
+		t.Errorf("summary.policy = %v, want skip", rec.Summary["policy"])
+	}
+	if rec.Summary["succeeded"].(float64) != 2 {
+		t.Errorf("summary.succeeded = %v, want 2", rec.Summary["succeeded"])
+	}
+	if rec.Summary["failed"].(float64) != 1 {
+		t.Errorf("summary.failed = %v, want 1", rec.Summary["failed"])
+	}
+}

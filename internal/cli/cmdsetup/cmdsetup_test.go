@@ -297,3 +297,46 @@ func TestVerbose_setExplicit(t *testing.T) {
 		t.Error("--verbose set: Verbose() returned false")
 	}
 }
+
+// cmdWithTree runs a stub esops-shaped app — a root "esops" command
+// with a nested "ops health" subcommand — so commandPath can be
+// tested against the same shape urfave/cli builds for the real CLI.
+func cmdWithTree(t *testing.T, argv ...string) *cli.Command {
+	t.Helper()
+	var captured *cli.Command
+	root := &cli.Command{
+		Name: "esops",
+		Commands: []*cli.Command{
+			{
+				Name: "ops",
+				Commands: []*cli.Command{
+					{
+						Name: "health",
+						Action: func(_ context.Context, c *cli.Command) error {
+							captured = c
+							return nil
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := root.Run(context.Background(), argv); err != nil {
+		t.Fatalf("root.Run: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("test stub did not capture cmd")
+	}
+	return captured
+}
+
+func TestCommandPath_stripsRootBinaryName(t *testing.T) {
+	// "esops ops health" must record as "ops health" — the spec's
+	// command-field example shows "migrate reindex", not "esops
+	// migrate reindex".
+	cmd := cmdWithTree(t, "esops", "ops", "health")
+	got := commandPath(cmd)
+	if got != "ops health" {
+		t.Errorf("commandPath = %q, want %q", got, "ops health")
+	}
+}

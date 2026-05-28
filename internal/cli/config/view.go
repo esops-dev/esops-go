@@ -38,6 +38,7 @@ type viewDefaults struct {
 	LogLevel   string `json:"log_level,omitempty" yaml:"log_level,omitempty"`
 	LogFormat  string `json:"log_format,omitempty" yaml:"log_format,omitempty"`
 	LogFile    string `json:"log_file,omitempty" yaml:"log_file,omitempty"`
+	AuditFile  string `json:"audit_file,omitempty" yaml:"audit_file,omitempty"`
 	Timeout    string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	MaxRetries int    `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
 	Compress   bool   `json:"compress,omitempty" yaml:"compress,omitempty"`
@@ -195,6 +196,7 @@ func projectDefaults(d esopsconfig.Defaults) *viewDefaults {
 		LogLevel:   d.LogLevel,
 		LogFormat:  d.LogFormat,
 		LogFile:    d.LogFile,
+		AuditFile:  d.AuditFile,
 		Timeout:    durationString(d.Timeout),
 		MaxRetries: d.MaxRetries,
 		Compress:   d.Compress,

@@ -126,6 +126,7 @@ See [docs/](docs/) for per-command reference.
 
 | Flag | Description |
 |---|---|
+| `--audit-file PATH` | Append one NDJSON audit record per invocation to PATH (off by default) |
 | `--cacert PATH` | Custom CA bundle |
 | `-c, --config PATH` | Config file (env: `ESOPS_CONFIG`) |
 | `--context NAME` | Named cluster from config (alias: `--cluster`) |
@@ -164,6 +165,7 @@ Default mode exits `0` on warnings, `2` on errors; `--strict` treats warnings as
 - [docs/config.md](docs/config.md) — config schema, contexts, secrets
 - [docs/completion.md](docs/completion.md) — shell completion
 - [docs/auth.md](docs/auth.md) — Authentication
+- [docs/audit.md](docs/audit.md) — local audit log
 
 ## Security
 

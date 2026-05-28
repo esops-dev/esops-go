@@ -67,6 +67,7 @@ type Defaults struct {
 	LogLevel   string        `koanf:"log_level"`
 	LogFormat  string        `koanf:"log_format"`
 	LogFile    string        `koanf:"log_file"`
+	AuditFile  string        `koanf:"audit_file"`
 	Timeout    time.Duration `koanf:"timeout"`
 	MaxRetries int           `koanf:"max_retries"`
 	Compress   bool          `koanf:"compress"`

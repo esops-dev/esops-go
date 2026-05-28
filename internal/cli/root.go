@@ -12,6 +12,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/esops-dev/esops-go/internal/audit"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
 	configcmd "github.com/esops-dev/esops-go/internal/cli/config"
 	datastreamcmd "github.com/esops-dev/esops-go/internal/cli/datastream"
@@ -140,6 +141,11 @@ func initLogger(ctx context.Context, cmd *cli.Command) (context.Context, error) 
 			return ctx, err
 		}
 	}
+	// Auditing is initialised after the logger so any open-failure
+	// warnings go through the same sink. An empty path keeps it
+	// disabled; a broken path warns and proceeds without auditing.
+	auditFile := resolveSetting(cmd, "audit-file", defaults.AuditFile, "")
+	audit.Init(auditFile)
 	return ctx, nil
 }
 
@@ -235,6 +241,10 @@ func globalFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:  "log-file",
 			Usage: "Append log lines to PATH instead of stderr (file created with mode 0600; overrides defaults.log_file)",
+		},
+		&cli.StringFlag{
+			Name:  "audit-file",
+			Usage: "Append one NDJSON audit record per invocation to PATH (overrides defaults.audit_file; empty disables)",
 		},
 		&cli.BoolFlag{
 			Name:  "dry-run",

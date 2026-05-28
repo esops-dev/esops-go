@@ -6,6 +6,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/esops-dev/esops-go/internal/audit"
 	"github.com/esops-dev/esops-go/internal/cli/cmdsetup"
 	"github.com/esops-dev/esops-go/internal/cli/completion"
 	"github.com/esops-dev/esops-go/internal/logging"
@@ -153,6 +154,12 @@ func runReindex(ctx context.Context, cmd *cli.Command) error {
 		"warnings", res.Warnings,
 	)
 
+	// Audit summary: the spec calls for {source, target, docs,
+	// requests_per_second}. docs is the sum of created+updated across
+	// every per-index entry — the line operators want when answering
+	// "how much data moved in that reindex run".
+	audit.Summary(reindexAuditSummary(s.Source.Context, s.Target.Context, req.RequestsPerSecond, res))
+
 	if err := output.MigrationReindex(os.Stdout, res, s.Format); err != nil {
 		return err
 	}
@@ -160,4 +167,37 @@ func runReindex(ctx context.Context, cmd *cli.Command) error {
 		return client.ErrDryRunBlocker
 	}
 	return nil
+}
+
+// reindexAuditSummary builds the audit-log payload for a finished
+// reindex run. Matches the field set the spec calls out
+// ({source, target, docs, requests_per_second}) plus a small handful
+// of counts a compliance reviewer reads alongside docs to confirm a
+// run actually moved data. requests_per_second is -1 for unbounded
+// and 0 for "cluster default", which is the same convention the
+// request struct carries — recording it raw keeps the audit record
+// honest about what was actually asked for.
+func reindexAuditSummary(source, target string, rps float64, res types.MigrationReindexResult) map[string]any {
+	var docs, created, updated, deleted, failed int64
+	for _, e := range res.Indices {
+		created += e.Stats.Created
+		updated += e.Stats.Updated
+		deleted += e.Stats.Deleted
+		failed += int64(len(e.Stats.Failures))
+	}
+	docs = created + updated
+	return map[string]any{
+		"source":              source,
+		"target":              target,
+		"docs":                docs,
+		"created":             created,
+		"updated":             updated,
+		"deleted":             deleted,
+		"failed":              failed,
+		"requests_per_second": rps,
+		"indices":             len(res.Indices),
+		"status":              res.Status,
+		"blockers":            res.Blockers,
+		"warnings":            res.Warnings,
+	}
 }
