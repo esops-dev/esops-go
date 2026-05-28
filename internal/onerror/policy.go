@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/esops-dev/esops-go/internal/audit"
 	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/pkg/client"
 	"github.com/esops-dev/esops-go/pkg/types"
@@ -95,6 +96,11 @@ func Run[T any](ctx context.Context, items []T, name func(T) string, step Step[T
 	}
 
 	sum := types.OnErrorSummary{Policy: policy, Items: make([]types.OnErrorItemResult, 0, len(items))}
+	// Push the final per-item tallies into the audit record on every
+	// exit path — abort early-return, ctx.Done, rollback trigger, and
+	// the normal completion at the bottom. audit.Summary is a no-op
+	// when auditing is disabled, so the unconditional call is cheap.
+	defer func() { audit.Summary(auditSummary(sum)) }()
 
 	for i, item := range items {
 		select {
@@ -135,6 +141,21 @@ func Run[T any](ctx context.Context, items []T, name func(T) string, step Step[T
 	}
 
 	return sum, nil
+}
+
+// auditSummary projects an OnErrorSummary down to the count-only shape
+// the spec asks for in audit records — policy plus
+// succeeded/failed/rolled-back/rollback-failed. Per-item names and
+// error strings stay in the regular log; the audit record keeps the
+// counts that compliance reviewers actually scan for.
+func auditSummary(s types.OnErrorSummary) map[string]any {
+	return map[string]any{
+		"policy":          string(s.Policy),
+		"succeeded":       s.Succeeded,
+		"failed":          s.Failed,
+		"rolled_back":     s.RolledBack,
+		"rollback_failed": s.RollbackFailed,
+	}
 }
 
 // undoItems walks the items the caller already marked succeeded and

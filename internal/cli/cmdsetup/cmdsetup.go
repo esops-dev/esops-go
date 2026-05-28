@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/esops-dev/esops-go/internal/audit"
 	"github.com/esops-dev/esops-go/internal/logging"
 	"github.com/esops-dev/esops-go/internal/onerror"
 	"github.com/esops-dev/esops-go/internal/output"
@@ -117,6 +119,14 @@ func Prepare(ctx context.Context, cmd *cli.Command, spec Spec) (Setup, error) {
 	}
 	ApplyContextOverrides(&cc, cmd)
 
+	// Audit start: capture every detail we can record before the
+	// cluster probe. The probe is the most likely place for a slow
+	// command to die (unreachable, auth), so starting the clock here
+	// gives operators a realistic duration when a 30s timeout fires.
+	// SanitiseURL strips userinfo / paths / query strings inside Begin
+	// so creds embedded in the URL never reach the audit file.
+	audit.Begin(commandPath(cmd), os.Args, name, firstAddress(cc), cmd.Bool("dry-run"))
+
 	if err := CheckProtection(cc, cmd, spec.Destructive); err != nil {
 		return Setup{}, err
 	}
@@ -143,6 +153,41 @@ func Prepare(ctx context.Context, cmd *cli.Command, spec Spec) (Setup, error) {
 		Format:      format,
 		Client:      c,
 	}, nil
+}
+
+// firstAddress returns the first configured URL for the context, or
+// the empty string when none is set. The audit log records only the
+// first URL — operators rarely run against a context with mixed-host
+// URLs in practice, and the field is purely informational.
+func firstAddress(cc config.Context) string {
+	addrs := cc.Addresses()
+	if len(addrs) == 0 {
+		return ""
+	}
+	return addrs[0]
+}
+
+// commandPath returns the subcommand path with the binary name
+// stripped — "ops health" rather than "esops ops health". Matches the
+// spec's command-field example so an audit consumer that splits on
+// spaces gets the subcommand tree without having to special-case the
+// root token. cmd.FullName always includes the root name; the only
+// way to know what to strip is to walk to the root.
+func commandPath(cmd *cli.Command) string {
+	full := cmd.FullName()
+	root := cmd.Root()
+	if root == nil || root.Name == "" {
+		return full
+	}
+	prefix := root.Name + " "
+	full = strings.TrimPrefix(full, prefix)
+	if full == root.Name {
+		// Action ran on the root command itself (uncommon; only
+		// happens when a future top-level Action is added). Return
+		// empty so consumers don't see a one-token "esops" record.
+		return ""
+	}
+	return full
 }
 
 // ApplyContextOverrides layers command-line flags on top of the resolved

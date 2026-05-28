@@ -28,6 +28,10 @@ defaults:
   log_level: info                 # debug | info | warn | error
   log_format: text                # text | json  (auto-switches to json under CI=true)
   log_file: ./esops.log           # append logs here instead of stderr (mode 0600)
+  # audit_file: ~/.local/state/esops/audit.log
+  # One NDJSON record per esops invocation: who ran what against which
+  # cluster, when, with what outcome. Off by default. File is created
+  # with mode 0600; rotate with logrotate's `copytruncate`.
   timeout: 30s
   max_retries: 3
   compress: false                 # gzip request/response bodies
