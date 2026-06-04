@@ -8,7 +8,7 @@ require (
 	github.com/elastic/go-elasticsearch/v9 v9.4.1
 	github.com/knadh/koanf/parsers/yaml v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
-	github.com/knadh/koanf/v2 v2.3.4
+	github.com/knadh/koanf/v2 v2.3.5
 	github.com/opensearch-project/opensearch-go/v4 v4.6.0
 	github.com/urfave/cli/v3 v3.9.0
 	github.com/zalando/go-keyring v0.2.8
