@@ -103,6 +103,47 @@ $ esops migrate verify --source local-es --target local-os --to-suffix=-v2
 - Confirm reindex completed successfully before cutover
 - Quick post-reindex sanity check
 
+### esops migrate verify shadow
+
+Doc-count parity says nothing about mapping drift, analyzer changes, or score-affecting configuration. Shadow-read verification replays a set of queries against both clusters and diffs the top-K hits — catching the silent regressions that show up as "the same query returns different hits after migration".
+
+```sh
+$ esops migrate verify shadow --source local-es --target local-os \
+  --indices 'esops-products' --queries ./queries.ndjson
+```
+
+Provide exactly one query source:
+
+- `--queries FILE` — NDJSON of `{"name": "...", "body": {...}}` records,
+  one per line; `body` is a search request. Use `-` to read from stdin.
+- `--from-slowlog FILE` — a search-slowlog export (plain-text or JSON).
+  Distinct query bodies are extracted and the top `--slowlog-top`
+  (default 20) by frequency are replayed.
+
+The diff compares the ordered document IDs in the top `--top-k` (default 100) hits. **Set membership** always drives the per-query status. **Ordering** does too, but only for queries that carry an explicit `sort` — without one the cluster orders score ties by internal doc id, which two clusters with different segment layouts legitimately disagree on. For a reliable order check, give the query a deterministic sort with a unique tiebreaker (e.g. `[{"ts":"desc"}, {"_id":"asc"}]`). **Score differences** are reported but do not fail the check (they are expected across versions and analyzer changes) unless `--strict-scores` is set.
+
+`--top-k` is bounded by the target index's `index.max_result_window` (default 10000); a larger value makes the cluster reject each query, which surfaces as a per-query error row.
+
+**Key flags**
+- `--source`, `--target` (required), `--indices` — same index pattern
+  resolved on both clusters (empty = cluster-wide)
+- `--top-k` (default 100), `--concurrency` (default 4),
+  `--query-timeout` (default 10s)
+- `--strict-scores` — treat a score divergence as a mismatch
+- `--allow-mismatch` — report mismatches but exit 0 instead of 7
+- `--include-query-body` — echo each query body into the output. Off by
+  default: bodies may carry PII (user IDs in filters, etc.)
+
+**Output** — `table` (default), `wide`, `json`, `yaml`, and `ndjson`
+(one per-query record per line, for `| jq` pipelines).
+
+**Exit codes**
+- `0` — every query matched (or only score differences, without
+  `--strict-scores`)
+- `1` — at least one query failed to execute against a cluster
+- `7` — at least one query mismatched (different hit set/order); suppress
+  with `--allow-mismatch`
+
 ---
 
 ## esops migrate cutover

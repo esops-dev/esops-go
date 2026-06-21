@@ -818,6 +818,39 @@ type DocumentInspector interface {
 	DocumentsStream(ctx context.Context, req types.DocumentListRequest, yield func(types.Document) error) error
 }
 
+// SearchExecutor wraps POST /<indices>/_search for shadow-read
+// verification (`migrate verify shadow`). Where DocumentInspector is
+// deliberately restricted to "list documents by id" on operator-managed
+// metadata indices, SearchExecutor replays an *arbitrary* operator-
+// supplied search body against two clusters so their result sets can be
+// diffed after a migration — doc-count parity proves nothing about
+// mapping drift, analyzer changes, or score-affecting configuration.
+//
+// Read-only by construction: there is no writer sibling and we do not
+// plan to add one, so a downstream "no mutating capability imports"
+// guard stays a single grep. The capability surfaces only hit identity
+// (_index, _id) and _score — never _source — because shadow reads diff
+// which documents a query returns and in what order, not the document
+// bodies. The adapter forces _source=false and track_total_hits=true on
+// the wire and merges req.Size into the body so a caller-supplied
+// size/from/_source cannot change the comparison window.
+//
+// Both ES and OS expose the same /_search hit envelope
+// (`{"hits":{"total":{"value":N},"hits":[{_index,_id,_score}, …]}}`),
+// so one capability covers both dialects.
+//
+// Errors mirror DocumentInspector:
+//   - ErrUnreachable on transport failure
+//   - ErrAuth / ErrForbidden on 401/403
+//   - ErrUnsupported when the cluster build stops exposing /_search at
+//     the shape we use
+//   - generic wrapped error on other 4xx/5xx with the cluster's body in
+//     the message (typical cases: a 400 for a malformed query body, or a
+//     404 for a missing index when IgnoreUnavailable is false)
+type SearchExecutor interface {
+	Search(ctx context.Context, req types.SearchRequest) (types.SearchResult, error)
+}
+
 // MappingsInspector wraps GET /<indices>/_mapping — the read-only
 // mapping surface. Both ES and OS expose the same envelope
 // (`{"<index>":{"mappings":{"properties":{...},"_meta":{...},"dynamic":"..."}}}`)
@@ -1712,6 +1745,7 @@ type Client struct {
 	PendingTasks        PendingTasksInspector
 	Deprecations        DeprecationInspector
 	Documents           DocumentInspector
+	Search              SearchExecutor
 	Mappings            MappingsInspector
 	RemoteReindex       RemoteReindexInspector
 	DocCount            DocCounter

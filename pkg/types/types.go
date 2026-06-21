@@ -2643,6 +2643,42 @@ type Document struct {
 	SequenceNumber int64           `json:"sequence_number,omitempty" yaml:"sequence_number,omitempty"`
 }
 
+// SearchRequest is the input to SearchExecutor.Search — replay one
+// operator-supplied search body against a cluster and return the top-K
+// hit identities. Indices is the (possibly wildcarded) index pattern
+// for /<indices>/_search; empty means cluster-wide. Body is the verbatim
+// search request; the adapter merges Size, _source=false and
+// track_total_hits=true into it so a caller-supplied size/from/_source
+// does not change the comparison window. IgnoreUnavailable tolerates a
+// missing index in the pattern rather than failing the whole query.
+type SearchRequest struct {
+	Indices           []string
+	Body              json.RawMessage
+	Size              int
+	IgnoreUnavailable bool
+}
+
+// SearchResultHit is one hit in a SearchResult: document identity plus
+// the relevance score the cluster assigned. _source is intentionally
+// not carried — SearchExecutor exists for shadow-read verification,
+// which diffs hit identity and order, not document bodies. Score is the
+// cluster's `_score`; a null score (e.g. a query that sorts by a field
+// instead of relevance) decodes to 0.
+type SearchResultHit struct {
+	Index string  `json:"index" yaml:"index"`
+	ID    string  `json:"id"    yaml:"id"`
+	Score float64 `json:"score" yaml:"score"`
+}
+
+// SearchResult is the SearchExecutor.Search response. TotalHits is the
+// cluster's total match count (track_total_hits=true) — what the shadow
+// report shows as source_hits/target_hits — and Hits is the ordered
+// top-K window the diff runs over.
+type SearchResult struct {
+	TotalHits int64             `json:"total_hits" yaml:"total_hits"`
+	Hits      []SearchResultHit `json:"hits"       yaml:"hits"`
+}
+
 // IndexMapping is the neutral view of a single index's GET /<index>/_mapping
 // response. Properties holds the cluster's raw `properties` tree as an
 // opaque map — esops's mapping translator walks it directly rather than
@@ -3039,6 +3075,131 @@ type MigrationVerifyResult struct {
 	Status   string                 `json:"status"   yaml:"status"`
 	Blockers int                    `json:"blockers" yaml:"blockers"`
 	Warnings int                    `json:"warnings" yaml:"warnings"`
+}
+
+// Per-query outcome labels for shadow-read verification. Distinct from
+// the ok/warn/block MigrationStatus vocabulary: a shadow query either
+// matched (ok), returned a different hit set/order (mismatch), or could
+// not be replayed against one of the clusters (error).
+const (
+	ShadowStatusOK       = "ok"
+	ShadowStatusMismatch = "mismatch"
+	ShadowStatusError    = "error"
+)
+
+// RawJSON is a JSON document carried verbatim, like json.RawMessage,
+// but with correct multi-format rendering. json.RawMessage is a []byte,
+// so the YAML encoder serialises it as a base64 / byte-sequence blob
+// rather than the document it holds; RawJSON decodes itself for YAML so
+// a captured query body reads as structured YAML, not bytes. JSON
+// rendering is the verbatim passthrough json.RawMessage gives.
+type RawJSON []byte
+
+// MarshalJSON emits the stored bytes verbatim (or null when empty).
+func (r RawJSON) MarshalJSON() ([]byte, error) {
+	if len(r) == 0 {
+		return []byte("null"), nil
+	}
+	return r, nil
+}
+
+// UnmarshalJSON copies the input bytes, mirroring json.RawMessage so the
+// stored document is independent of the decoder's buffer.
+func (r *RawJSON) UnmarshalJSON(b []byte) error {
+	*r = append((*r)[:0], b...)
+	return nil
+}
+
+// MarshalYAML decodes the document so the YAML encoder renders it as a
+// structured mapping. A body that doesn't parse as JSON falls back to
+// its raw string form rather than failing the whole render.
+func (r RawJSON) MarshalYAML() (any, error) {
+	if len(r) == 0 {
+		return nil, nil
+	}
+	var v any
+	if err := json.Unmarshal(r, &v); err != nil {
+		return string(r), nil
+	}
+	return v, nil
+}
+
+// ShadowQuery is one named search replayed against both clusters during
+// `migrate verify shadow`. Body is the verbatim search request the
+// operator supplied (via --queries NDJSON or extracted from a slowlog).
+// The business layer forces the comparison window (size, _source,
+// track_total_hits) onto the body before it reaches the cluster, so the
+// operator only has to express *what* to match, not how many hits to
+// return.
+type ShadowQuery struct {
+	Name string          `json:"name" yaml:"name"`
+	Body json.RawMessage `json:"body" yaml:"body"`
+}
+
+// MigrationShadowRequest is the input to a shadow-read verification run.
+// Indices is the index pattern resolved identically on both clusters
+// (empty = cluster-wide). TopK bounds the per-query hit window the diff
+// runs over. StrictScores promotes a score divergence to a mismatch —
+// off by default because score drift across versions and analyzer
+// changes is expected and not, on its own, a regression. IncludeBody
+// echoes the (potentially PII-bearing) query body into the result;
+// off by default so captured records are safe to share.
+type MigrationShadowRequest struct {
+	SourceContext string
+	TargetContext string
+	Indices       string
+	Queries       []ShadowQuery
+	TopK          int
+	Concurrency   int
+	QueryTimeout  time.Duration
+	StrictScores  bool
+	IncludeBody   bool
+}
+
+// ShadowHit is one hit captured for the diff — document identity plus
+// relevance score. _source is deliberately absent: shadow reads compare
+// which documents a query returns and in what order, not their bodies.
+type ShadowHit struct {
+	ID    string  `json:"id"    yaml:"id"`
+	Score float64 `json:"score" yaml:"score"`
+}
+
+// MigrationShadowEntry is the per-query record. SetDiff counts document
+// IDs present in one cluster's top-K but not the other's (symmetric
+// difference). OrderDiff counts positions where the IDs common to both
+// appear in a different relative order. ScoreDiff counts common IDs
+// whose scores differ beyond a small epsilon — reported always, but it
+// only drives Status under --strict-scores.
+type MigrationShadowEntry struct {
+	Name       string      `json:"name"                   yaml:"name"`
+	SourceHits int64       `json:"source_hits"            yaml:"source_hits"`
+	TargetHits int64       `json:"target_hits"            yaml:"target_hits"`
+	SetDiff    int         `json:"set_diff"               yaml:"set_diff"`
+	OrderDiff  int         `json:"order_diff"             yaml:"order_diff"`
+	ScoreDiff  int         `json:"score_diff"             yaml:"score_diff"`
+	Status     string      `json:"status"                 yaml:"status"`
+	Detail     string      `json:"detail,omitempty"       yaml:"detail,omitempty"`
+	Body       RawJSON     `json:"body,omitempty"         yaml:"body,omitempty"`
+	SourceTopK []ShadowHit `json:"source_top_k,omitempty" yaml:"source_top_k,omitempty"`
+	TargetTopK []ShadowHit `json:"target_top_k,omitempty" yaml:"target_top_k,omitempty"`
+}
+
+// MigrationShadowResult is the full shadow-read report. Status is the
+// neutral ok/block roll-up (block when any query mismatched or errored);
+// Mismatches and Errors break that down so the CLI can pick the exit
+// code (7 for mismatch, generic for error) and --allow-mismatch can
+// downgrade the former without hiding the latter.
+type MigrationShadowResult struct {
+	Action       string                 `json:"action"            yaml:"action"`
+	Source       MigrationEndpoint      `json:"source"            yaml:"source"`
+	Target       MigrationEndpoint      `json:"target"            yaml:"target"`
+	Indices      string                 `json:"indices,omitempty" yaml:"indices,omitempty"`
+	TopK         int                    `json:"top_k"             yaml:"top_k"`
+	StrictScores bool                   `json:"strict_scores"     yaml:"strict_scores"`
+	Queries      []MigrationShadowEntry `json:"queries"           yaml:"queries"`
+	Status       string                 `json:"status"            yaml:"status"`
+	Mismatches   int                    `json:"mismatches"        yaml:"mismatches"`
+	Errors       int                    `json:"errors"            yaml:"errors"`
 }
 
 // MigrationCutoverRequest is the input to a single-cluster atomic
