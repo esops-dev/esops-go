@@ -58,6 +58,7 @@ type Endpoint struct {
 	Mappings         client.MappingsInspector
 	Whitelist        client.RemoteReindexInspector
 	DocCount         client.DocCounter
+	Search           client.SearchExecutor
 	Reindex          client.Reindexer
 	TasksCancel      client.TasksCanceller
 	Health           client.HealthInspector

@@ -338,6 +338,97 @@ func migrationVerifyTable(w io.Writer, r types.MigrationVerifyResult, wide bool)
 	return nil
 }
 
+// MigrationShadow renders a MigrationShadowResult in the requested
+// format. Table shows one row per replayed query — the set/order/score
+// diffs and the operator-readable detail. JSON emits the whole report;
+// NDJSON streams one per-query record per line (so `| jq` can tail a
+// large query set), each carrying the full diff payload.
+func MigrationShadow(w io.Writer, r types.MigrationShadowResult, f Format) error {
+	switch f {
+	case FormatJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(r)
+	case FormatYAML:
+		enc := yaml.NewEncoder(w)
+		enc.SetIndent(2)
+		defer func() { _ = enc.Close() }()
+		return enc.Encode(r)
+	case FormatNDJSON:
+		enc := json.NewEncoder(w)
+		for _, e := range r.Queries {
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
+		}
+		return nil
+	case FormatWide:
+		return migrationShadowTable(w, r, true)
+	case FormatTable, "":
+		return migrationShadowTable(w, r, false)
+	default:
+		return fmt.Errorf("unsupported output format %q", f)
+	}
+}
+
+func migrationShadowTable(w io.Writer, r types.MigrationShadowResult, wide bool) error {
+	_, _ = fmt.Fprintf(w, "SOURCE  context=%s  dialect=%s  version=%s\n",
+		dashIfEmpty(r.Source.Context), dashIfEmpty(r.Source.Dialect),
+		dashIfEmpty(r.Source.Version))
+	_, _ = fmt.Fprintf(w, "TARGET  context=%s  dialect=%s  version=%s\n\n",
+		dashIfEmpty(r.Target.Context), dashIfEmpty(r.Target.Dialect),
+		dashIfEmpty(r.Target.Version))
+
+	if len(r.Queries) == 0 {
+		_, _ = fmt.Fprintln(w, "(no queries to replay)")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "STATUS\tNAME\tSOURCE_HITS\tTARGET_HITS\tSET_DIFF\tORDER_DIFF\tSCORE_DIFF\tDETAIL")
+	for _, e := range r.Queries {
+		detail := dashIfEmpty(e.Detail)
+		if !wide {
+			detail = truncate(detail, 80)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
+			shadowStatusLabel(e.Status),
+			e.Name,
+			e.SourceHits,
+			e.TargetHits,
+			e.SetDiff,
+			e.OrderDiff,
+			e.ScoreDiff,
+			detail,
+		)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(w, "\nSUMMARY  status=%s  mismatches=%d  errors=%d  top_k=%d  strict_scores=%t\n",
+		migrationStatusLabel(r.Status), r.Mismatches, r.Errors, r.TopK, r.StrictScores)
+	return nil
+}
+
+// shadowStatusLabel maps the per-query shadow status to its column form.
+// Distinct from migrationStatusLabel because shadow queries use the
+// ok/mismatch/error vocabulary, not ok/warn/block.
+func shadowStatusLabel(s string) string {
+	switch s {
+	case types.ShadowStatusOK:
+		return "OK"
+	case types.ShadowStatusMismatch:
+		return "MISMATCH"
+	case types.ShadowStatusError:
+		return "ERROR"
+	case "":
+		return "-"
+	default:
+		return s
+	}
+}
+
 // MigrationCutover renders a MigrationCutoverResult in the requested
 // format. The table view shows the per-step sequence — the per-step
 // detail is what an operator pastes into a postmortem when something

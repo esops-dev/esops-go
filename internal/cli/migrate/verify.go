@@ -42,17 +42,26 @@ Verify-then-cutover is one runbook command:
   esops migrate verify  --source es-src --target es-tgt --to-suffix=-v2 \
     && esops migrate cutover --context es-tgt --alias logs --from logs --to logs-v2`,
 		Flags: twinFlags(
+			// to-suffix / to-index shape the doc-count pairing only.
+			// Local:true keeps them off the `verify shadow` subcommand,
+			// where they have no meaning — source/target/--indices flow
+			// down as persistent flags, these two do not.
 			&cli.StringFlag{
 				Name:  "to-suffix",
+				Local: true,
 				Usage: "Append to each source index name to derive the target index (e.g. '-v2')",
 			},
 			&cli.StringFlag{
 				Name:  "to-index",
+				Local: true,
 				Usage: "Explicit target index name; only valid when --indices resolves to one source. Mirrors `migrate reindex --to-index`.",
 			},
 		),
 		Action:        runVerify,
 		ShellComplete: completion.ForFlags(twinCompleteSuggesters),
+		Commands: []*cli.Command{
+			shadowCommand(),
+		},
 	}
 }
 

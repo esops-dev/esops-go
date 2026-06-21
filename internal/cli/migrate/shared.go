@@ -131,6 +131,7 @@ func buildEndpoint(ctx context.Context, cmd *cli.Command, cfg config.Config, nam
 		Mappings:         c.Mappings,
 		Whitelist:        c.RemoteReindex,
 		DocCount:         c.DocCount,
+		Search:           c.Search,
 		Reindex:          c.Reindex,
 		TasksCancel:      c.TasksCancel,
 		Health:           c.Health,
