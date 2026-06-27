@@ -133,6 +133,20 @@ func initLogger(ctx context.Context, cmd *cli.Command) (context.Context, error) 
 	level := resolveSetting(cmd, "log-level", defaults.LogLevel, "info")
 	format := resolveSetting(cmd, "log-format", defaults.LogFormat, defaultLogFormat())
 	logFile := resolveSetting(cmd, "log-file", defaults.LogFile, "")
+	auditFile := resolveSetting(cmd, "audit-file", defaults.AuditFile, "")
+
+	// Shell completion must be free of filesystem side effects. urfave runs
+	// the Before chain during completion too, and the shell re-invokes esops
+	// on every TAB-press (plus once per shell startup to source the script).
+	// Honouring a configured log_file/audit_file here would scatter files —
+	// classically a relative `./esops.log` — into every working directory the
+	// operator tab-completes in. Logs during completion have no audience, so
+	// keep them on stderr and leave auditing off.
+	if isCompletion(cmd) {
+		logFile = ""
+		auditFile = ""
+	}
+
 	if err := logging.Init(level, format, logFile); err != nil {
 		fmt.Fprintf(os.Stderr, "esops: warning: %v; falling back to default logger\n", err)
 		// Builtin fallback is guaranteed valid; a second failure would
@@ -144,9 +158,31 @@ func initLogger(ctx context.Context, cmd *cli.Command) (context.Context, error) 
 	// Auditing is initialised after the logger so any open-failure
 	// warnings go through the same sink. An empty path keeps it
 	// disabled; a broken path warns and proceeds without auditing.
-	auditFile := resolveSetting(cmd, "audit-file", defaults.AuditFile, "")
 	audit.Init(auditFile)
 	return ctx, nil
+}
+
+// isCompletion reports whether the current invocation exists only to
+// produce shell-completion output — either generating the completion
+// script (`esops completion <shell>`) or answering a single TAB-press
+// (the shell appends urfave's --generate-shell-completion sentinel as the
+// final argument). Both must stay free of filesystem side effects; see
+// initLogger.
+//
+// The TAB-press sentinel is read from os.Args, not the parsed command:
+// urfave strips --generate-shell-completion before the Before chain runs,
+// so cmd never sees it, but the raw process arguments still carry it
+// (main.go calls Run(ctx, os.Args)). The sentinel string is urfave's
+// stable completion contract
+// — it's baked verbatim into every generated completion script — so
+// matching on it here is safe despite the constant being unexported.
+func isCompletion(cmd *cli.Command) bool {
+	for _, a := range os.Args {
+		if a == "--generate-shell-completion" {
+			return true
+		}
+	}
+	return cmd.Args().First() == "completion"
 }
 
 // readDefaults loads the config file quietly for the Before hook, so
