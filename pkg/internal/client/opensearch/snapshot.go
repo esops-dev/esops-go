@@ -96,7 +96,7 @@ func (c *Client) Repositories(ctx context.Context, filter types.SnapshotReposito
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}
@@ -223,7 +223,7 @@ func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, fil
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}
@@ -244,7 +244,7 @@ func (c *Client) snapshotsForRepo(ctx context.Context, repo, pattern string, fil
 
 // Recovery implements client.RecoveryInspector via
 // GET /<indices>/_recovery. Same shape as Elasticsearch; the OS typed
-// client doesn't expose the endpoint cleanly so we go through Perform.
+// client doesn't expose the endpoint cleanly so we go through Stream.
 func (c *Client) Recovery(ctx context.Context, req types.RecoveryRequest) (types.RecoveryReport, error) {
 	q := url.Values{}
 	if req.ActiveOnly {
@@ -263,7 +263,7 @@ func (c *Client) Recovery(ctx context.Context, req types.RecoveryRequest) (types
 	if err != nil {
 		return types.RecoveryReport{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.RecoveryReport{}, clientutil.ClassifyTransport(err)
 	}
@@ -297,7 +297,7 @@ func (c *Client) SnapshotStatus(ctx context.Context, req types.SnapshotStatusReq
 		return types.SnapshotStatus{}, err
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotStatus{}, clientutil.ClassifyTransport(err)
 	}
@@ -355,7 +355,7 @@ func (c *Client) CreateSnapshot(ctx context.Context, req types.SnapshotCreateReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotCreateResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -384,7 +384,7 @@ func (c *Client) VerifyRepository(ctx context.Context, req types.SnapshotVerifyR
 		return types.SnapshotVerifyResult{}, err
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotVerifyResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -414,7 +414,7 @@ func (c *Client) AnalyzeRepository(ctx context.Context, req types.SnapshotAnalyz
 		return types.SnapshotAnalyzeResult{}, err
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotAnalyzeResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -470,7 +470,7 @@ func (c *Client) RestoreSnapshot(ctx context.Context, req types.SnapshotRestoreR
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotRestoreResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -505,7 +505,7 @@ func (c *Client) DeleteSnapshots(ctx context.Context, req types.SnapshotDeleteRe
 		return types.SnapshotDeleteResult{}, err
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotDeleteResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -556,7 +556,7 @@ func (c *Client) RegisterRepository(ctx context.Context, req types.SnapshotRepos
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotRepositoryRegisterResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -590,7 +590,7 @@ func (c *Client) DeregisterRepository(ctx context.Context, req types.SnapshotRep
 		return types.SnapshotRepositoryDeregisterResult{}, err
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SnapshotRepositoryDeregisterResult{}, clientutil.ClassifyTransport(err)
 	}

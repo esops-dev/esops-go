@@ -127,7 +127,7 @@ func (c *Client) fetchTransformsPage(ctx context.Context, from, size int) ([]typ
 	if err != nil {
 		return nil, 0, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, 0, clientutil.ClassifyTransport(err)
 	}
@@ -165,7 +165,7 @@ func (c *Client) GetTransform(ctx context.Context, name string) (types.Transform
 	if err != nil {
 		return types.Transform{}, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return types.Transform{}, clientutil.ClassifyTransport(err)
 	}
@@ -254,7 +254,7 @@ func (c *Client) fetchOSTransformStats(ctx context.Context, name string) (types.
 	if err != nil {
 		return types.TransformStats{}, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return types.TransformStats{}, clientutil.ClassifyTransport(err)
 	}
@@ -294,7 +294,7 @@ func (c *Client) PreviewTransform(ctx context.Context, req types.TransformPrevie
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.TransformPreviewResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -327,7 +327,7 @@ func (c *Client) ApplyTransform(ctx context.Context, req types.TransformApplyReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.TransformApplyResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -365,7 +365,7 @@ func (c *Client) DeleteTransform(ctx context.Context, req types.TransformDeleteR
 	if err != nil {
 		return types.TransformDeleteResult{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.TransformDeleteResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -394,7 +394,7 @@ func (c *Client) StartTransform(ctx context.Context, req types.TransformStartReq
 	if err != nil {
 		return types.TransformStartResult{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.TransformStartResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -426,7 +426,7 @@ func (c *Client) StopTransform(ctx context.Context, req types.TransformStopReque
 	if err != nil {
 		return types.TransformStopResult{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.TransformStopResult{}, clientutil.ClassifyTransport(err)
 	}

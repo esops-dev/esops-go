@@ -56,7 +56,7 @@ func (c *Client) ListPipelines(ctx context.Context, names []string) ([]types.Ing
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}

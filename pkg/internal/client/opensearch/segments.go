@@ -16,7 +16,7 @@ import (
 
 // Segments implements client.SegmentsInspector via
 // GET /<indices>/_segments. Same shape as Elasticsearch; the OS typed
-// client doesn't expose the endpoint cleanly so we go through Perform.
+// client doesn't expose the endpoint cleanly so we go through Stream.
 func (c *Client) Segments(ctx context.Context, req types.SegmentsRequest) (types.SegmentsReport, error) {
 	indices := strings.TrimSpace(req.Indices)
 	if indices == "" {
@@ -28,7 +28,7 @@ func (c *Client) Segments(ctx context.Context, req types.SegmentsRequest) (types
 	if err != nil {
 		return types.SegmentsReport{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SegmentsReport{}, clientutil.ClassifyTransport(err)
 	}

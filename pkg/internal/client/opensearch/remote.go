@@ -38,7 +38,7 @@ func (c *Client) RemoteClusters(ctx context.Context) ([]types.RemoteCluster, err
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}

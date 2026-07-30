@@ -92,7 +92,7 @@ func (c *Client) fetchFieldCaps(ctx context.Context, req types.FieldCapsRequest)
 		return fieldCapsWire{}, err
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return fieldCapsWire{}, clientutil.ClassifyTransport(err)
 	}
@@ -280,7 +280,7 @@ func (c *Client) cardinalityOne(ctx context.Context, index, field string, precis
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.FieldCardinality{}, clientutil.ClassifyTransport(err)
 	}
