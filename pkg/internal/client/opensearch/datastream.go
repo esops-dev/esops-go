@@ -56,7 +56,7 @@ func (c *Client) DataStreams(ctx context.Context, filter types.DataStreamFilter)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}
@@ -131,7 +131,7 @@ func (c *Client) RolloverDataStream(ctx context.Context, req types.DataStreamRol
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.DataStreamRolloverResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -197,7 +197,7 @@ func (c *Client) ModifyDataStream(ctx context.Context, req types.DataStreamModif
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.DataStreamModifyResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -242,7 +242,7 @@ func (c *Client) DeleteDataStream(ctx context.Context, req types.DataStreamDelet
 	if err != nil {
 		return types.DataStreamDeleteResult{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.DataStreamDeleteResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -321,7 +321,7 @@ func (c *Client) DataStreamStats(ctx context.Context, req types.DataStreamStatsR
 	if err != nil {
 		return types.DataStreamStatsReport{}, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.DataStreamStatsReport{}, clientutil.ClassifyTransport(err)
 	}

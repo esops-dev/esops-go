@@ -170,7 +170,7 @@ func (c *Client) fetchRestoreConventionEvents(ctx context.Context, index string)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}

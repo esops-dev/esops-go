@@ -291,7 +291,7 @@ func (c *Client) IndicesStream(ctx context.Context, filter types.IndexFilter, yi
 	if err != nil {
 		return err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return clientutil.ClassifyTransport(err)
 	}
@@ -692,7 +692,7 @@ func (c *Client) Reroute(ctx context.Context, req types.RerouteRequest) (types.R
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.RerouteResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -1294,7 +1294,7 @@ func (c *Client) doSecurityGET(ctx context.Context, path string) ([]byte, int, e
 	if err != nil {
 		return nil, 0, err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, 0, clientutil.ClassifyTransport(err)
 	}
@@ -1852,7 +1852,7 @@ func (c *Client) AliasesStream(ctx context.Context, filter types.AliasFilter, yi
 	if err != nil {
 		return err
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return clientutil.ClassifyTransport(err)
 	}
@@ -2043,7 +2043,7 @@ func (c *Client) GetSettings(ctx context.Context, req types.IndexSettingsGetRequ
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}
@@ -2117,7 +2117,7 @@ func (c *Client) GetSettingsStream(ctx context.Context, req types.IndexSettingsG
 	if err != nil {
 		return err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return clientutil.ClassifyTransport(err)
 	}
@@ -2214,33 +2214,41 @@ type indexTemplateGetWire struct {
 
 // GetTemplates implements client.IndexTemplateInspector via
 // GET /_index_template/<names>. Empty names asks the cluster for every
-// template. Mirrors the ES adapter shape.
+// template; a non-empty slice is joined with commas, which the cluster
+// honours as a multi-name lookup. Mirrors the ES adapter shape.
+//
+// The path is built here rather than through the typed
+// IndexTemplateGetReq: that request takes a single name and
+// percent-encodes it as one path segment, which would turn a
+// comma-joined list into a single literal name and drop multi-name
+// lookups that the ES adapter still supports.
 func (c *Client) GetTemplates(ctx context.Context, names []string) ([]types.IndexTemplate, error) {
-	osReq := &osapi.IndexTemplateGetReq{
-		IndexTemplates: names,
-	}
-	resp, err := c.api.IndexTemplate.Get(ctx, osReq)
-	if err != nil {
-		status := 0
-		if resp != nil {
-			status = statusOf(resp.Inspect().Response)
-		}
-		return nil, classifyResponseErr(err, status)
+	path := "/_index_template"
+	if joined := strings.Join(names, ","); joined != "" {
+		path += "/" + joined
 	}
 
-	// Bypass the typed response (which exposes the inner Template/
-	// DataStream blocks as json.RawMessage) and re-decode the raw body
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.api.Client.Stream(req)
+	if err != nil {
+		return nil, clientutil.ClassifyTransport(err)
+	}
+	defer func() { _ = raw.Body.Close() }()
+
+	// Read the raw body rather than decoding a typed response (which
+	// exposes the inner Template/DataStream blocks as json.RawMessage)
 	// into our neutral shape. This keeps the public types upstream-free
 	// and lets us share the renderer with the ES adapter.
-	raw := resp.Inspect().Response
-	if raw == nil || raw.Body == nil {
-		return nil, errors.New("opensearch get_index_template: empty response body")
-	}
 	body, err := io.ReadAll(clientutil.NewBoundedReader(raw.Body, clientutil.DefaultMaxResponseBytes, "get_index_template"))
 	if err != nil {
 		return nil, errors.Join(errors.New("reading get_index_template response"), err)
 	}
-	defer func() { _ = raw.Body.Close() }()
+	if err := clientutil.ClassifyStatus("get_index_template", raw.StatusCode, body); err != nil {
+		return nil, err
+	}
 
 	var wire indexTemplateGetWire
 	if err := json.Unmarshal(body, &wire); err != nil {

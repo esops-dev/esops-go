@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"context"
@@ -41,8 +42,9 @@ func (c *Client) GetMappings(ctx context.Context, filter types.MappingFilter) ([
 		return nil, classifyResponseErr(err, status)
 	}
 
-	out := make([]types.IndexMapping, 0, len(resp.Indices))
-	for name, entry := range resp.Indices {
+	indices := resp.GetIndices()
+	out := make([]types.IndexMapping, 0, len(indices))
+	for name, entry := range indices {
 		var mb reindexwire.MappingsBlock
 		if len(entry.Mappings) > 0 {
 			if err := json.Unmarshal(entry.Mappings, &mb); err != nil {
@@ -103,7 +105,7 @@ func (c *Client) RemoteReindexWhitelist(ctx context.Context) (types.RemoteReinde
 // Count implements client.DocCounter via POST /<index>/_count. The OS
 // typed Indices.Count helper drops the cluster's `_shards` block from
 // its response struct, so the adapter falls back to the same path the
-// ES adapter uses (Perform on the underlying transport) and decodes the
+// ES adapter uses (Stream on the underlying transport) and decodes the
 // envelope directly. Sharing the wire shape with the ES side keeps a
 // captured CountResult identical across dialects.
 func (c *Client) Count(ctx context.Context, req types.CountRequest) (types.CountResult, error) {
@@ -116,13 +118,13 @@ func (c *Client) Count(ctx context.Context, req types.CountRequest) (types.Count
 		Indices: req.Indices,
 		Params:  params,
 	}
-	httpReq, err := osReq.GetRequest()
+	httpReq, err := osReq.GetRequest(http.MethodPost)
 	if err != nil {
 		return types.CountResult{}, fmt.Errorf("opensearch count: build request: %w", err)
 	}
 	httpReq = httpReq.WithContext(ctx)
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.CountResult{}, clientutil.ClassifyTransport(err)
 	}
@@ -203,13 +205,13 @@ func (c *Client) ReindexTaskStatus(ctx context.Context, taskID string) (types.Re
 		return types.ReindexTaskStatus{}, esopsclient.UsageError("reindex task status: task_id is required")
 	}
 	osReq := osapi.TasksGetReq{TaskID: taskID}
-	httpReq, err := osReq.GetRequest()
+	httpReq, err := osReq.GetRequest(http.MethodGet)
 	if err != nil {
 		return types.ReindexTaskStatus{}, fmt.Errorf("opensearch reindex task status: build request: %w", err)
 	}
 	httpReq = httpReq.WithContext(ctx)
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.ReindexTaskStatus{}, clientutil.ClassifyTransport(err)
 	}

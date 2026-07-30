@@ -335,7 +335,7 @@ func (c *Client) ExplainPolicyStream(ctx context.Context, req types.ISMExplainRe
 	if err != nil {
 		return err
 	}
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return clientutil.ClassifyTransport(err)
 	}
@@ -442,7 +442,7 @@ func (c *Client) doISMRequest(ctx context.Context, method, path string, body io.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.api.Client.Perform(req)
+	resp, err := c.api.Client.Stream(req)
 	if err != nil {
 		return nil, 0, clientutil.ClassifyTransport(err)
 	}

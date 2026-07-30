@@ -21,7 +21,7 @@ import (
 // on client.SearchExecutor for why this is a separate capability from
 // the deliberately narrow DocumentInspector.
 //
-// Wire path: POST /<indices>/_search through c.api.Client.Perform. The
+// Wire path: POST /<indices>/_search through c.api.Client.Stream. The
 // index pattern is joined with commas without per-segment escaping so a
 // wildcard like `logs-*` reaches the cluster intact — the same join the
 // upstream opensearch-go SearchReq performs. Size, _source=false and
@@ -80,7 +80,7 @@ func (c *Client) Search(ctx context.Context, req types.SearchRequest) (types.Sea
 		httpReq.URL.RawQuery = q.Encode()
 	}
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return types.SearchResult{}, clientutil.ClassifyTransport(err)
 	}

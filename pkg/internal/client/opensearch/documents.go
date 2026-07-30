@@ -24,7 +24,7 @@ import (
 //
 // Wire path mirrors the ES adapter exactly: POST /<index>/_search
 // with size=10000 and track_total_hits=false. Implementation goes
-// through c.api.Client.Perform because the typed opensearch-go
+// through c.api.Client.Stream because the typed opensearch-go
 // SearchHit drops _version, and surfacing it on types.Document is
 // part of the contract.
 
@@ -112,7 +112,7 @@ func (c *Client) fetchDocumentHits(ctx context.Context, req types.DocumentListRe
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.api.Client.Perform(httpReq)
+	resp, err := c.api.Client.Stream(httpReq)
 	if err != nil {
 		return nil, clientutil.ClassifyTransport(err)
 	}
