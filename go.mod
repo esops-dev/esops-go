@@ -10,7 +10,7 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/v2 v2.3.6
 	github.com/opensearch-project/opensearch-go/v4 v4.7.3
-	github.com/urfave/cli/v3 v3.10.1
+	github.com/urfave/cli/v3 v3.14.0
 	github.com/zalando/go-keyring v0.2.8
 	go.yaml.in/yaml/v3 v3.0.5
 )
