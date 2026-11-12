@@ -118,7 +118,7 @@ func buildTLSConfig(a config.Auth, t config.TLS) (*tls.Config, error) {
 	}
 	conf := &tls.Config{MinVersion: tls.VersionTLS12}
 	if t.Insecure {
-		conf.InsecureSkipVerify = true
+		conf.InsecureSkipVerify = true // #nosec G402 -- operator opt-in via --insecure / tls.insecure; documented last resort
 	}
 	if t.CACert != "" {
 		pem, err := os.ReadFile(t.CACert)
