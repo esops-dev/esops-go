@@ -1686,8 +1686,11 @@ func snippet(body []byte) string {
 //
 //   - "Security must be explicitly enabled" / "security is not enabled"
 //     (returned by older/licensed paths when the feature exists but is off)
-//   - "no handler found for uri [/_security/..." (ES 9.3 with
+//   - "no handler found for uri [/_security/..." (ES 9.x with
 //     xpack.security.enabled=false — the handler isn't registered at all)
+//   - "Incorrect HTTP method for uri [/_security/..." (ES 7.17 / 8.x with
+//     xpack.security.enabled=false — a 405 because only the POST route
+//     on that path stays registered, so GET listings are rejected)
 //
 // Matched case-insensitively so minor version tweaks don't regress the
 // detection. The classifier is intentionally conservative: on a match we
@@ -1702,6 +1705,8 @@ func isSecurityDisabledBody(body []byte) bool {
 	case strings.Contains(lower, "security is not enabled"):
 		return true
 	case strings.Contains(lower, "no handler found") && strings.Contains(lower, "/_security/"):
+		return true
+	case strings.Contains(lower, "incorrect http method") && strings.Contains(lower, "/_security/"):
 		return true
 	case strings.Contains(lower, "security_exception") && strings.Contains(lower, "disabled"):
 		return true

@@ -259,6 +259,31 @@ func TestIsSecurityDisabledBody_recognisesNoHandlerFoundOnSecurityPath(t *testin
 	}
 }
 
+func TestIsSecurityDisabledBody_recognisesIncorrectMethodOnSecurityPath(t *testing.T) {
+	// ES 7.17 / 8.x with xpack.security.enabled=false answer GET listings
+	// on /_security/api_key and /_security/service with a 405: only the
+	// POST route on those paths stays registered. Both must fold into
+	// ErrUnsupported like the 9.x "no handler found" shape.
+	bodies := []string{
+		`{"error":"Incorrect HTTP method for uri [/_security/api_key?owner=false] and method [GET], allowed: [POST]","status":405}`,
+		`{"error":"Incorrect HTTP method for uri [/_security/service] and method [GET], allowed: [POST]","status":405}`,
+	}
+	for _, b := range bodies {
+		if !isSecurityDisabledBody([]byte(b)) {
+			t.Errorf("expected isSecurityDisabledBody=true for %s", b)
+		}
+	}
+}
+
+func TestIsSecurityDisabledBody_ignoresIncorrectMethodOffSecurityPath(t *testing.T) {
+	// A 405 on a non-security path is a genuine client bug, not a
+	// disabled feature; it must keep surfacing as a generic error.
+	body := []byte(`{"error":"Incorrect HTTP method for uri [/_cluster/settings] and method [POST], allowed: [GET, PUT]","status":405}`)
+	if isSecurityDisabledBody(body) {
+		t.Errorf("expected isSecurityDisabledBody=false for a non-security 405")
+	}
+}
+
 func TestServiceCredentialsWire_emptySectionsDecode(t *testing.T) {
 	// A service with no credentials returns empty maps under both
 	// sections — the implementation must accept this without erroring
